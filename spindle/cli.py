@@ -14,6 +14,7 @@ from .capture import capture_chunk, is_silence
 from .fingerprint import identify
 from .scrobbler import Scrobbler, canonicalize_track
 from .display import Display
+from .spotify import SpotifyClient
 
 logger = logging.getLogger("spindle")
 
@@ -82,6 +83,14 @@ def main():
         scrobbler = Scrobbler(cfg.lastfm, cfg.scrobble)
         scrobbler.connect()
 
+    # Spotify client for canonical track names
+    spotify = None
+    if cfg.spotify.client_id and cfg.spotify.client_secret:
+        spotify = SpotifyClient(cfg.spotify)
+        logger.info("Spotify lookup enabled")
+    else:
+        logger.info("Spotify lookup disabled (no credentials)")
+
     # Init display
     display = Display(enabled=cfg.display.enabled)
     display.init()
@@ -118,6 +127,23 @@ def main():
                 track = identify(wav_path, cfg.acoustid, cfg.fingerprint)
                 if not track:
                     continue
+
+                # Spotify canonical lookup (artist + title normalization)
+                if spotify:
+                    canonical = spotify.lookup(track.artist, track.title)
+                    if canonical:
+                        # Keep album from original if Spotify didn't return one
+                        if not canonical.album and track.album:
+                            canonical = type(canonical)(
+                                title=canonical.title,
+                                artist=canonical.artist,
+                                album=track.album,
+                                duration=canonical.duration or track.duration,
+                                mbid=track.mbid,
+                                source=canonical.source,
+                                confidence=canonical.confidence,
+                            )
+                        track = canonical
 
                 # Update display
                 display.show_track(track)

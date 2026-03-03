@@ -4,6 +4,10 @@
 acoustid:
   api_key: "your-acoustid-api-key"
 
+spotify:
+  client_id: "your-spotify-client-id"
+  client_secret: "your-spotify-client-secret"
+
 lastfm:
   api_key: "your-lastfm-api-key"
   api_secret: "your-lastfm-shared-secret"

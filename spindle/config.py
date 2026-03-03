@@ -65,9 +65,16 @@ class DisplayConfig:
 
 
 @dataclass
+class SpotifyConfig:
+    client_id: str = ""
+    client_secret: str = ""
+
+
+@dataclass
 class SpindleConfig:
     acoustid: AcoustIDConfig = field(default_factory=AcoustIDConfig)
     lastfm: LastFMConfig = field(default_factory=LastFMConfig)
+    spotify: SpotifyConfig = field(default_factory=SpotifyConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     fingerprint: FingerprintConfig = field(default_factory=FingerprintConfig)
     scrobble: ScrobbleConfig = field(default_factory=ScrobbleConfig)
@@ -100,6 +107,8 @@ def _parse_config(raw: dict) -> SpindleConfig:
         cfg.acoustid = AcoustIDConfig(**raw["acoustid"])
     if "lastfm" in raw:
         cfg.lastfm = LastFMConfig(**raw["lastfm"])
+    if "spotify" in raw:
+        cfg.spotify = SpotifyConfig(**raw["spotify"])
     if "audio" in raw:
         cfg.audio = AudioConfig(**raw["audio"])
     if "fingerprint" in raw:
