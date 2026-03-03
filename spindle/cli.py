@@ -11,7 +11,7 @@ from pathlib import Path
 from . import __version__
 from .config import load_config
 from .capture import capture_chunk, is_silence
-from .fingerprint import identify
+from .fingerprint import identify, TrackInfo
 from .scrobbler import Scrobbler, canonicalize_track
 from .display import Display
 from .spotify import SpotifyClient
@@ -110,6 +110,32 @@ def main():
     if args.dry_run:
         logger.info("DRY RUN — will identify but not scrobble")
 
+    def track_key(t) -> str:
+        return f"{t.artist.lower()} - {t.title.lower()}"
+
+    def should_scrobble(t, start: float) -> bool:
+        """True if the track has played long enough to scrobble."""
+        played = time.time() - start
+        if played < cfg.scrobble.min_play_seconds:
+            return False
+        if t.duration and played < t.duration * cfg.scrobble.min_play_fraction:
+            return False
+        return True
+
+    def finalize(t, start: float) -> None:
+        """Scrobble current track if it played long enough."""
+        if not t or args.dry_run:
+            return
+        if should_scrobble(t, start):
+            scrobbler.scrobble(t, timestamp=int(start))
+        else:
+            played = time.time() - start
+            logger.debug("Track too short to scrobble: %.0fs played", played)
+
+    # Track state
+    current_track = None
+    track_start = 0.0
+
     # Main loop
     consecutive_silence = 0
     while _running:
@@ -118,11 +144,13 @@ def main():
             wav_path = capture_chunk(cfg.audio)
 
             try:
-                # Check for silence
+                # Silence detection
                 if is_silence(wav_path, cfg.silence):
                     consecutive_silence += 1
                     if consecutive_silence == 1:
                         logger.info("Silence detected — waiting for music")
+                        finalize(current_track, track_start)
+                        current_track = None
                         display.show_idle()
                     continue
 
@@ -133,13 +161,12 @@ def main():
                 if not track:
                     continue
 
-                # Spotify canonical lookup (artist + title normalization)
+                # Spotify canonical lookup
                 if spotify:
                     canonical = spotify.lookup(track.artist, track.title)
                     if canonical:
-                        # Keep album from original if Spotify didn't return one
                         if not canonical.album and track.album:
-                            canonical = type(canonical)(
+                            canonical = TrackInfo(
                                 title=canonical.title,
                                 artist=canonical.artist,
                                 album=track.album,
@@ -159,31 +186,39 @@ def main():
                         f"{f' [{track.album}]' if track.album else ''}"
                         f" (via {track.source}, {track.confidence:.0%})"
                     )
-
                     if args.canonicalize_preview and lastfm_read_network is not None:
                         canon = canonicalize_track(track, lastfm_read_network)
                         if canon.artist != track.artist or canon.title != track.title:
                             line += f"\n   ↳ canonical: {canon.artist} — {canon.title}"
                         if canon.duration and not track.duration:
                             line += f"\n   ↳ duration: {canon.duration}s"
-
                     print(line)
                     continue
 
-                # Scrobble
-                scrobbler.update_now_playing(track)
-                scrobbler.scrobble(track)
+                # Track change detection
+                if current_track is None or track_key(track) != track_key(current_track):
+                    # Finalize previous track
+                    finalize(current_track, track_start)
+                    # Start new track
+                    current_track = track
+                    track_start = time.time()
+                    logger.info("Now playing: %s — %s", track.artist, track.title)
+                    scrobbler.update_now_playing(track)
+                else:
+                    # Same track still playing — just refresh now playing
+                    scrobbler.update_now_playing(track)
 
             finally:
-                # Clean up temp file
                 wav_path.unlink(missing_ok=True)
 
         except KeyboardInterrupt:
             break
         except Exception as e:
             logger.error("Error in main loop: %s", e, exc_info=True)
-            time.sleep(5)  # back off on errors
+            time.sleep(5)
 
+    # Finalize on exit
+    finalize(current_track, track_start)
     display.clear()
     logger.info("Spindle stopped")
 
