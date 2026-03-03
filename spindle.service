@@ -1,0 +1,21 @@
+[Unit]
+Description=Spindle — vinyl scrobbler
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=luka
+Group=luka
+WorkingDirectory=/home/luka/spindle
+ExecStart=/home/luka/spindle/venv/bin/spindle -v
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Env
+Environment=HOME=/home/luka
+
+[Install]
+WantedBy=multi-user.target
