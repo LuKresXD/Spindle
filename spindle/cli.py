@@ -12,7 +12,7 @@ from . import __version__
 from .config import load_config
 from .capture import capture_chunk, is_silence
 from .fingerprint import identify
-from .scrobbler import Scrobbler
+from .scrobbler import Scrobbler, canonicalize_track
 from .display import Display
 
 logger = logging.getLogger("spindle")
@@ -35,6 +35,11 @@ def main():
     parser.add_argument("-c", "--config", type=Path, help="Path to config.yaml")
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     parser.add_argument("--dry-run", action="store_true", help="Identify only, don't scrobble")
+    parser.add_argument(
+        "--canonicalize-preview",
+        action="store_true",
+        help="In dry-run: also query Last.fm corrections and show the canonical artist/title",
+    )
     parser.add_argument("--version", action="version", version=f"spindle {__version__}")
     args = parser.parse_args()
 
@@ -54,8 +59,22 @@ def main():
         logger.error("AcoustID API key not set — check config.yaml")
         sys.exit(1)
 
-    # Connect to Last.fm (unless dry run)
+    # Last.fm network
     scrobbler = None
+    lastfm_read_network = None
+
+    if args.dry_run and args.canonicalize_preview:
+        if not cfg.lastfm.api_key or not cfg.lastfm.api_secret:
+            logger.error("Last.fm api_key/api_secret required for --canonicalize-preview")
+            sys.exit(1)
+        import pylast
+
+        lastfm_read_network = pylast.LastFMNetwork(
+            api_key=cfg.lastfm.api_key,
+            api_secret=cfg.lastfm.api_secret,
+        )
+
+    # Connect to Last.fm (unless dry run)
     if not args.dry_run:
         if not cfg.lastfm.api_key or not cfg.lastfm.username:
             logger.error("Last.fm credentials not set — check config.yaml")
@@ -104,9 +123,20 @@ def main():
                 display.show_track(track)
 
                 if args.dry_run:
-                    print(f"🎵 {track.artist} — {track.title}"
-                          f"{f' [{track.album}]' if track.album else ''}"
-                          f" (via {track.source}, {track.confidence:.0%})")
+                    line = (
+                        f"🎵 {track.artist} — {track.title}"
+                        f"{f' [{track.album}]' if track.album else ''}"
+                        f" (via {track.source}, {track.confidence:.0%})"
+                    )
+
+                    if args.canonicalize_preview and lastfm_read_network is not None:
+                        canon = canonicalize_track(track, lastfm_read_network)
+                        if canon.artist != track.artist or canon.title != track.title:
+                            line += f"\n   ↳ canonical: {canon.artist} — {canon.title}"
+                        if canon.duration and not track.duration:
+                            line += f"\n   ↳ duration: {canon.duration}s"
+
+                    print(line)
                     continue
 
                 # Scrobble

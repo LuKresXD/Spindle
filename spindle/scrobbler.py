@@ -10,6 +10,62 @@ import pylast
 from .config import LastFMConfig, ScrobbleConfig
 from .fingerprint import TrackInfo
 
+
+def canonicalize_track(track: TrackInfo, network: pylast.LastFMNetwork) -> TrackInfo:
+    """Canonicalize artist/title using Last.fm corrections + proper caps + duration.
+
+    Safe for read-only networks (no username/password needed).
+    """
+    try:
+        # Correct artist spelling
+        try:
+            artist_obj = network.get_artist(track.artist)
+            corrected_artist = artist_obj.get_correction() or track.artist
+        except Exception:
+            corrected_artist = track.artist
+
+        title = track.title
+        duration = track.duration
+
+        t = pylast.Track(corrected_artist, title, network)
+
+        # Correct title spelling
+        try:
+            title = t.get_correction() or title
+        except Exception:
+            pass
+
+        # Proper capitalization
+        try:
+            title = t.get_title(properly_capitalized=True) or title
+        except Exception:
+            pass
+
+        # Duration in ms
+        if not duration:
+            try:
+                dur_ms = t.get_duration()
+                if isinstance(dur_ms, int) and dur_ms > 0:
+                    duration = int(dur_ms / 1000)
+            except Exception:
+                pass
+
+        if corrected_artist != track.artist or title != track.title or duration != track.duration:
+            return TrackInfo(
+                title=title,
+                artist=corrected_artist,
+                album=track.album,
+                duration=duration,
+                mbid=track.mbid,
+                source=track.source,
+                confidence=track.confidence,
+            )
+
+        return track
+
+    except Exception:
+        return track
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,53 +170,7 @@ class Scrobbler:
         if not self.network:
             return track
 
-        try:
-            # Correct artist spelling
-            artist_obj = self.network.get_artist(track.artist)
-            corrected_artist = artist_obj.get_correction() or track.artist
-        except Exception:
-            corrected_artist = track.artist
-
-        title = track.title
-        duration = track.duration
-
-        try:
-            t = pylast.Track(corrected_artist, title, self.network)
-
-            # Correct title spelling (returns corrected title string or None)
-            corrected_title = t.get_correction() or title
-            title = corrected_title
-
-            # Proper capitalization
-            try:
-                title = t.get_title(properly_capitalized=True) or title
-            except Exception:
-                pass
-
-            # Duration in ms
-            if not duration:
-                try:
-                    dur_ms = t.get_duration()
-                    if isinstance(dur_ms, int) and dur_ms > 0:
-                        duration = int(dur_ms / 1000)
-                except Exception:
-                    pass
-
-        except Exception:
-            pass
-
-        if corrected_artist != track.artist or title != track.title or duration != track.duration:
-            return TrackInfo(
-                title=title,
-                artist=corrected_artist,
-                album=track.album,
-                duration=duration,
-                mbid=track.mbid,
-                source=track.source,
-                confidence=track.confidence,
-            )
-
-        return track
+        return canonicalize_track(track, self.network)
 
     @staticmethod
     def hash_password(password: str) -> str:
