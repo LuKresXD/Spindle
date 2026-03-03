@@ -17,7 +17,7 @@ lastfm:
 audio:
   device: "plughw:CARD=Device,DEV=0"  # ALSA device
   sample_rate: 44100
-  channels: 1
+  channels: 2
   chunk_duration: 25  # seconds per fingerprint chunk
 
 fingerprint:

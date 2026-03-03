@@ -31,7 +31,7 @@ class LastFMConfig:
 class AudioConfig:
     device: str = "default"
     sample_rate: int = 44100
-    channels: int = 1
+    channels: int = 2
     chunk_duration: int = 25
 
 
