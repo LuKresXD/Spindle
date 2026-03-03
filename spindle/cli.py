@@ -135,6 +135,7 @@ def main():
     # Track state
     current_track = None
     track_start = 0.0
+    track_scrobbled = False
 
     # Main loop
     consecutive_silence = 0
@@ -149,8 +150,10 @@ def main():
                     consecutive_silence += 1
                     if consecutive_silence == 1:
                         logger.info("Silence detected — waiting for music")
-                        finalize(current_track, track_start)
+                        if current_track and not track_scrobbled:
+                            finalize(current_track, track_start)
                         current_track = None
+                        track_scrobbled = False
                         display.show_idle()
                     continue
 
@@ -197,15 +200,21 @@ def main():
 
                 # Track change detection
                 if current_track is None or track_key(track) != track_key(current_track):
-                    # Finalize previous track
-                    finalize(current_track, track_start)
+                    # Finalize previous track (scrobble if not already done)
+                    if current_track and not track_scrobbled:
+                        finalize(current_track, track_start)
                     # Start new track
                     current_track = track
                     track_start = time.time()
+                    track_scrobbled = False
                     logger.info("Now playing: %s — %s", track.artist, track.title)
                     scrobbler.update_now_playing(track)
                 else:
-                    # Same track still playing — just refresh now playing
+                    # Same track still playing
+                    # Scrobble once after meeting the play threshold
+                    if not track_scrobbled and should_scrobble(current_track, track_start):
+                        scrobbler.scrobble(current_track, timestamp=int(track_start))
+                        track_scrobbled = True
                     scrobbler.update_now_playing(track)
 
             finally:
@@ -218,7 +227,8 @@ def main():
             time.sleep(5)
 
     # Finalize on exit
-    finalize(current_track, track_start)
+    if current_track and not track_scrobbled:
+        finalize(current_track, track_start)
     display.clear()
     logger.info("Spindle stopped")
 
