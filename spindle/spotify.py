@@ -94,7 +94,7 @@ class SpotifyClient:
             query = f"track:{title} artist:{artist}"
             resp = requests.get(
                 SEARCH_URL,
-                params={"q": query, "type": "track", "limit": 5},
+                params={"q": query, "type": "track", "limit": "5"},
                 headers=self._headers(),
                 timeout=10,
             )

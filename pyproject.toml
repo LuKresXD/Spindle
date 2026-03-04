@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Vinyl scrobbler for Raspberry Pi — fingerprint what's playing and scrobble to Last.fm"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     { name = "LuKres", email = "me@lukres.dev" },
 ]

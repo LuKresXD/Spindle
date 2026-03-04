@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/LuKresXD/spindle/actions/workflows/ci.yml"><img src="https://github.com/LuKresXD/spindle/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/LuKresXD/spindle/blob/main/LICENSE"><img src="https://img.shields.io/github/license/LuKresXD/spindle" alt="License"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.9+-blue" alt="Python 3.9+"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10+-blue" alt="Python 3.10+"></a>
   <a href="https://www.last.fm/user/LuKresXD"><img src="https://img.shields.io/badge/Last.fm-scrobbling-red" alt="Last.fm"></a>
 </p>
 
