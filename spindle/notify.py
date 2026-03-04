@@ -84,6 +84,16 @@ class Notifier:
             return
         self._send(f"⚠️ Spindle: {_esc(message)}")
 
+    def track_advanced(self, artist: str, album: str, track_title: str,
+                       track_num: int, total_tracks: int) -> None:
+        """Notify when album-lock advances to next track."""
+        filled = round(track_num / total_tracks * 8)
+        bar = "▓" * filled + "░" * (8 - filled)
+        self._send(
+            f"⏭ {_esc(track_title)}\n"
+            f"{track_num}/{total_tracks} {bar}"
+        )
+
     def queue_flushed(self, count: int) -> None:
         """Notify when offline queue is flushed."""
         if count > 0:

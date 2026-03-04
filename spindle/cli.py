@@ -17,6 +17,8 @@ from .display import Display
 from .spotify import SpotifyClient
 from .albumlock import AlbumLock
 from .notify import Notifier
+from .history import ScrobbleHistory
+from .bot import SpindleBot
 
 logger = logging.getLogger("spindle")
 
@@ -116,6 +118,9 @@ def main():
     # --- Telegram notifications ---
     notifier = Notifier(cfg.telegram)
 
+    # --- Scrobble history ---
+    history = ScrobbleHistory()
+
     # --- Display ---
     display = Display(enabled=cfg.display.enabled)
     display.init()
@@ -127,6 +132,17 @@ def main():
 
     logger.info("Listening on device: %s", cfg.audio.device)
     logger.info("Chunk duration: %ds", cfg.audio.chunk_duration)
+    # --- Telegram bot (command handler) ---
+    bot = None
+    if cfg.telegram.bot_token and cfg.telegram.chat_id and not args.dry_run:
+        bot = SpindleBot(
+            bot_token=cfg.telegram.bot_token,
+            chat_id=cfg.telegram.chat_id,
+            album_lock=album_lock,
+            history=history,
+        )
+        bot.start()
+
     if args.dry_run:
         logger.info("DRY RUN — will identify but not scrobble")
     else:
@@ -150,6 +166,7 @@ def main():
     def do_scrobble(t: TrackInfo, timestamp: float, backfill: bool = False) -> None:
         if scrobbler and not args.dry_run:
             scrobbler.scrobble(t, timestamp=int(timestamp))
+            history.log(t, timestamp, source="backfill" if backfill else "live")
             notifier.track_scrobbled(t, is_backfill=backfill)
 
     def do_now_playing(t: TrackInfo) -> None:
@@ -238,7 +255,8 @@ def main():
                 #  ALBUM-LOCK: check timing advance
                 # ============================================================
                 if album_lock and album_lock.is_locked():
-                    for t, ts in album_lock.check_advance():
+                    advance_scrobbles = album_lock.check_advance()
+                    for t, ts in advance_scrobbles:
                         do_scrobble(t, ts, backfill=False)
 
                     # Sync display / now-playing with predicted track
@@ -248,6 +266,17 @@ def main():
                         track_scrobbled = True  # album-lock manages scrobbling
                         do_now_playing(predicted)
                         display.show_track(predicted)
+
+                        # Notify track advance
+                        if advance_scrobbles and album_lock.session:
+                            al = album_lock.session
+                            notifier.track_advanced(
+                                al.tracklist.artist,
+                                al.tracklist.album_name,
+                                predicted.title,
+                                al.current_index + 1,
+                                len(al.tracklist.tracks),
+                            )
 
                 # ============================================================
                 #  FINGERPRINT
@@ -368,6 +397,8 @@ def main():
             do_scrobble(t, ts)
     if current_track and not track_scrobbled:
         finalize_simple(current_track, track_start)
+    if bot:
+        bot.stop()
     display.clear()
     logger.info("Spindle stopped")
 
