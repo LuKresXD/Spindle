@@ -140,6 +140,7 @@ def main():
     current_track = None
     track_start = 0.0
     track_scrobbled = False
+    music_start_time = None  # when music first started after silence
 
     # --- Main loop ---
     consecutive_silence = 0
@@ -162,8 +163,14 @@ def main():
                                 do_scrobble(silence_track, track_start)
                         current_track = None
                         track_scrobbled = False
+                        music_start_time = None
                         display.show_idle()
                     continue
+
+                # First non-silence chunk after silence — mark music start
+                if consecutive_silence > 0 or music_start_time is None:
+                    music_start_time = time.time()
+                    logger.debug("Music started at %.0f", music_start_time)
 
                 consecutive_silence = 0
 
@@ -220,13 +227,14 @@ def main():
 
                 # --- Album lock ---
                 if album_lock and spotify_result and not args.dry_run:
-                    backfill = album_lock.on_track_identified(spotify_result)
+                    backfill = album_lock.on_track_identified(
+                        spotify_result, music_start_time=music_start_time
+                    )
                     if backfill:
-                        # Scrobble backfilled tracks
-                        for bf_track in backfill:
+                        for bf_track, bf_ts in backfill:
                             logger.info("Album-lock backfill: %s — %s",
                                         bf_track.artist, bf_track.title)
-                            do_scrobble(bf_track, time.time() - (bf_track.duration or 180))
+                            do_scrobble(bf_track, bf_ts)
 
                 # --- Display ---
                 display.show_track(track)
