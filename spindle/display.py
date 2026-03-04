@@ -42,31 +42,9 @@ def _find_font() -> Optional[str]:
     return None
 
 
-# 4×4 Bayer ordered-dithering matrix (centred around 0).
-# Breaks RGB565 colour banding into a fine crosshatch pattern.
-_BAYER_4 = np.array([
-    [ 0,  8,  2, 10],
-    [12,  4, 14,  6],
-    [ 3, 11,  1,  9],
-    [15,  7, 13,  5],
-], dtype=np.float32) / 16.0 - 0.5
-
-
 def _to_fb(img: Any) -> bytes:
-    """Convert PIL RGB → dithered RGB565 LE with ILI9486 inversion."""
-    arr = np.array(img.convert("RGB"), dtype=np.float32)
-    h, w = arr.shape[:2]
-
-    # Tile Bayer matrix across image dimensions
-    bayer = np.tile(_BAYER_4, (h // 4 + 1, w // 4 + 1))[:h, :w]
-
-    # Add dither noise scaled to each channel's quantisation step
-    # R/B: 5 bits → step ≈ 8.23,  G: 6 bits → step ≈ 4.05
-    arr[:, :, 0] += bayer * (255.0 / 31)
-    arr[:, :, 1] += bayer * (255.0 / 63)
-    arr[:, :, 2] += bayer * (255.0 / 31)
-
-    arr = np.clip(arr, 0, 255).astype(np.uint16)
+    """Convert PIL RGB → RGB565 LE with ILI9486 inversion."""
+    arr = np.array(img.convert("RGB"), dtype=np.uint16)
     r, g, b = arr[:, :, 0] >> 3, arr[:, :, 1] >> 2, arr[:, :, 2] >> 3
     return ((r << 11 | g << 5 | b) ^ 0xFFFF).astype("<u2").tobytes()
 
@@ -114,11 +92,11 @@ def _truncate(text: str, draw: Any, font: Any, max_w: int) -> str:
     return text
 
 
-def _shadow_text(draw: Any, x: int, y: int,
+def _stroke_text(draw: Any, x: int, y: int,
                  text: str, font: Any, fill: Any, **kw: Any) -> None:
-    """Draw text with a subtle drop shadow for readability over artwork."""
-    draw.text((x + 1, y + 1), text, fill=(0, 0, 0), font=font, **kw)
-    draw.text((x, y), text, fill=fill, font=font, **kw)
+    """Draw text with a solid black stroke for clean readability."""
+    draw.text((x, y), text, fill=fill, font=font,
+              stroke_width=2, stroke_fill=(0, 0, 0), **kw)
 
 
 class Display:
@@ -203,11 +181,11 @@ class Display:
         draw = ImageDraw.Draw(img)
         cx = WIDTH // 2
         cy = HEIGHT // 2 - 10
-        draw.text((cx, cy), "SPINDLE", fill=(200, 200, 200),
+        draw.text((cx, cy), "SPINDLE", fill=(240, 240, 240),
                   font=self._fonts["idle_big"], anchor="mm")
         draw.line([(cx - 50, cy + 24), (cx + 50, cy + 24)],
-                  fill=(40, 40, 40), width=1)
-        draw.text((cx, cy + 42), "Listening…", fill=(70, 70, 70),
+                  fill=(50, 50, 50), width=1)
+        draw.text((cx, cy + 42), "Listening…", fill=(100, 100, 100),
                   font=self._fonts["idle_small"], anchor="mm")
         return img
 
@@ -226,7 +204,7 @@ class Display:
                 pass
 
         # ── Gradient overlay (darken bottom for text) ────────────────
-        img = _apply_gradient(img, start_frac=0.30, end_opacity=0.06)
+        img = _apply_gradient(img, start_frac=0.25, end_opacity=0.03)
         draw = ImageDraw.Draw(img)
 
         pad = 18
@@ -239,17 +217,17 @@ class Display:
         if track.album:
             y -= 20
             txt = _truncate(track.album, draw, self._fonts["album"], max_w)
-            _shadow_text(draw, pad, y, txt, self._fonts["album"], (170, 170, 170))
+            _stroke_text(draw, pad, y, txt, self._fonts["album"], (170, 170, 170))
 
         # Title
         y -= 34
         txt = _truncate(track.title or "", draw, self._fonts["title"], max_w)
-        _shadow_text(draw, pad, y, txt, self._fonts["title"], (255, 255, 255))
+        _stroke_text(draw, pad, y, txt, self._fonts["title"], (255, 255, 255))
 
         # Artist
         y -= 26
         txt = _truncate(track.artist or "", draw, self._fonts["artist"], max_w)
-        _shadow_text(draw, pad, y, txt, self._fonts["artist"], (210, 210, 210))
+        _stroke_text(draw, pad, y, txt, self._fonts["artist"], (210, 210, 210))
 
         return img
 
