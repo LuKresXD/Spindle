@@ -32,6 +32,7 @@ class SpotifyTrack:
     track_number: int = 0
     disc_number: int = 1
     total_tracks: int = 0
+    album_art_url: str = ""  # URL of the best-fit album art image
 
 
 @dataclass
@@ -64,6 +65,7 @@ class SpotifyClient:
         self._token_expiry: float = 0
         self._album_cache: dict[str, AlbumTracklist] = {}
         self._lookup_cache: dict[str, Optional["SpotifyTrack"]] = {}
+        self._art_cache: dict[str, bytes] = {}  # url → image bytes
         self._backoff_until: float = 0  # rate limit backoff timestamp
 
     def _get_token(self) -> str:
@@ -154,6 +156,13 @@ class SpotifyClient:
                 confidence=1.0,
             )
 
+            # Pick album art URL closest to 300px (good fit for 280px display)
+            images = album_data.get("images", [])
+            art_url = ""
+            if images:
+                best_img = min(images, key=lambda i: abs(i.get("width", 0) - 300))
+                art_url = best_img.get("url", "")
+
             result = SpotifyTrack(
                 track=track_info,
                 album_id=album_id,
@@ -161,6 +170,7 @@ class SpotifyClient:
                 track_number=best.get("track_number", 0),
                 disc_number=best.get("disc_number", 1),
                 total_tracks=album_data.get("total_tracks", 0),
+                album_art_url=art_url,
             )
             self._lookup_cache[cache_key] = result
             return result
@@ -224,4 +234,21 @@ class SpotifyClient:
 
         except Exception as e:
             logger.warning("Failed to fetch album tracklist: %s", e)
+            return None
+
+    def fetch_art(self, url: str) -> Optional[bytes]:
+        """Download album art image bytes. Cached by URL."""
+        if not url:
+            return None
+        if url in self._art_cache:
+            return self._art_cache[url]
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.content
+            self._art_cache[url] = data
+            logger.debug("Fetched album art (%d bytes) from %s", len(data), url)
+            return data
+        except Exception as e:
+            logger.warning("Failed to fetch album art: %s", e)
             return None

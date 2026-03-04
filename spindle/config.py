@@ -61,7 +61,7 @@ class DisplayConfig:
     enabled: bool = False
     width: int = 480
     height: int = 320
-    spi_device: str = "/dev/spidev0.0"
+    fb_path: str = "/dev/fb0"
 
 
 @dataclass

@@ -7,6 +7,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from . import __version__
 from .config import load_config
@@ -126,7 +127,7 @@ def main():
     history = ScrobbleHistory()
 
     # --- Display ---
-    display = Display(enabled=cfg.display.enabled)
+    display = Display(enabled=cfg.display.enabled, fb_path=cfg.display.fb_path)
     display.init()
     display.show_idle()
 
@@ -191,6 +192,7 @@ def main():
     # ------------------------------------------------------------------ #
 
     current_track = None
+    current_art: Optional[bytes] = None
     track_start = 0.0
     track_scrobbled = False
     music_start_time = None
@@ -238,6 +240,7 @@ def main():
 
                         # Reset all state
                         current_track = None
+                        current_art = None
                         track_scrobbled = False
                         music_start_time = None
                         locked_chunk_counter = 0
@@ -267,7 +270,14 @@ def main():
                         current_track = predicted
                         track_scrobbled = True
                         do_now_playing(predicted)
-                        display.show_track(predicted)
+                        pos, dur = album_lock.get_elapsed() or (0.0, 0.0)
+                        al = album_lock.session
+                        display.show_track(
+                            predicted,
+                            cover_art=current_art,
+                            position_sec=pos,
+                            track_number=al.current_index + 1 if al else 0,
+                        )
 
                         if advance_scrobbles and album_lock.session:
                             al = album_lock.session
@@ -342,7 +352,14 @@ def main():
                 # ============================================================
                 #  DISPLAY
                 # ============================================================
-                display.show_track(track)
+                if spotify_result and spotify_result.album_art_url:
+                    current_art = spotify.fetch_art(spotify_result.album_art_url)
+                al_session = album_lock.session if album_lock else None
+                display.show_track(
+                    track,
+                    cover_art=current_art,
+                    track_number=al_session.current_index + 1 if al_session else 0,
+                )
 
                 # ============================================================
                 #  DRY RUN
