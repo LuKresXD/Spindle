@@ -7,6 +7,7 @@ and return Spotify's canonical artist + title format, e.g.:
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -105,7 +106,12 @@ class SpotifyClient:
             return None
 
         try:
-            query = f"track:{title} artist:{artist}"
+            # Strip "(feat. ...)" / "(ft. ...)" etc. — Spotify search chokes on them
+            clean_title = re.sub(
+                r'\s*[\(\[](feat\.?|ft\.?|featuring)\b[^\)\]]*[\)\]]',
+                '', title, flags=re.IGNORECASE,
+            ).strip() or title
+            query = f"track:{clean_title} artist:{artist}"
             resp = requests.get(
                 SEARCH_URL,
                 params={"q": query, "type": "track", "limit": "5"},

@@ -1,8 +1,7 @@
 """Spindle display driver — Waveshare 3.5" IPS LCD (480×320, /dev/fb0).
 
-Renders album art + track info using Pillow, writes RGB565 to the framebuffer.
-The ILI9486 driver on this display has colour inversion active (INVON), so
-every pixel value is XOR'd with 0xFFFF before writing.
+Full-bleed album art with gradient text overlay. Writes RGB565 to the
+framebuffer with ILI9486 colour-inversion compensation (XOR 0xFFFF).
 """
 
 import io
@@ -16,45 +15,64 @@ from .fingerprint import TrackInfo
 try:
     import numpy as np
     from PIL import Image, ImageDraw, ImageFont
-    _HAS_DISPLAY_DEPS = True
+    _HAS_DEPS = True
 except ImportError:
-    _HAS_DISPLAY_DEPS = False
+    _HAS_DEPS = False
 
 logger = logging.getLogger(__name__)
 
 WIDTH = 480
 HEIGHT = 320
-BG_COLOR = (15, 15, 15)
-ACCENT_COLOR = (180, 50, 50)
+BG = (12, 12, 12)
 
-_FONT_CANDIDATES = [
+_FONT_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
 ]
 
 
 def _find_font() -> Optional[str]:
-    for p in _FONT_CANDIDATES:
+    for p in _FONT_PATHS:
         if Path(p).exists():
             return p
     return None
 
 
-def _to_fb(img: Image.Image) -> bytes:
-    """Convert PIL RGB image → RGB565 little-endian bytes with ILI9486 inversion."""
+def _to_fb(img: "Image.Image") -> bytes:
+    """Convert PIL RGB → RGB565 LE with ILI9486 inversion."""
     arr = np.array(img.convert("RGB"), dtype=np.uint16)
-    r = arr[:, :, 0] >> 3
-    g = arr[:, :, 1] >> 2
-    b = arr[:, :, 2] >> 3
-    rgb565 = (r << 11) | (g << 5) | b
-    return (rgb565 ^ 0xFFFF).astype("<u2").tobytes()
+    r, g, b = arr[:, :, 0] >> 3, arr[:, :, 1] >> 2, arr[:, :, 2] >> 3
+    return ((r << 11 | g << 5 | b) ^ 0xFFFF).astype("<u2").tobytes()
 
 
-def _truncate(text: str, draw: ImageDraw.Draw, font: ImageFont.ImageFont, max_w: int) -> str:
-    """Truncate text with ellipsis to fit within max_w pixels."""
+def _cover_crop(img: "Image.Image", tw: int, th: int) -> "Image.Image":
+    """Scale + centre-crop to exactly tw×th."""
+    src_r = img.width / img.height
+    tgt_r = tw / th
+    if src_r < tgt_r:
+        nw, nh = tw, int(tw / src_r)
+    else:
+        nw, nh = int(th * src_r), th
+    img = img.resize((nw, nh), Image.LANCZOS)
+    x, y = (nw - tw) // 2, (nh - th) // 2
+    return img.crop((x, y, x + tw, y + th))
+
+
+def _apply_gradient(img: "Image.Image",
+                    start_frac: float = 0.30,
+                    end_opacity: float = 0.06) -> "Image.Image":
+    """Darken bottom portion of the image with a smooth gradient."""
+    arr = np.array(img, dtype=np.float32)
+    start = int(HEIGHT * start_frac)
+    h = HEIGHT - start
+    factors = np.linspace(1.0, end_opacity, h)[:, None, None]
+    arr[start:] *= factors
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
+
+
+def _truncate(text: str, draw: "ImageDraw.Draw", font, max_w: int) -> str:
     if draw.textlength(text, font=font) <= max_w:
         return text
     while len(text) > 1:
@@ -64,24 +82,11 @@ def _truncate(text: str, draw: ImageDraw.Draw, font: ImageFont.ImageFont, max_w:
     return text
 
 
-def _wrap(text: str, draw: ImageDraw.Draw, font: ImageFont.ImageFont, max_w: int, max_lines: int = 2) -> list[str]:
-    """Word-wrap text into lines."""
-    words = text.split()
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        test = (current + " " + word).strip()
-        if draw.textlength(test, font=font) <= max_w:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = word
-        if len(lines) >= max_lines:
-            break
-    if current and len(lines) < max_lines:
-        lines.append(current)
-    return lines[:max_lines]
+def _shadow_text(draw: "ImageDraw.Draw", x: int, y: int,
+                 text: str, font, fill, **kw) -> None:
+    """Draw text with a subtle drop shadow for readability over artwork."""
+    draw.text((x + 1, y + 1), text, fill=(0, 0, 0), font=font, **kw)
+    draw.text((x, y), text, fill=fill, font=font, **kw)
 
 
 class Display:
@@ -91,36 +96,33 @@ class Display:
         self.enabled = enabled
         self._fb_path = fb_path
         self._lock = threading.Lock()
-        self._fonts: dict[str, ImageFont.ImageFont] = {}
-        self._last_track: Optional[TrackInfo] = None
-        self._last_art: Optional[bytes] = None
+        self._fonts: dict = {}
+        self._last_key: Optional[tuple] = None
 
     def init(self) -> None:
-        """Load fonts and clear the display."""
         if not self.enabled:
-            logger.debug("Display disabled — skipping init")
+            logger.debug("Display disabled")
             return
-        if not _HAS_DISPLAY_DEPS:
-            logger.warning("Display enabled but Pillow/numpy not installed — disabling")
+        if not _HAS_DEPS:
+            logger.warning("Display enabled but Pillow/numpy missing — disabling")
             self.enabled = False
             return
 
-        font_path = _find_font()
-        if font_path:
-            try:
-                self._fonts = {
-                    "title":  ImageFont.truetype(font_path, 22),
-                    "artist": ImageFont.truetype(font_path, 16),
-                    "small":  ImageFont.truetype(font_path, 12),
-                }
-                logger.debug("Display fonts loaded from %s", font_path)
-            except Exception as e:
-                logger.warning("Font load failed (%s), using default", e)
+        fp = _find_font()
+        if fp:
+            self._fonts = {
+                "title":      ImageFont.truetype(fp, 28),
+                "artist":     ImageFont.truetype(fp, 20),
+                "album":      ImageFont.truetype(fp, 15),
+                "idle_big":   ImageFont.truetype(fp, 32),
+                "idle_small": ImageFont.truetype(fp, 16),
+            }
+        else:
+            d = ImageFont.load_default()
+            self._fonts = {k: d for k in ("title", "artist", "album",
+                                           "idle_big", "idle_small")}
 
-        if not self._fonts:
-            default = ImageFont.load_default()
-            self._fonts = {"title": default, "artist": default, "small": default}
-
+        self._last_key = None
         self.show_idle()
         logger.info("Display initialised (%dx%d, %s)", WIDTH, HEIGHT, self._fb_path)
 
@@ -128,169 +130,104 @@ class Display:
     # Public API
     # ------------------------------------------------------------------
 
-    def show_track(
-        self,
-        track: TrackInfo,
-        cover_art: Optional[bytes] = None,
-        position_sec: float = 0.0,
-        track_number: int = 0,
-        side: str = "",
-    ) -> None:
-        """Render track info + optional cover art."""
+    def show_track(self, track: TrackInfo, cover_art: Optional[bytes] = None,
+                   track_number: int = 0, side: str = "") -> None:
+        """Render track info. Skips redraw if same track is already shown."""
         if not self.enabled:
             return
-        self._last_track = track
-        self._last_art = cover_art
+        key = (track.artist, track.title)
+        if key == self._last_key:
+            return
+        self._last_key = key
         try:
-            img = self._render_track(track, cover_art, position_sec, track_number, side)
-            self._write(img)
+            self._write(self._render_track(track, cover_art, track_number, side))
         except Exception:
-            logger.exception("Display.show_track failed")
+            logger.exception("show_track failed")
 
     def show_idle(self) -> None:
-        """Show idle/listening screen."""
         if not self.enabled:
             return
+        self._last_key = None
         try:
             self._write(self._render_idle())
         except Exception:
-            logger.exception("Display.show_idle failed")
+            logger.exception("show_idle failed")
 
     def clear(self) -> None:
-        """Fill display with background colour."""
         if not self.enabled:
             return
+        self._last_key = None
         try:
-            self._write(Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR))
+            self._write(Image.new("RGB", (WIDTH, HEIGHT), BG))
         except Exception:
-            logger.exception("Display.clear failed")
+            logger.exception("clear failed")
 
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
 
-    def _render_idle(self) -> Image.Image:
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
+    def _render_idle(self) -> "Image.Image":
+        img = Image.new("RGB", (WIDTH, HEIGHT), BG)
         draw = ImageDraw.Draw(img)
-        cx, cy = WIDTH // 2, HEIGHT // 2
-        draw.text((cx, cy - 18), "Spindle",
-                  fill=(210, 210, 210), font=self._fonts["title"], anchor="mm")
-        draw.text((cx, cy + 14), "Listening…",
-                  fill=(90, 90, 90), font=self._fonts["artist"], anchor="mm")
-        # Subtle horizontal rule
-        draw.line([(cx - 60, cy + 2), (cx + 60, cy + 2)], fill=(50, 50, 50), width=1)
+        cx = WIDTH // 2
+        cy = HEIGHT // 2 - 10
+        draw.text((cx, cy), "SPINDLE", fill=(200, 200, 200),
+                  font=self._fonts["idle_big"], anchor="mm")
+        draw.line([(cx - 50, cy + 24), (cx + 50, cy + 24)],
+                  fill=(40, 40, 40), width=1)
+        draw.text((cx, cy + 42), "Listening…", fill=(70, 70, 70),
+                  font=self._fonts["idle_small"], anchor="mm")
         return img
 
-    def _render_track(
-        self,
-        track: TrackInfo,
-        cover_art: Optional[bytes],
-        position_sec: float,
-        track_number: int,
-        side: str,
-    ) -> Image.Image:
-        img = Image.new("RGB", (WIDTH, HEIGHT), BG_COLOR)
-        draw = ImageDraw.Draw(img)
+    def _render_track(self, track: TrackInfo, cover_art: Optional[bytes],
+                      track_number: int, side: str) -> "Image.Image":
+        img = Image.new("RGB", (WIDTH, HEIGHT), BG)
 
-        # ── Album art (left) ─────────────────────────────────────────
-        ART = 280
-        AX, AY = 10, (HEIGHT - ART) // 2   # centred vertically → y=20
-
+        # ── Full-bleed album art ─────────────────────────────────────
         if cover_art:
             try:
                 art = Image.open(io.BytesIO(cover_art)).convert("RGB")
-                art = art.resize((ART, ART), Image.LANCZOS)
-                img.paste(art, (AX, AY))
+                img.paste(_cover_crop(art, WIDTH, HEIGHT), (0, 0))
             except Exception:
-                _draw_art_placeholder(draw, AX, AY, ART, self._fonts["title"])
-        else:
-            _draw_art_placeholder(draw, AX, AY, ART, self._fonts["title"])
+                pass
 
-        # ── Text panel (right) ───────────────────────────────────────
-        TX = AX + ART + 12     # x start of text column
-        TW = WIDTH - TX - 8    # available width ≈ 170 px
-        f_title  = self._fonts["title"]
-        f_artist = self._fonts["artist"]
-        f_small  = self._fonts["small"]
+        # ── Gradient overlay (darken bottom for text) ────────────────
+        img = _apply_gradient(img, start_frac=0.30, end_opacity=0.06)
+        draw = ImageDraw.Draw(img)
 
-        y = 18
+        pad = 18
+        max_w = WIDTH - 2 * pad
 
-        # Artist
-        artist_str = _truncate(track.artist or "", draw, f_artist, TW)
-        draw.text((TX, y), artist_str, fill=(170, 170, 170), font=f_artist)
-        y += 24
-
-        # Title (word-wrapped, up to 2 lines)
-        title_lines = _wrap(track.title or "", draw, f_title, TW, max_lines=2)
-        for line in title_lines:
-            draw.text((TX, y), line, fill=(255, 255, 255), font=f_title)
-            y += 28
-        y += 4
+        # Build text bottom-up
+        y = HEIGHT - pad
 
         # Album
         if track.album:
-            album_str = _truncate(track.album, draw, f_small, TW)
-            draw.text((TX, y), album_str, fill=(120, 120, 120), font=f_small)
-            y += 18
+            y -= 20
+            txt = _truncate(track.album, draw, self._fonts["album"], max_w)
+            _shadow_text(draw, pad, y, txt, self._fonts["album"], (170, 170, 170))
 
-        # Side / track number
-        if side or track_number:
-            parts = []
-            if side:
-                parts.append(f"Side {side}")
-            if track_number:
-                parts.append(f"Track {track_number}")
-            draw.text((TX, y), "  •  ".join(parts), fill=(80, 80, 80), font=f_small)
-            y += 18
+        # Title
+        y -= 34
+        txt = _truncate(track.title or "", draw, self._fonts["title"], max_w)
+        _shadow_text(draw, pad, y, txt, self._fonts["title"], (255, 255, 255))
 
-        # ── Progress bar ─────────────────────────────────────────────
-        duration = track.duration or 0
-        if duration > 0 and position_sec >= 0:
-            BAR_Y  = HEIGHT - 26
-            BAR_H  = 5
-            TICK_H = 3
-
-            # Track rail
-            draw.rectangle([TX, BAR_Y, TX + TW, BAR_Y + BAR_H],
-                           fill=(45, 45, 45))
-
-            progress = min(1.0, position_sec / duration)
-            fill_w = max(0, int(TW * progress))
-            if fill_w:
-                draw.rectangle([TX, BAR_Y, TX + fill_w, BAR_Y + BAR_H],
-                               fill=ACCENT_COLOR)
-
-            # Time labels
-            def fmt(s: float) -> str:
-                s = max(0, int(s))
-                return f"{s // 60}:{s % 60:02d}"
-
-            draw.text((TX, BAR_Y + BAR_H + 4),
-                      fmt(position_sec), fill=(85, 85, 85), font=f_small)
-            draw.text((TX + TW, BAR_Y + BAR_H + 4),
-                      fmt(duration), fill=(85, 85, 85), font=f_small, anchor="ra")
+        # Artist
+        y -= 26
+        txt = _truncate(track.artist or "", draw, self._fonts["artist"], max_w)
+        _shadow_text(draw, pad, y, txt, self._fonts["artist"], (210, 210, 210))
 
         return img
 
     # ------------------------------------------------------------------
-    # Low-level write
+    # Framebuffer
     # ------------------------------------------------------------------
 
-    def _write(self, img: Image.Image) -> None:
+    def _write(self, img: "Image.Image") -> None:
         data = _to_fb(img)
         try:
             with self._lock:
                 with open(self._fb_path, "wb") as fb:
                     fb.write(data)
         except OSError as e:
-            logger.error("Framebuffer write error: %s", e)
-
-
-def _draw_art_placeholder(
-    draw: ImageDraw.Draw,
-    x: int, y: int, size: int,
-    font: ImageFont.ImageFont,
-) -> None:
-    draw.rectangle([x, y, x + size, y + size], fill=(35, 35, 35))
-    draw.text((x + size // 2, y + size // 2), "♫",
-              fill=(70, 70, 70), font=font, anchor="mm")
+            logger.error("Framebuffer write: %s", e)

@@ -25,13 +25,6 @@ logger = logging.getLogger("spindle")
 
 _running = True
 
-# When album-locked, only re-fingerprint every LOCKED_CONFIRM_INTERVAL
-# chunks to verify position. Between checks, trust timing prediction.
-# This saves CPU + API calls without affecting scrobble accuracy
-# (album-lock timing handles track advances regardless).
-LOCKED_CONFIRM_CHUNKS = 10  # 10 × 2s = confirm every ~20s
-
-
 def _signal_handler(sig, frame):
     global _running
     logger.info("Shutting down...")
@@ -197,7 +190,6 @@ def main():
     track_scrobbled = False
     music_start_time = None
     consecutive_silence = 0
-    locked_chunk_counter = 0  # chunks since last fingerprint while locked
 
     # ------------------------------------------------------------------ #
     #  Main loop                                                          #
@@ -243,7 +235,6 @@ def main():
                         current_art = None
                         track_scrobbled = False
                         music_start_time = None
-                        locked_chunk_counter = 0
                         capture.reset()
                         display.show_idle()
                     continue
@@ -270,12 +261,10 @@ def main():
                         current_track = predicted
                         track_scrobbled = True
                         do_now_playing(predicted)
-                        pos, dur = album_lock.get_progress() or (0.0, 0.0)
                         al = album_lock.session
                         display.show_track(
                             predicted,
                             cover_art=current_art,
-                            position_sec=pos,
                             track_number=al.current_index + 1 if al else 0,
                         )
 
@@ -296,17 +285,6 @@ def main():
                 # Wait for buffer to fill (need full 10s window)
                 if not capture.is_full:
                     continue
-
-                # When album-locked, fingerprint is just a periodic confirmation.
-                # Timing handles track advances — fingerprint only catches drift.
-                # No urgency, so slow down to save CPU.
-                if album_lock and album_lock.is_locked():
-                    locked_chunk_counter += 1
-                    if locked_chunk_counter < LOCKED_CONFIRM_CHUNKS:
-                        continue
-                    locked_chunk_counter = 0
-                else:
-                    locked_chunk_counter = 0
 
                 # -- Fingerprint the audio --
                 track = identify(wav_path, cfg.acoustid, cfg.fingerprint)
