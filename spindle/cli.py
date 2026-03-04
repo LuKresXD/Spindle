@@ -195,6 +195,7 @@ def main():
     # Shared
     music_start_time = None   # when music first started after silence
     consecutive_silence = 0
+    chunks_since_identify = 0  # counter to throttle fingerprinting when locked
 
     # ------------------------------------------------------------------ #
     #  Main loop                                                          #
@@ -289,7 +290,18 @@ def main():
                     logger.debug("Buffer filling (%d/%d segments)",
                                  len(capture._segments), capture.num_segments)
                     continue
+
+                # When album-locked, only fingerprint every ~30s (15 chunks × 2s)
+                # to confirm position. Saves CPU + API calls.
+                chunks_since_identify += 1
+                if album_lock and album_lock.is_locked() and chunks_since_identify < 15:
+                    predicted = album_lock.get_current_track()
+                    if predicted:
+                        do_now_playing(predicted)
+                    continue
+
                 track = identify(wav_path, cfg.acoustid, cfg.fingerprint)
+                chunks_since_identify = 0
 
                 # No match — if album-locked, trust the prediction
                 if not track:

@@ -63,6 +63,7 @@ class SpotifyClient:
         self._token: Optional[str] = None
         self._token_expiry: float = 0
         self._album_cache: dict[str, AlbumTracklist] = {}
+        self._lookup_cache: dict[str, Optional["SpotifyTrack"]] = {}  # artist-title → result
 
     def _get_token(self) -> str:
         """Get (or refresh) a client credentials token."""
@@ -89,7 +90,12 @@ class SpotifyClient:
         """Search Spotify for a track and return canonical info + album position.
 
         Returns SpotifyTrack with canonical names and album metadata, or None.
+        Results are cached to avoid redundant API calls (important with 2s sliding window).
         """
+        cache_key = f"{artist.lower()}|||{title.lower()}"
+        if cache_key in self._lookup_cache:
+            return self._lookup_cache[cache_key]
+
         try:
             query = f"track:{title} artist:{artist}"
             resp = requests.get(
@@ -104,6 +110,7 @@ class SpotifyClient:
             tracks = data.get("tracks", {}).get("items", [])
             if not tracks:
                 logger.debug("Spotify: no results for '%s - %s'", artist, title)
+                self._lookup_cache[cache_key] = None
                 return None
 
             # Find best match — prefer exact artist name match
@@ -141,7 +148,7 @@ class SpotifyClient:
                 confidence=1.0,
             )
 
-            return SpotifyTrack(
+            result = SpotifyTrack(
                 track=track_info,
                 album_id=album_id,
                 album_name=spotify_album,
@@ -149,6 +156,8 @@ class SpotifyClient:
                 disc_number=best.get("disc_number", 1),
                 total_tracks=album_data.get("total_tracks", 0),
             )
+            self._lookup_cache[cache_key] = result
+            return result
 
         except Exception as e:
             logger.warning("Spotify lookup failed: %s", e)
