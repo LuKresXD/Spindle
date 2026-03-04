@@ -40,3 +40,15 @@ display:
   width: 480
   height: 320
   spi_device: "/dev/spidev0.0"
+
+telegram:
+  bot_token: ""                             # from @BotFather
+  chat_id: ""                               # your chat ID (get from @userinfobot)
+  silent: false                             # send without notification sound
+  verbose: false                            # notify on every individual scrobble
+  errors: true                              # notify on errors
+
+logging:
+  file: ""                                  # e.g. /home/pi/spindle/spindle.log
+  max_bytes: 5000000                        # 5 MB per file
+  backup_count: 3                           # keep 3 rotated log files

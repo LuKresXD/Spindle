@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import logging.handlers
 import signal
 import sys
 import time
@@ -15,6 +16,7 @@ from .scrobbler import Scrobbler, canonicalize_track
 from .display import Display
 from .spotify import SpotifyClient
 from .albumlock import AlbumLock
+from .notify import Notifier
 
 logger = logging.getLogger("spindle")
 
@@ -42,19 +44,35 @@ def main():
     parser.add_argument("--version", action="version", version=f"spindle {__version__}")
     args = parser.parse_args()
 
+    # --- Config (load early so we can configure logging from it) ---
+    cfg = load_config(args.config)
+
     # --- Logging ---
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    log_datefmt = "%H:%M:%S"
+
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+
+    if cfg.logging.file:
+        log_path = Path(cfg.logging.file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=cfg.logging.max_bytes,
+            backupCount=cfg.logging.backup_count,
+        )
+        file_handler.setFormatter(logging.Formatter(log_format, datefmt=log_datefmt))
+        handlers.append(file_handler)
+
+    logging.basicConfig(level=log_level, format=log_format, datefmt=log_datefmt,
+                        handlers=handlers)
+
     for noisy in ("httpcore", "httpx", "urllib3", "pylast", "asyncio",
                   "aiohttp_retry", "aiohttp", "shazamio", "shazamio_core",
                   "shazamio.request"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    # --- Config ---
-    cfg = load_config(args.config)
     logger.info("Spindle v%s starting", __version__)
 
     if not cfg.acoustid.api_key:
@@ -95,6 +113,9 @@ def main():
     else:
         logger.info("Spotify lookup disabled (no credentials)")
 
+    # --- Telegram notifications ---
+    notifier = Notifier(cfg.telegram)
+
     # --- Display ---
     display = Display(enabled=cfg.display.enabled)
     display.init()
@@ -108,6 +129,8 @@ def main():
     logger.info("Chunk duration: %ds", cfg.audio.chunk_duration)
     if args.dry_run:
         logger.info("DRY RUN — will identify but not scrobble")
+    else:
+        notifier.started()
 
     # ------------------------------------------------------------------ #
     #  Helpers                                                            #
@@ -124,9 +147,10 @@ def main():
             return False
         return True
 
-    def do_scrobble(t: TrackInfo, timestamp: float) -> None:
+    def do_scrobble(t: TrackInfo, timestamp: float, backfill: bool = False) -> None:
         if scrobbler and not args.dry_run:
             scrobbler.scrobble(t, timestamp=int(timestamp))
+            notifier.track_scrobbled(t, is_backfill=backfill)
 
     def do_now_playing(t: TrackInfo) -> None:
         if scrobbler and not args.dry_run:
@@ -171,8 +195,22 @@ def main():
 
                         # Album-lock: end session
                         if album_lock:
+                            # Capture session info before ending
+                            al = album_lock.session if album_lock.is_locked() else None
+                            al_artist = al.tracklist.artist if al else None
+                            al_album = al.tracklist.album_name if al else None
+                            al_scrobbled = len(al.scrobbled) if al else 0
+
                             for t, ts in album_lock.on_silence():
                                 do_scrobble(t, ts)
+                                if al:
+                                    al_scrobbled = len(al.scrobbled)
+
+                            if al_artist and al_scrobbled > 0:
+                                notifier.side_finished(
+                                    al_artist, al_album,
+                                    al_scrobbled, al.current_index + 1,
+                                )
 
                         # Simple-mode: finalize
                         if current_track and not track_scrobbled:
@@ -201,7 +239,7 @@ def main():
                 # ============================================================
                 if album_lock and album_lock.is_locked():
                     for t, ts in album_lock.check_advance():
-                        do_scrobble(t, ts)
+                        do_scrobble(t, ts, backfill=False)
 
                     # Sync display / now-playing with predicted track
                     predicted = album_lock.get_current_track()
@@ -237,10 +275,24 @@ def main():
                 #  ALBUM LOCK
                 # ============================================================
                 if album_lock and spotify_result and not args.dry_run:
-                    for t, ts in album_lock.on_track_identified(
+                    was_locked = album_lock.is_locked()
+                    scrobbles = album_lock.on_track_identified(
                         spotify_result, music_start_time,
-                    ):
-                        do_scrobble(t, ts)
+                    )
+                    for t, ts in scrobbles:
+                        do_scrobble(t, ts, backfill=True)
+
+                    # Notify on new album lock
+                    if album_lock.is_locked() and not was_locked:
+                        al = album_lock.session
+                        if al:
+                            notifier.album_locked(
+                                al.tracklist.artist,
+                                al.tracklist.album_name,
+                                al.current_index + 1,
+                                len(al.tracklist.tracks),
+                                track.title,
+                            )
 
                 # ============================================================
                 #  DISPLAY
@@ -305,6 +357,7 @@ def main():
             break
         except Exception as e:
             logger.error("Error in main loop: %s", e, exc_info=True)
+            notifier.error(str(e))
             time.sleep(5)
 
     # ------------------------------------------------------------------ #

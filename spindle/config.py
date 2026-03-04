@@ -71,6 +71,22 @@ class SpotifyConfig:
 
 
 @dataclass
+class TelegramConfig:
+    bot_token: str = ""
+    chat_id: str = ""
+    silent: bool = False      # send notifications silently (no sound)
+    verbose: bool = False     # notify on every individual scrobble
+    errors: bool = True       # notify on errors
+
+
+@dataclass
+class LoggingConfig:
+    file: str = ""                  # log file path (empty = stdout only)
+    max_bytes: int = 5_000_000     # 5 MB
+    backup_count: int = 3          # keep 3 rotated files
+
+
+@dataclass
 class SpindleConfig:
     acoustid: AcoustIDConfig = field(default_factory=AcoustIDConfig)
     lastfm: LastFMConfig = field(default_factory=LastFMConfig)
@@ -80,6 +96,8 @@ class SpindleConfig:
     scrobble: ScrobbleConfig = field(default_factory=ScrobbleConfig)
     silence: SilenceConfig = field(default_factory=SilenceConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
 def load_config(path: Optional[Path] = None) -> SpindleConfig:
@@ -119,5 +137,9 @@ def _parse_config(raw: dict) -> SpindleConfig:
         cfg.silence = SilenceConfig(**raw["silence"])
     if "display" in raw:
         cfg.display = DisplayConfig(**raw["display"])
+    if "telegram" in raw:
+        cfg.telegram = TelegramConfig(**raw["telegram"])
+    if "logging" in raw:
+        cfg.logging = LoggingConfig(**raw["logging"])
 
     return cfg
