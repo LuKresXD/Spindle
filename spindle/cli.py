@@ -24,6 +24,12 @@ logger = logging.getLogger("spindle")
 
 _running = True
 
+# When album-locked, only re-fingerprint every LOCKED_CONFIRM_INTERVAL
+# chunks to verify position. Between checks, trust timing prediction.
+# This saves CPU + API calls without affecting scrobble accuracy
+# (album-lock timing handles track advances regardless).
+LOCKED_CONFIRM_CHUNKS = 10  # 10 × 2s = confirm every ~20s
+
 
 def _signal_handler(sig, frame):
     global _running
@@ -46,7 +52,7 @@ def main():
     parser.add_argument("--version", action="version", version=f"spindle {__version__}")
     args = parser.parse_args()
 
-    # --- Config (load early so we can configure logging from it) ---
+    # --- Config ---
     cfg = load_config(args.config)
 
     # --- Logging ---
@@ -115,10 +121,8 @@ def main():
     else:
         logger.info("Spotify lookup disabled (no credentials)")
 
-    # --- Telegram notifications ---
+    # --- Telegram ---
     notifier = Notifier(cfg.telegram)
-
-    # --- Scrobble history ---
     history = ScrobbleHistory()
 
     # --- Display ---
@@ -130,12 +134,12 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    # --- Sliding capture ---
+    # --- Capture ---
     capture = SlidingCapture(cfg.audio)
-
     logger.info("Listening on device: %s", cfg.audio.device)
     logger.info("Window: %ds, step: %ds", cfg.audio.chunk_duration, capture.step)
-    # --- Telegram bot (command handler) ---
+
+    # --- Telegram bot ---
     bot = None
     if cfg.telegram.bot_token and cfg.telegram.chat_id and not args.dry_run:
         bot = SpindleBot(
@@ -177,7 +181,6 @@ def main():
             scrobbler.update_now_playing(t)
 
     def finalize_simple(t: TrackInfo, start: float) -> None:
-        """Scrobble via simple mode (non-album-lock) if threshold met."""
         if not t or args.dry_run:
             return
         if should_scrobble(t, start):
@@ -187,17 +190,12 @@ def main():
     #  State                                                              #
     # ------------------------------------------------------------------ #
 
-    # Simple-mode state (fallback when album-lock isn't active)
     current_track = None
     track_start = 0.0
     track_scrobbled = False
-
-    # Shared
-    music_start_time = None   # when music first started after silence
+    music_start_time = None
     consecutive_silence = 0
-    chunks_since_identify = 0  # counter to throttle fingerprinting when locked
-    last_identified_key = None  # dedup: skip re-identifying the same track
-    same_track_count = 0  # how many times we've seen the same track in a row
+    locked_chunk_counter = 0  # chunks since last fingerprint while locked
 
     # ------------------------------------------------------------------ #
     #  Main loop                                                          #
@@ -218,7 +216,6 @@ def main():
 
                         # Album-lock: end session
                         if album_lock:
-                            # Capture session info before ending
                             al = album_lock.session if album_lock.is_locked() else None
                             al_artist = al.tracklist.artist if al else None
                             al_album = al.tracklist.album_name if al else None
@@ -243,41 +240,35 @@ def main():
                         current_track = None
                         track_scrobbled = False
                         music_start_time = None
-                        last_identified_key = None
-                        same_track_count = 0
-                        chunks_since_identify = 0
+                        locked_chunk_counter = 0
                         capture.reset()
                         display.show_idle()
                     continue
 
                 # ============================================================
-                #  MUSIC DETECTED — mark start time
+                #  MUSIC — mark start
                 # ============================================================
                 if consecutive_silence > 0 or music_start_time is None:
-                    # Music started DURING the segment we just captured,
-                    # which was ~step seconds ago.
                     music_start_time = time.time() - capture.step
                     logger.debug("Music started (est. %.0f)", music_start_time)
 
                 consecutive_silence = 0
 
                 # ============================================================
-                #  ALBUM-LOCK: check timing advance
+                #  ALBUM-LOCK: timing advance
                 # ============================================================
                 if album_lock and album_lock.is_locked():
                     advance_scrobbles = album_lock.check_advance()
                     for t, ts in advance_scrobbles:
                         do_scrobble(t, ts, backfill=False)
 
-                    # Sync display / now-playing with predicted track
                     predicted = album_lock.get_current_track()
                     if predicted:
                         current_track = predicted
-                        track_scrobbled = True  # album-lock manages scrobbling
+                        track_scrobbled = True
                         do_now_playing(predicted)
                         display.show_track(predicted)
 
-                        # Notify track advance
                         if advance_scrobbles and album_lock.session:
                             al = album_lock.session
                             notifier.track_advanced(
@@ -289,54 +280,36 @@ def main():
                             )
 
                 # ============================================================
-                #  FINGERPRINT (skip until buffer is full for quality)
+                #  FINGERPRINT
                 # ============================================================
+
+                # Wait for buffer to fill (need full 10s window)
                 if not capture.is_full:
-                    logger.debug("Buffer filling (%d/%d segments)",
-                                 len(capture._segments), capture.num_segments)
                     continue
 
-                # Throttle fingerprinting:
-                # - When album-locked: only every ~30s (15 × 2s) to confirm
-                # - When same track keeps matching: back off progressively
-                chunks_since_identify += 1
-
-                skip_threshold = 15 if (album_lock and album_lock.is_locked()) else (
-                    # Not locked: after identifying same track 3x, slow to every ~10s
-                    5 if same_track_count >= 3 else 0
-                )
-
-                if chunks_since_identify <= skip_threshold:
-                    if album_lock and album_lock.is_locked():
-                        predicted = album_lock.get_current_track()
-                        if predicted:
-                            do_now_playing(predicted)
-                    elif current_track:
-                        do_now_playing(current_track)
-                    continue
-
-                track = identify(wav_path, cfg.acoustid, cfg.fingerprint)
-                chunks_since_identify = 0
-
-                # No match — if album-locked, trust the prediction
-                if not track:
-                    same_track_count = 0  # reset on miss
-                    if album_lock and album_lock.is_locked():
-                        predicted = album_lock.get_current_track()
-                        if predicted:
-                            do_now_playing(predicted)
-                    continue
-
-                # Track dedup: count consecutive same-track identifications
-                tk = track_key(track)
-                if tk == last_identified_key:
-                    same_track_count += 1
+                # When album-locked, fingerprint is just a periodic confirmation.
+                # Timing handles track advances — fingerprint only catches drift.
+                # No urgency, so slow down to save CPU.
+                if album_lock and album_lock.is_locked():
+                    locked_chunk_counter += 1
+                    if locked_chunk_counter < LOCKED_CONFIRM_CHUNKS:
+                        continue
+                    locked_chunk_counter = 0
                 else:
-                    same_track_count = 0
-                    last_identified_key = tk
+                    locked_chunk_counter = 0
+
+                # -- Fingerprint the audio --
+                track = identify(wav_path, cfg.acoustid, cfg.fingerprint)
+
+                if not track:
+                    if album_lock and album_lock.is_locked():
+                        predicted = album_lock.get_current_track()
+                        if predicted:
+                            do_now_playing(predicted)
+                    continue
 
                 # ============================================================
-                #  SPOTIFY LOOKUP
+                #  SPOTIFY LOOKUP (cached — no API call for repeated tracks)
                 # ============================================================
                 spotify_result = None
                 if spotify:
@@ -355,7 +328,6 @@ def main():
                     for t, ts in scrobbles:
                         do_scrobble(t, ts, backfill=True)
 
-                    # Notify on new album lock
                     if album_lock.is_locked() and not was_locked:
                         al = album_lock.session
                         if al:
@@ -373,7 +345,7 @@ def main():
                 display.show_track(track)
 
                 # ============================================================
-                #  DRY RUN OUTPUT
+                #  DRY RUN
                 # ============================================================
                 if args.dry_run:
                     line = (
@@ -395,17 +367,13 @@ def main():
                     continue
 
                 # ============================================================
-                #  SCROBBLE LOGIC
+                #  SCROBBLE
                 # ============================================================
-
                 if album_lock and album_lock.is_locked():
-                    # Album-lock active → it handles all scrobbling.
-                    # Just update now-playing and sync state.
                     predicted = album_lock.get_current_track() or track
                     do_now_playing(predicted)
                     current_track = predicted
                     track_scrobbled = True
-
                 else:
                     # Simple mode — track change detection
                     if current_track is None or track_key(track) != track_key(current_track):
@@ -417,7 +385,6 @@ def main():
                         logger.info("Now playing: %s — %s", track.artist, track.title)
                         do_now_playing(track)
                     else:
-                        # Same track — scrobble once after threshold
                         if not track_scrobbled and should_scrobble(current_track, track_start):
                             do_scrobble(current_track, track_start)
                             track_scrobbled = True
