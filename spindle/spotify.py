@@ -167,9 +167,10 @@ class SpotifyClient:
 
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 429:
-                retry_after = int(e.response.headers.get("Retry-After", 30))
+                raw_retry = int(e.response.headers.get("Retry-After", 30))
+                retry_after = min(raw_retry, 120)  # cap at 2 min — Spotify sometimes sends absurd values (15h+)
                 self._backoff_until = time.time() + retry_after
-                logger.warning("Spotify rate limited — backing off %ds", retry_after)
+                logger.warning("Spotify rate limited — backing off %ds (raw: %ds)", retry_after, raw_retry)
             else:
                 logger.warning("Spotify lookup failed: %s", e)
             return None
