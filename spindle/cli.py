@@ -16,7 +16,7 @@ from .fingerprint import identify, TrackInfo
 from .scrobbler import Scrobbler, canonicalize_track
 from .display import Display
 from .spotify import SpotifyClient
-from .albumlock import AlbumLock
+from .albumlock import AlbumLock, normalize_title
 from .notify import Notifier
 from .history import ScrobbleHistory
 from .bot import SpindleBot
@@ -166,6 +166,12 @@ def main():
 
     def do_scrobble(t: TrackInfo, timestamp: float, backfill: bool = False) -> None:
         if scrobbler and not args.dry_run:
+            # Session-level dedup by normalized title
+            dedup_key = (t.artist.lower(), normalize_title(t.title))
+            if dedup_key in session_scrobbled:
+                logger.info("Session dedup: skipping '%s — %s'", t.artist, t.title)
+                return
+            session_scrobbled.add(dedup_key)
             scrobbler.scrobble(t, timestamp=int(timestamp))
             history.log(t, timestamp, source="backfill" if backfill else "live")
             notifier.track_scrobbled(t, is_backfill=backfill)
@@ -190,6 +196,9 @@ def main():
     track_scrobbled = False
     music_start_time = None
     consecutive_silence = 0
+    # Session-level dedup: set of (artist_lower, normalized_title)
+    # Survives album-lock resets, cleared only on silence
+    session_scrobbled: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------------ #
     #  Main loop                                                          #
@@ -235,6 +244,7 @@ def main():
                         current_art = None
                         track_scrobbled = False
                         music_start_time = None
+                        session_scrobbled.clear()
                         capture.reset()
                         display.show_idle()
                     continue
@@ -304,6 +314,24 @@ def main():
                     spotify_result = spotify.lookup(track.artist, track.title)
                     if spotify_result:
                         track = spotify_result.track
+
+                # ============================================================
+                #  FALSE POSITIVE FILTER — reject different-artist matches
+                #  when album-locked (e.g. "Chagali Mana" during Thriller)
+                # ============================================================
+                if (album_lock and album_lock.is_locked() and spotify_result
+                        and album_lock.session):
+                    locked_artist = album_lock.session.tracklist.artist.lower()
+                    matched_artist = spotify_result.track.artist.lower()
+                    if locked_artist != matched_artist:
+                        logger.info(
+                            "Rejecting false positive: '%s — %s' "
+                            "(locked on %s)",
+                            spotify_result.track.artist,
+                            spotify_result.track.title,
+                            album_lock.session.tracklist.artist,
+                        )
+                        continue
 
                 # ============================================================
                 #  ALBUM LOCK

@@ -21,12 +21,39 @@ Vinyl-aware timing:
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 from .fingerprint import TrackInfo
 from .spotify import SpotifyClient, SpotifyTrack, AlbumTracklist
+
+
+def normalize_title(title: str) -> str:
+    """Normalize track title for dedup across album editions.
+
+    Strips: (2008 with will.i.am), (with Paul McCartney), 7" – Special Edit,
+    (Remastered), - Radio Edit, etc.
+    """
+    s = title
+    # Remove parenthetical/bracketed edition tags
+    s = re.sub(
+        r'\s*[\(\[]'
+        r'(?:\d{4}\s+)?(?:with|feat\.?|ft\.?|featuring|remix|remaster|edit|'
+        r'version|mix|single|radio|live|demo|acoustic|instrumental|bonus)[^\)\]]*'
+        r'[\)\]]',
+        '', s, flags=re.IGNORECASE,
+    ).strip()
+    # Remove trailing " - Special Edit", " - Remastered 2008", "7\"", etc.
+    s = re.sub(
+        r'\s*[-–—]\s*(?:special\s+edit|remaster(?:ed)?(?:\s+\d{4})?|single\s+version|'
+        r'radio\s+edit|album\s+version|extended|remix).*$',
+        '', s, flags=re.IGNORECASE,
+    ).strip()
+    # Remove vinyl format markers: 7", 12"
+    s = re.sub(r'\s*\d+["\u201d]\s*', ' ', s).strip()
+    return s.lower() if s else title.lower()
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +121,34 @@ class AlbumLock:
 
         now = time.time()
         to_scrobble: list[tuple[TrackInfo, float]] = []
+
+        # --- Same album, different edition? (e.g. Thriller vs Thriller 25 Deluxe) ---
+        if (self.session and self.session.locked
+                and self.session.album_id != album_id
+                and self.session.tracklist.artist.lower() == tracklist.artist.lower()):
+            # Check if the identified track exists in our CURRENT session's tracklist
+            # by normalized title — if so, it's the same album, just a different edition
+            norm_title = normalize_title(spotify_track.track.title)
+            for i, t in enumerate(self.session.tracklist.tracks):
+                if normalize_title(t.title) == norm_title:
+                    logger.info(
+                        "Album-lock: ignoring edition switch (%s → %s), "
+                        "track '%s' found in current tracklist at index %d",
+                        self.session.tracklist.album_name, tracklist.album_name,
+                        spotify_track.track.title, i,
+                    )
+                    # Treat as anchor for the existing session
+                    self.session.anchors.append(Anchor(i, now))
+                    if i != self.session.current_index:
+                        if i > self.session.current_index:
+                            gap = self._fill_forward(self.session.current_index, i)
+                            to_scrobble.extend(gap)
+                            self.session.current_index = i
+                            self.session.current_track_start = now
+                        else:
+                            self.session.current_index = i
+                            self.session.current_track_start = now
+                    return to_scrobble
 
         # --- New session (first ID, different album, or session ended) ---
         if not self.session or self.session.album_id != album_id or not self.session.locked:

@@ -27,3 +27,5 @@ Thumbs.db
 
 # Scrobble queue (local state)
 scrobble_queue.json
+*.log
+*.log.*
