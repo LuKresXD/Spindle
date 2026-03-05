@@ -16,7 +16,7 @@ from typing import Optional, TYPE_CHECKING
 import requests
 
 if TYPE_CHECKING:
-    from .albumlock import AlbumLock
+    from .session import ScrobbleSession, SessionMode
     from .history import ScrobbleHistory
 
 logger = logging.getLogger(__name__)
@@ -26,12 +26,12 @@ class SpindleBot:
     """Telegram bot with command handling."""
 
     def __init__(self, bot_token: str, chat_id: str,
-                 album_lock: "Optional[AlbumLock]" = None,
+                 session: "Optional[ScrobbleSession]" = None,
                  history: "Optional[ScrobbleHistory]" = None,
                  start_time: Optional[float] = None):
         self.bot_token = bot_token
         self.chat_id = chat_id
-        self.album_lock = album_lock
+        self.session = session
         self.history = history
         self.start_time = start_time or time.time()
         self._running = False
@@ -122,10 +122,10 @@ class SpindleBot:
     def _cmd_status(self) -> str:
         uptime = _format_duration(time.time() - self.start_time)
 
-        if self.album_lock and self.album_lock.is_locked():
-            al = self.album_lock.session
-            track = self.album_lock.get_current_track()
-            progress = self.album_lock.get_progress()
+        if self.session and self.session.is_locked():
+            al = self.session.album_state
+            track = self.session.get_current_track()
+            progress = self.session.get_progress()
 
             if al and track:
                 idx = al.current_index + 1

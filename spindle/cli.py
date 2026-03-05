@@ -16,7 +16,7 @@ from .fingerprint import identify, TrackInfo
 from .scrobbler import Scrobbler, canonicalize_track
 from .display import Display
 from .spotify import SpotifyClient
-from .albumlock import AlbumLock, normalize_title
+from .session import ScrobbleSession, SessionMode
 from .notify import Notifier
 from .history import ScrobbleHistory
 from .bot import SpindleBot
@@ -50,7 +50,7 @@ def main():
     cfg = load_config(args.config)
 
     # --- Logging ---
-    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_level  = logging.DEBUG if args.verbose else logging.INFO
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     log_datefmt = "%H:%M:%S"
 
@@ -101,23 +101,23 @@ def main():
         scrobbler = Scrobbler(cfg.lastfm, cfg.scrobble)
         scrobbler.connect()
 
-    # --- Spotify + album lock ---
+    # --- Spotify + scrobble session ---
     spotify = None
-    album_lock = None
+    session = None
     if cfg.spotify.client_id and cfg.spotify.client_secret:
         spotify = SpotifyClient(cfg.spotify)
-        album_lock = AlbumLock(
+        session = ScrobbleSession(
             spotify,
             min_play_seconds=cfg.scrobble.min_play_seconds,
             chunk_duration=DEFAULT_STEP,
         )
-        logger.info("Spotify lookup + album-lock enabled")
+        logger.info("Spotify lookup + smart session enabled")
     else:
-        logger.info("Spotify lookup disabled (no credentials)")
+        logger.info("Spotify lookup disabled (no credentials) — simple mode only")
 
     # --- Telegram ---
     notifier = Notifier(cfg.telegram)
-    history = ScrobbleHistory()
+    history  = ScrobbleHistory()
 
     # --- Display ---
     display = Display(enabled=cfg.display.enabled, fb_path=cfg.display.fb_path)
@@ -125,7 +125,7 @@ def main():
     display.show_idle()
 
     # --- Signals ---
-    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGINT,  _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     # --- Capture ---
@@ -139,7 +139,7 @@ def main():
         bot = SpindleBot(
             bot_token=cfg.telegram.bot_token,
             chat_id=cfg.telegram.chat_id,
-            album_lock=album_lock,
+            session=session,
             history=history,
         )
         bot.start()
@@ -157,6 +157,7 @@ def main():
         return f"{t.artist.lower()} - {t.title.lower()}"
 
     def should_scrobble(t: TrackInfo, start: float) -> bool:
+        """Eligibility check for simple-mode (no Spotify) scrobbling."""
         played = time.time() - start
         if played < cfg.scrobble.min_play_seconds:
             return False
@@ -166,12 +167,6 @@ def main():
 
     def do_scrobble(t: TrackInfo, timestamp: float, backfill: bool = False) -> None:
         if scrobbler and not args.dry_run:
-            # Session-level dedup by normalized title
-            dedup_key = (t.artist.lower(), normalize_title(t.title))
-            if dedup_key in session_scrobbled:
-                logger.info("Session dedup: skipping '%s — %s'", t.artist, t.title)
-                return
-            session_scrobbled.add(dedup_key)
             scrobbler.scrobble(t, timestamp=int(timestamp))
             history.log(t, timestamp, source="backfill" if backfill else "live")
             notifier.track_scrobbled(t, is_backfill=backfill)
@@ -181,24 +176,21 @@ def main():
             scrobbler.update_now_playing(t)
 
     def finalize_simple(t: TrackInfo, start: float) -> None:
+        """Simple-mode: scrobble if eligible (used when Spotify is not configured)."""
         if not t or args.dry_run:
             return
         if should_scrobble(t, start):
             do_scrobble(t, start)
 
     # ------------------------------------------------------------------ #
-    #  State                                                              #
+    #  Simple-mode state (used only when Spotify is not configured)       #
     # ------------------------------------------------------------------ #
-
-    current_track = None
-    current_art: Optional[bytes] = None
-    track_start = 0.0
-    track_scrobbled = False
-    music_start_time = None
-    consecutive_silence = 0
-    # Session-level dedup: set of (artist_lower, normalized_title)
-    # Survives album-lock resets, cleared only on silence
-    session_scrobbled: set[tuple[str, str]] = set()
+    current_track:    Optional[TrackInfo] = None
+    current_art:      Optional[bytes]     = None
+    track_start:      float               = 0.0
+    track_scrobbled:  bool                = False
+    music_start_time: Optional[float]     = None
+    consecutive_silence: int              = 0
 
     # ------------------------------------------------------------------ #
     #  Main loop                                                          #
@@ -217,97 +209,89 @@ def main():
                     if consecutive_silence == 1:
                         logger.info("Silence detected")
 
-                        # Album-lock: end session
-                        if album_lock:
-                            al = album_lock.session if album_lock.is_locked() else None
-                            al_artist = al.tracklist.artist if al else None
-                            al_album = al.tracklist.album_name if al else None
-                            al_scrobbled = len(al.scrobbled) if al else 0
+                        # Smart session: finalize + reset
+                        if session:
+                            al = session.album_state
+                            al_artist   = al.tracklist.artist     if al else None
+                            al_album    = al.tracklist.album_name if al else None
+                            al_count    = len(al.scrobbled)       if al else 0
 
-                            for t, ts in album_lock.on_silence():
+                            for t, ts in session.on_silence():
                                 do_scrobble(t, ts)
-                                if al:
-                                    al_scrobbled = len(al.scrobbled)
 
-                            if al_artist and al_scrobbled > 0:
+                            if al_artist and al_count > 0:
                                 notifier.side_finished(
                                     al_artist, al_album,
-                                    al_scrobbled, al.current_index + 1,
+                                    al_count, (al.current_index + 1) if al else 0,
                                 )
 
-                        # Simple-mode: finalize
-                        if current_track and not track_scrobbled:
+                        # Simple-mode fallback: finalize current track
+                        if not session and current_track and not track_scrobbled:
                             finalize_simple(current_track, track_start)
 
-                        # Reset all state
-                        current_track = None
-                        current_art = None
-                        track_scrobbled = False
+                        # Reset loop state
+                        current_track    = None
+                        current_art      = None
+                        track_scrobbled  = False
                         music_start_time = None
-                        session_scrobbled.clear()
                         capture.reset()
                         display.show_idle()
                     continue
 
                 # ============================================================
-                #  MUSIC — mark start
+                #  MUSIC — mark start time
                 # ============================================================
                 if consecutive_silence > 0 or music_start_time is None:
                     music_start_time = time.time() - capture.step
                     logger.debug("Music started (est. %.0f)", music_start_time)
-
                 consecutive_silence = 0
 
                 # ============================================================
-                #  ALBUM-LOCK: timing advance
+                #  TIMING ADVANCE (album mode only)
                 # ============================================================
-                if album_lock and album_lock.is_locked():
-                    advance_scrobbles = album_lock.check_advance()
+                if session and session.is_locked():
+                    al_before = session.album_state
+                    prev_idx  = al_before.current_index if al_before else -1
+
+                    advance_scrobbles = session.check_advance()
                     for t, ts in advance_scrobbles:
                         do_scrobble(t, ts, backfill=False)
 
-                    predicted = album_lock.get_current_track()
+                    predicted = session.get_current_track()
                     if predicted:
-                        current_track = predicted
+                        current_track   = predicted
                         track_scrobbled = True
                         do_now_playing(predicted)
-                        al = album_lock.session
+                        al = session.album_state
                         display.show_track(
-                            predicted,
-                            cover_art=current_art,
+                            predicted, cover_art=current_art,
                             track_number=al.current_index + 1 if al else 0,
                         )
-
-                        if advance_scrobbles and album_lock.session:
-                            al = album_lock.session
+                        if advance_scrobbles and al and al.current_index != prev_idx:
                             notifier.track_advanced(
-                                al.tracklist.artist,
-                                al.tracklist.album_name,
+                                al.tracklist.artist, al.tracklist.album_name,
                                 predicted.title,
-                                al.current_index + 1,
-                                len(al.tracklist.tracks),
+                                al.current_index + 1, len(al.tracklist.tracks),
                             )
 
                 # ============================================================
                 #  FINGERPRINT
                 # ============================================================
-
-                # Wait for buffer to fill (need full 10s window)
                 if not capture.is_full:
                     continue
 
-                # -- Fingerprint the audio --
                 track = identify(wav_path, cfg.acoustid, cfg.fingerprint)
 
                 if not track:
-                    if album_lock and album_lock.is_locked():
-                        predicted = album_lock.get_current_track()
+                    # No ID — keep now-playing updated from session prediction
+                    if session and session.is_locked():
+                        predicted = session.get_current_track()
                         if predicted:
                             do_now_playing(predicted)
                     continue
 
                 # ============================================================
-                #  SPOTIFY LOOKUP (cached — no API call for repeated tracks)
+                #  SPOTIFY LOOKUP
                 # ============================================================
                 spotify_result = None
                 if spotify:
@@ -315,56 +299,46 @@ def main():
                     if spotify_result:
                         track = spotify_result.track
 
-                # ============================================================
-                #  FALSE POSITIVE FILTER — reject different-artist matches
-                #  when album-locked (e.g. "Chagali Mana" during Thriller)
-                # ============================================================
-                if (album_lock and album_lock.is_locked() and spotify_result
-                        and album_lock.session):
-                    locked_artist = album_lock.session.tracklist.artist.lower()
-                    matched_artist = spotify_result.track.artist.lower()
-                    if locked_artist != matched_artist:
-                        logger.info(
-                            "Rejecting false positive: '%s — %s' "
-                            "(locked on %s)",
-                            spotify_result.track.artist,
-                            spotify_result.track.title,
-                            album_lock.session.tracklist.artist,
-                        )
-                        continue
+                # Cover art (update whenever we get a fresh Spotify result)
+                if spotify_result and spotify_result.album_art_url:
+                    current_art = spotify.fetch_art(spotify_result.album_art_url)
 
                 # ============================================================
-                #  ALBUM LOCK
+                #  SMART SESSION (album-lock + compilation detection)
                 # ============================================================
-                if album_lock and spotify_result and not args.dry_run:
-                    was_locked = album_lock.is_locked()
-                    scrobbles = album_lock.on_track_identified(
-                        spotify_result, music_start_time,
-                    )
+                if session and spotify_result and not args.dry_run:
+                    was_locked  = session.is_locked()
+                    was_mode    = session.mode
+
+                    scrobbles = session.on_identified(spotify_result, music_start_time)
                     for t, ts in scrobbles:
                         do_scrobble(t, ts, backfill=True)
 
-                    if album_lock.is_locked() and not was_locked:
-                        al = album_lock.session
+                    # Notify when album-lock first activates
+                    if session.is_locked() and not was_locked:
+                        al = session.album_state
                         if al:
                             notifier.album_locked(
-                                al.tracklist.artist,
-                                al.tracklist.album_name,
-                                al.current_index + 1,
-                                len(al.tracklist.tracks),
+                                al.tracklist.artist, al.tracklist.album_name,
+                                al.current_index + 1, len(al.tracklist.tracks),
                                 track.title,
                             )
+
+                    # Log compilation mode switch
+                    if (session.mode == SessionMode.COMPILATION
+                            and was_mode != SessionMode.COMPILATION):
+                        logger.info(
+                            "Session: compilation mode active — per-track scrobble only",
+                        )
 
                 # ============================================================
                 #  DISPLAY
                 # ============================================================
-                if spotify_result and spotify_result.album_art_url:
-                    current_art = spotify.fetch_art(spotify_result.album_art_url)
-                al_session = album_lock.session if album_lock else None
+                al_state = session.album_state if session else None
                 display.show_track(
-                    track,
+                    session.get_current_track() or track if session else track,
                     cover_art=current_art,
-                    track_number=al_session.current_index + 1 if al_session else 0,
+                    track_number=al_state.current_index + 1 if al_state else 0,
                 )
 
                 # ============================================================
@@ -382,28 +356,39 @@ def main():
                             line += f"\n   ↳ canonical: {canon.artist} — {canon.title}"
                         if canon.duration and not track.duration:
                             line += f"\n   ↳ duration: {canon.duration}s"
-                    if album_lock and album_lock.is_locked():
-                        progress = album_lock.get_progress()
+                    if session and session.is_locked():
+                        progress = session.get_progress()
                         if progress:
                             line += f"\n   ↳ album-lock: {progress[0]:.0f}s / {progress[1]:.0f}s"
+                    if session and session.mode == SessionMode.COMPILATION:
+                        line += "\n   ↳ mode: COMPILATION"
                     print(line)
                     continue
 
                 # ============================================================
-                #  SCROBBLE
+                #  NOW PLAYING + SCROBBLE ELIGIBILITY
                 # ============================================================
-                if album_lock and album_lock.is_locked():
-                    predicted = album_lock.get_current_track() or track
+                if session and session.is_locked():
+                    # Album mode: session drives everything
+                    predicted = session.get_current_track() or track
                     do_now_playing(predicted)
-                    current_track = predicted
+                    current_track   = predicted
                     track_scrobbled = True
+
+                elif session and session.mode == SessionMode.COMPILATION:
+                    # Compilation mode: scrobble handled by session.on_identified above
+                    do_now_playing(track)
+                    current_track   = track
+                    track_scrobbled = True
+
                 else:
-                    # Simple mode — track change detection
-                    if current_track is None or track_key(track) != track_key(current_track):
+                    # Simple mode: no Spotify, or Spotify lookup returned nothing
+                    if (current_track is None
+                            or track_key(track) != track_key(current_track)):
                         if current_track and not track_scrobbled:
                             finalize_simple(current_track, track_start)
-                        current_track = track
-                        track_start = time.time()
+                        current_track   = track
+                        track_start     = time.time()
                         track_scrobbled = False
                         logger.info("Now playing: %s — %s", track.artist, track.title)
                         do_now_playing(track)
@@ -426,10 +411,10 @@ def main():
     # ------------------------------------------------------------------ #
     #  Shutdown                                                           #
     # ------------------------------------------------------------------ #
-    if album_lock:
-        for t, ts in album_lock.on_silence():
+    if session:
+        for t, ts in session.on_silence():
             do_scrobble(t, ts)
-    if current_track and not track_scrobbled:
+    elif current_track and not track_scrobbled:
         finalize_simple(current_track, track_start)
     if bot:
         bot.stop()
