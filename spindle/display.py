@@ -1,10 +1,9 @@
 """Spindle display driver — Waveshare 3.5" IPS LCD (480×320, /dev/fb0).
 
-Split layout: album art left, text panel right on solid dark background.
+Text-only layout on solid dark background for maximum readability.
 Writes RGB565 to the framebuffer with ILI9486 colour-inversion (XOR 0xFFFF).
 """
 
-import io
 import logging
 import threading
 from pathlib import Path
@@ -14,7 +13,7 @@ from .fingerprint import TrackInfo
 
 try:
     import numpy as np
-    from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+    from PIL import Image, ImageDraw, ImageFont
     _HAS_DEPS = True
     _LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 except ImportError:
@@ -26,14 +25,6 @@ logger = logging.getLogger(__name__)
 WIDTH = 480
 HEIGHT = 320
 BG = (10, 10, 10)
-
-# Layout constants
-ART_SIZE = 260
-ART_X = 20
-ART_Y = (HEIGHT - ART_SIZE) // 2  # vertically centred = 30
-
-TEXT_X = ART_X + ART_SIZE + 16     # 296
-TEXT_W = WIDTH - TEXT_X - 12       # 172
 
 _FONT_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -55,13 +46,6 @@ def _to_fb(img: Any) -> bytes:
     arr = np.array(img.convert("RGB"), dtype=np.uint16)
     r, g, b = arr[:, :, 0] >> 3, arr[:, :, 1] >> 2, arr[:, :, 2] >> 3
     return ((r << 11 | g << 5 | b) ^ 0xFFFF).astype("<u2").tobytes()
-
-
-def _enhance(img: Any) -> Any:
-    """Boost saturation + contrast for washed-out SPI TFTs."""
-    img = ImageEnhance.Color(img).enhance(1.25)
-    img = ImageEnhance.Contrast(img).enhance(1.15)
-    return img
 
 
 def _truncate(text: str, draw: Any, font: Any, max_w: int) -> str:
@@ -92,7 +76,6 @@ def _wrap(text: str, draw: Any, font: Any, max_w: int,
             break
     if current and len(lines) < max_lines:
         lines.append(current)
-    # Truncate last line if it overflows
     if lines:
         lines[-1] = _truncate(lines[-1], draw, font, max_w)
     return lines[:max_lines]
@@ -148,7 +131,7 @@ class Display:
             return
         self._last_key = key
         try:
-            self._write(self._render_track(track, cover_art, track_number, side))
+            self._write(self._render_track(track, track_number))
         except Exception:
             logger.exception("show_track failed")
 
@@ -187,8 +170,7 @@ class Display:
                   font=self._fonts["idle_small"], anchor="mm")
         return img
 
-    def _render_track(self, track: TrackInfo, cover_art: Optional[bytes],
-                      track_number: int, side: str) -> Any:
+    def _render_track(self, track: TrackInfo, track_number: int) -> Any:
         img = Image.new("RGB", (WIDTH, HEIGHT), BG)
         draw = ImageDraw.Draw(img)
         pad = 30
@@ -203,9 +185,8 @@ class Display:
         y = (HEIGHT - total_h) // 2
 
         # Artist
-        artist_text = _truncate(track.artist or "", draw,
-                                self._fonts["artist"], max_w)
-        draw.text((cx, y), artist_text, fill=(150, 150, 150),
+        draw.text((cx, y), _truncate(track.artist or "", draw,
+                  self._fonts["artist"], max_w), fill=(150, 150, 150),
                   font=self._fonts["artist"], anchor="mt")
         y += 28
 
@@ -218,9 +199,8 @@ class Display:
 
         # Album
         if track.album:
-            album_text = _truncate(track.album, draw,
-                                   self._fonts["album"], max_w)
-            draw.text((cx, y), album_text, fill=(90, 90, 90),
+            draw.text((cx, y), _truncate(track.album, draw,
+                      self._fonts["album"], max_w), fill=(90, 90, 90),
                       font=self._fonts["album"], anchor="mt")
 
         return img

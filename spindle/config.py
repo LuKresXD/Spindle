@@ -32,7 +32,7 @@ class AudioConfig:
     device: str = "default"
     sample_rate: int = 44100
     channels: int = 2
-    chunk_duration: int = 25
+    chunk_duration: int = 10
 
 
 @dataclass
@@ -52,15 +52,13 @@ class ScrobbleConfig:
 
 @dataclass
 class SilenceConfig:
-    threshold_db: float = -40.0
+    threshold_db: float = -22.0
     min_silence_seconds: float = 3.0
 
 
 @dataclass
 class DisplayConfig:
     enabled: bool = False
-    width: int = 480
-    height: int = 320
     fb_path: str = "/dev/fb0"
 
 

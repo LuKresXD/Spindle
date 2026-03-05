@@ -37,9 +37,7 @@ silence:
 
 display:
   enabled: false                            # enable when LCD is connected
-  width: 480
-  height: 320
-  spi_device: "/dev/spidev0.0"
+  fb_path: "/dev/fb0"                       # framebuffer device for Waveshare LCD
 
 telegram:
   bot_token: ""                             # from @BotFather
