@@ -178,6 +178,14 @@ class SpindleBot:
     def _cmd_now(self) -> None:
         """Current playback with album art photo."""
         uptime = _format_duration(time.time() - self.start_time)
+        ear = ""
+        if self.player is not None:
+            st = self.player.state
+            ear = f"\n🎚 {st.level_db:.1f} dB · {st.phase.value}"
+            if st.position:
+                ear += f" · {st.position}"
+            if st.art_source:
+                ear += f" · art: {st.art_source}"
 
         if self.session and self.session.is_locked():
             al = self.session.album_state
@@ -202,7 +210,7 @@ class SpindleBot:
                     lines.append(f"⏱ {_format_mmss(elapsed)} / {_format_mmss(duration)}")
 
                 lines.append(f"✅ Scrobbled: {len(al.scrobbled)}")
-                lines.append(f"\n🕐 Uptime: {uptime}")
+                lines.append(f"\n🕐 Uptime: {uptime}{ear}")
 
                 caption = "\n".join(lines)
                 art_url = self.notifier.current_art_url if self.notifier else None
@@ -222,12 +230,12 @@ class SpindleBot:
                         "🎛 <b>Compilation mode</b>",
                         f"▶️ {_esc(track.artist)} — <i>{_esc(track.title)}</i>",
                         f"✅ Scrobbled: {self.session.comp_scrobbled_count}",
-                        f"\n🕐 Uptime: {uptime}",
+                        f"\n🕐 Uptime: {uptime}{ear}",
                     ]
                     self._send("\n".join(lines))
                     return
 
-        self._send(f"⏸ <b>Idle</b> — no music detected\n\n🕐 Uptime: {uptime}")
+        self._send(f"⏸ <b>Idle</b> — no music detected\n\n🕐 Uptime: {uptime}{ear}")
 
     def _cmd_album(self) -> str:
         """Full tracklist with scrobble checkmarks."""

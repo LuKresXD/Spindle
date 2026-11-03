@@ -33,7 +33,9 @@ scrobble:
 
 silence:
   threshold_db: -45                         # line-level USB capture: idle floor is ~-50 dB
-  min_silence_seconds: 8
+  min_silence_seconds: 8                    # quiet this long = side over (run-out groove)
+  start_margin_db: 6                        # music must clear threshold + margin to start a session
+  start_ticks: 2                            # ... for this many 2 s ticks (run-out noise sits at the threshold)
 
 display:
   enabled: false                            # enable when a screen is connected (HDMI or Waveshare LCD)

@@ -92,6 +92,7 @@ class Player:
         self.music_since: float | None = None      # when the current music run began
         self.silent_since: float | None = None     # when the current quiet run began
         self.last_identify_at = 0.0
+        self._loud_ticks = 0
 
         # what we believe is playing (any mode)
         self.current_track: TrackInfo | None = None
@@ -105,12 +106,29 @@ class Player:
     def tick(self) -> ScreenState:
         now = self.clock()
         self.level_db = self.capture.level_db(self.step)
-        quiet = self.level_db < self.cfg.silence.threshold_db
+        sil = self.cfg.silence
+        quiet = self.level_db < sil.threshold_db
+
+        # Hysteresis: a run-out groove or surface noise sits right around the
+        # threshold, so STARTING a session needs threshold + margin for a few
+        # consecutive ticks, while ENDING one only needs the plain threshold
+        # for min_silence_seconds.
+        if self.phase == Phase.IDLE:
+            if self.level_db >= sil.threshold_db + sil.start_margin_db:
+                self._loud_ticks += 1
+            else:
+                self._loud_ticks = 0
+            if self._loud_ticks < max(1, sil.start_ticks):
+                self._quiet_tick(now)
+                return self._publish(now)
 
         if quiet:
             self._quiet_tick(now)
         else:
             self._music_tick(now)
+        return self._publish(now)
+
+    def _publish(self, now: float) -> ScreenState:
 
         self.state = self._build_state(now)
         return self.state
@@ -152,6 +170,7 @@ class Player:
             self._finalize_simple(self.current_track, self.track_start)
 
         self.phase = Phase.IDLE
+        self._loud_ticks = 0
         self.music_since = None
         self.current_track = None
         self.current_art = None
@@ -161,7 +180,8 @@ class Player:
     def _music_tick(self, now: float) -> None:
         self.silent_since = None
         if self.phase == Phase.IDLE:
-            self.music_since = now - self.step
+            # the session began when the loud run began, not on this tick
+            self.music_since = now - self.step * max(1, self._loud_ticks)
             self.phase = Phase.LISTENING
             logger.info("Music started (%.1f dB)", self.level_db)
 

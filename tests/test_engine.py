@@ -100,6 +100,8 @@ def test_idle_until_music_then_listening_then_playing(tmp_path):
     st = player.tick()
     assert st.phase == Phase.IDLE
     cap.level = -20
+    assert player.tick().phase == Phase.IDLE        # one loud tick is not a session yet
+    clock.advance(2)
     st = player.tick()
     # first ID shows the track right away (no tracklist yet: not confirmed)
     assert st.phase == Phase.PLAYING and st.title == "Track 2" and not st.tracklist
@@ -112,6 +114,28 @@ def test_idle_until_music_then_listening_then_playing(tmp_path):
     assert st.album_playcount == 7
     assert st.art == b"\x89PNG-not-really"
     assert rec.now_playing[-1] == "Track 2"
+
+
+def test_runout_noise_near_threshold_never_starts_a_session(tmp_path):
+    clock = FakeClock()
+    calls = {"n": 0}
+
+    def identify(path):
+        calls["n"] += 1
+        return None
+
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    for level in (-44.6, -42.0, -46, -43.5, -41, -44, -40.5, -42):
+        cap.level = level
+        st = player.tick()
+        clock.advance(2)
+        assert st.phase == Phase.IDLE
+    assert calls["n"] == 0                          # no fingerprinting of noise
+    cap.level = -30                                 # real music: two ticks to start
+    assert player.tick().phase == Phase.IDLE
+    clock.advance(2)
+    assert player.tick().phase == Phase.LISTENING
+    assert player.music_since == clock.t - 4        # counted from the first loud tick
 
 
 def test_quiet_pause_does_not_end_session(tmp_path):

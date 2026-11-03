@@ -51,7 +51,9 @@ class ScrobbleConfig:
 @dataclass
 class SilenceConfig:
     threshold_db: float = -45.0
-    min_silence_seconds: float = 8.0   # quiet this long = the side is over (run-out groove)
+    min_silence_seconds: float = 8.0   # quiet this long = the side is over
+    start_margin_db: float = 6.0       # music must clear threshold + margin to START a session
+    start_ticks: int = 2               # ... for this many consecutive ticks (2 s each)
 
 
 @dataclass
