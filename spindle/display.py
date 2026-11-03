@@ -9,7 +9,9 @@ layout scales to whatever panel is attached.
 OLED rules:
   * idle = pure black (pixels off: no burn-in, no "listening" text)
   * every frame is offset by a few pixels on a slow time-based cycle, so
-    the static parts of the UI never sit on the same pixels for hours
+    the static parts of the UI never sit on the same pixels for hours;
+    a playing track is re-rendered every REFRESH_S so the shift actually
+    cycles and a cleared console (VT switch after an HDMI hotplug) heals
   * no saturation/contrast boosting (that was for the washed-out TFT and
     is applied only on the legacy LCD)
 """
@@ -372,6 +374,8 @@ class Renderer:
 class Display:
     """Owns /dev/fbN and pushes rendered frames to it."""
 
+    REFRESH_S = 60.0   # re-render a still-playing track this often (pixel shift + console heal)
+
     def __init__(self, enabled: bool = False, fb_path: str = "/dev/fb0"):
         self.enabled = enabled
         self._fb_path = fb_path
@@ -379,6 +383,7 @@ class Display:
         self._renderer: Optional[Renderer] = None
         self._lock = threading.Lock()
         self._last_key: Optional[tuple] = None
+        self._last_render = 0.0
 
     def init(self) -> None:
         if not self.enabled:
@@ -407,9 +412,11 @@ class Display:
         if not self.enabled:
             return
         key = (track.artist, track.title, track_number, len(cover_art or b""))
-        if key == self._last_key:
+        now = time.monotonic()
+        if key == self._last_key and now - self._last_render < self.REFRESH_S:
             return
         self._last_key = key
+        self._last_render = now
         try:
             self._write(self._renderer.track(track, cover_art, track_number))
         except Exception:
