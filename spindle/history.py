@@ -4,9 +4,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 from .fingerprint import TrackInfo
 
@@ -20,7 +19,7 @@ class HistoryEntry:
     artist: str
     title: str
     album: str
-    duration: Optional[int]
+    duration: int | None
     timestamp: float  # unix epoch
     source: str  # "live", "backfill", "queue_flush"
 
@@ -49,7 +48,7 @@ class HistoryEntry:
 class ScrobbleHistory:
     """Append-only JSONL log of all scrobbles."""
 
-    def __init__(self, path: Optional[Path] = None):
+    def __init__(self, path: Path | None = None):
         self.path = path or DEFAULT_HISTORY_PATH
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +98,7 @@ class ScrobbleHistory:
         """Convert period name to epoch start timestamp."""
         now = time.time()
         if period == "today":
-            return datetime.now(timezone.utc).replace(
+            return datetime.now().astimezone().replace(
                 hour=0, minute=0, second=0, microsecond=0,
             ).timestamp()
         elif period == "week":
@@ -110,7 +109,7 @@ class ScrobbleHistory:
 
     # ── Queries ──────────────────────────────────────────────────────────
 
-    def recent(self, count: int = 10, artist: Optional[str] = None) -> list[HistoryEntry]:
+    def recent(self, count: int = 10, artist: str | None = None) -> list[HistoryEntry]:
         """Get the most recent N entries, optionally filtered by artist."""
         if not self.path.exists():
             return []
@@ -227,7 +226,7 @@ class ScrobbleHistory:
                     "total_days": 0, "first_date": None}
 
         dates = sorted(set(
-            datetime.fromtimestamp(e.timestamp, tz=timezone.utc).date()
+            datetime.fromtimestamp(e.timestamp).astimezone().date()
             for e in entries
         ))
 
@@ -245,7 +244,7 @@ class ScrobbleHistory:
             elif (dates[i] - dates[i - 1]).days > 1:
                 current_streak = 1
 
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now().astimezone().date()
         if dates[-1] == today or dates[-1] == today - timedelta(days=1):
             active_streak = current_streak
         else:
@@ -259,7 +258,7 @@ class ScrobbleHistory:
             "first_date": dates[0].isoformat(),
         }
 
-    def recognition_stats(self, since: Optional[float] = None) -> dict:
+    def recognition_stats(self, since: float | None = None) -> dict:
         """Fingerprint recognition rate: live (fingerprinted) vs backfill (inferred)."""
         entries = self._load_since(since) if since else self._load_all()
         live = sum(1 for e in entries if e.source == "live")

@@ -10,7 +10,6 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 import requests
 
@@ -43,14 +42,19 @@ class AlbumTracklist:
     album_name: str
     artist: str
     tracks: list = field(default_factory=list)  # list of TrackInfo, ordered by disc+track number
+    release_date: str = ""                      # "2004-03-23" / "2004" as Spotify gives it
 
-    def get_track_at(self, index: int) -> Optional[TrackInfo]:
+    @property
+    def year(self) -> str:
+        return self.release_date[:4] if self.release_date else ""
+
+    def get_track_at(self, index: int) -> TrackInfo | None:
         """Get track at 0-based index."""
         if 0 <= index < len(self.tracks):
             return self.tracks[index]
         return None
 
-    def find_track_index(self, title: str) -> Optional[int]:
+    def find_track_index(self, title: str) -> int | None:
         """Find a track's 0-based index by title (case-insensitive)."""
         title_lower = title.lower()
         for i, t in enumerate(self.tracks):
@@ -62,10 +66,10 @@ class AlbumTracklist:
 class SpotifyClient:
     def __init__(self, cfg: SpotifyConfig):
         self.cfg = cfg
-        self._token: Optional[str] = None
+        self._token: str | None = None
         self._token_expiry: float = 0
         self._album_cache: dict[str, AlbumTracklist] = {}
-        self._lookup_cache: dict[str, Optional["SpotifyTrack"]] = {}
+        self._lookup_cache: dict[str, SpotifyTrack | None] = {}
         self._art_cache: dict[str, bytes] = {}  # url → image bytes
         self._backoff_until: float = 0  # rate limit backoff timestamp
 
@@ -90,7 +94,7 @@ class SpotifyClient:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._get_token()}"}
 
-    def lookup(self, artist: str, title: str) -> Optional[SpotifyTrack]:
+    def lookup(self, artist: str, title: str) -> SpotifyTrack | None:
         """Search Spotify for a track and return canonical info + album position.
 
         Returns SpotifyTrack with canonical names and album metadata, or None.
@@ -178,11 +182,12 @@ class SpotifyClient:
                 confidence=1.0,
             )
 
-            # Pick album art URL closest to 300px (good fit for 280px display)
+            # Largest album art Spotify offers (640 px); the screen shows the
+            # cover at ~1000 px, so this is only the fallback source (see art.py).
             images = album_data.get("images", [])
             art_url = ""
             if images:
-                best_img = min(images, key=lambda i: abs(i.get("width", 0) - 300))
+                best_img = max(images, key=lambda i: i.get("width", 0))
                 art_url = best_img.get("url", "")
 
             result = SpotifyTrack(
@@ -209,7 +214,7 @@ class SpotifyClient:
             logger.warning("Spotify lookup failed: %s", e)
             return None
 
-    def get_album_tracklist(self, album_id: str) -> Optional[AlbumTracklist]:
+    def get_album_tracklist(self, album_id: str) -> AlbumTracklist | None:
         """Fetch full album tracklist from Spotify. Cached per album_id."""
         if album_id in self._album_cache:
             return self._album_cache[album_id]
@@ -244,6 +249,7 @@ class SpotifyClient:
                 album_name=album_name,
                 artist=album_artist,
                 tracks=tracks,
+                release_date=data.get("release_date", "") or "",
             )
 
             logger.info(
@@ -258,7 +264,7 @@ class SpotifyClient:
             logger.warning("Failed to fetch album tracklist: %s", e)
             return None
 
-    def fetch_art(self, url: str) -> Optional[bytes]:
+    def fetch_art(self, url: str) -> bytes | None:
         """Download album art image bytes. Cached by URL."""
         if not url:
             return None

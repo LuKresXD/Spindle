@@ -18,17 +18,18 @@ Commands:
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import requests
 import yaml
 
 if TYPE_CHECKING:
-    from .session import ScrobbleSession
+    from .engine import Player
     from .history import ScrobbleHistory
     from .notify import Notifier
+    from .session import ScrobbleSession
 
 logger = logging.getLogger(__name__)
 
@@ -39,18 +40,20 @@ class SpindleBot:
     """Telegram bot with rich command handling."""
 
     def __init__(self, bot_token: str, chat_id: str,
-                 session: "Optional[ScrobbleSession]" = None,
-                 history: "Optional[ScrobbleHistory]" = None,
-                 notifier: "Optional[Notifier]" = None,
-                 start_time: Optional[float] = None):
+                 session: "ScrobbleSession | None" = None,
+                 history: "ScrobbleHistory | None" = None,
+                 notifier: "Notifier | None" = None,
+                 start_time: float | None = None,
+                 player: "Player | None" = None):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.session = session
         self.history = history
         self.notifier = notifier
+        self.player = player
         self.start_time = start_time or time.time()
         self._running = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._offset = 0
 
     def start(self) -> None:
@@ -187,7 +190,8 @@ class SpindleBot:
                 bar = _progress_bar(idx, total, width=10)
 
                 lines = [
-                    f"🎵 <b>{_esc(al.tracklist.artist)}</b> — <i>{_esc(al.tracklist.album_name)}</i>",
+                    f"🎵 <b>{_esc(al.tracklist.artist)}</b> — "
+                    f"<i>{_esc(al.tracklist.album_name)}</i>",
                     "",
                     f"▶️ <b>{_esc(track.title)}</b>",
                     f"Track {idx}/{total} {bar}",
@@ -273,14 +277,16 @@ class SpindleBot:
             al = self.session.album_state
             if al:
                 lines.append("Mode: <b>ALBUM</b>")
-                lines.append(f"Album: {_esc(al.tracklist.artist)} — <i>{_esc(al.tracklist.album_name)}</i>")
+                lines.append(f"Album: {_esc(al.tracklist.artist)} — "
+                             f"<i>{_esc(al.tracklist.album_name)}</i>")
                 lines.append(f"Track: {al.current_index + 1}/{len(al.tracklist.tracks)}")
                 lines.append(f"Scrobbled: {len(al.scrobbled)}")
                 lines.append(f"Anchors: {len(al.anchors)} fingerprint confirmations")
 
                 progress = self.session.get_progress()
                 if progress:
-                    lines.append(f"Position: {_format_mmss(progress[0])} / {_format_mmss(progress[1])}")
+                    lines.append(f"Position: {_format_mmss(progress[0])} / "
+                                 f"{_format_mmss(progress[1])}")
 
         elif mode == SessionMode.COMPILATION:
             lines.append("Mode: <b>COMPILATION</b>")
@@ -309,7 +315,7 @@ class SpindleBot:
 
         lines = [f"📜 <b>Recent scrobbles</b> ({len(entries)})\n"]
         for e in entries:
-            dt = datetime.fromtimestamp(e.timestamp, tz=timezone.utc)
+            dt = datetime.fromtimestamp(e.timestamp).astimezone()
             time_str = dt.strftime("%H:%M")
             src = " ↩️" if e.source == "backfill" else ""
             lines.append(
@@ -331,7 +337,7 @@ class SpindleBot:
 
         lines = [f"🔍 <b>Recent:</b> {_esc(query)}\n"]
         for e in entries:
-            dt = datetime.fromtimestamp(e.timestamp, tz=timezone.utc)
+            dt = datetime.fromtimestamp(e.timestamp).astimezone()
             time_str = dt.strftime("%m/%d %H:%M")
             lines.append(f"<code>{time_str}</code> {_esc(e.title)}")
 
@@ -437,7 +443,8 @@ class SpindleBot:
         lines = ["🔥 <b>Listening streak</b>\n"]
 
         if st["current"] > 0:
-            lines.append(f"Current: <b>{st['current']} day{'s' if st['current'] != 1 else ''}</b> 🔥")
+            days = f"{st['current']} day{'s' if st['current'] != 1 else ''}"
+            lines.append(f"Current: <b>{days}</b> 🔥")
         else:
             lines.append("Current: <b>0 days</b> — listen to vinyl today!")
 

@@ -1,11 +1,11 @@
 """Last.fm scrobbling via pylast with offline queue."""
 
+import contextlib
 import hashlib
 import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 import pylast
 
@@ -39,15 +39,11 @@ def canonicalize_track(track: TrackInfo, network: pylast.LastFMNetwork) -> Track
 
         t = pylast.Track(corrected_artist, title, network)
 
-        try:
+        with contextlib.suppress(Exception):
             title = t.get_correction() or title
-        except Exception:
-            pass
 
-        try:
+        with contextlib.suppress(Exception):
             title = t.get_title(properly_capitalized=True) or title
-        except Exception:
-            pass
 
         if not duration:
             try:
@@ -81,7 +77,7 @@ class ScrobbleQueue:
     File is atomic-written (write to .tmp, rename) to avoid corruption.
     """
 
-    def __init__(self, path: Optional[Path] = None):
+    def __init__(self, path: Path | None = None):
         self.path = path or DEFAULT_QUEUE_PATH
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._queue: list[dict] = self._load()
@@ -144,16 +140,16 @@ class Scrobbler:
     """
 
     def __init__(self, lastfm_cfg: LastFMConfig, scrobble_cfg: ScrobbleConfig,
-                 queue_path: Optional[Path] = None):
+                 queue_path: Path | None = None):
         self.cfg = lastfm_cfg
         self.scrobble_cfg = scrobble_cfg
-        self.network: Optional[pylast.LastFMNetwork] = None
-        self._last_scrobble: Optional[str] = None
+        self.network: pylast.LastFMNetwork | None = None
+        self._last_scrobble: str | None = None
         self._last_scrobble_time: float = 0
         self._queue = ScrobbleQueue(queue_path)
         self._last_flush_attempt: float = 0
         # Now-playing rate limiting
-        self._last_np_key: Optional[str] = None
+        self._last_np_key: str | None = None
         self._last_np_time: float = 0
 
     def connect(self) -> None:
@@ -198,7 +194,7 @@ class Scrobbler:
         except Exception as e:
             logger.debug("Failed to update now playing: %s", e)
 
-    def scrobble(self, track: TrackInfo, timestamp: Optional[int] = None) -> bool:
+    def scrobble(self, track: TrackInfo, timestamp: int | None = None) -> bool:
         """Scrobble a track. On failure, queues for later retry.
 
         Returns True if scrobbled immediately, False if queued or deduped.
@@ -245,6 +241,17 @@ class Scrobbler:
                 timestamp=ts,
             )
             return False
+
+    def album_playcount(self, artist: str, album: str) -> int | None:
+        """How many times this user has scrobbled tracks from the album (Last.fm)."""
+        if not self.network or not artist or not album:
+            return None
+        try:
+            count = self.network.get_album(artist, album).get_userplaycount()
+            return int(count) if count is not None else None
+        except Exception as e:
+            logger.debug("Album playcount lookup failed: %s", e)
+            return None
 
     def flush_queue(self) -> int:
         """Manually flush the offline queue. Returns number of scrobbles sent."""

@@ -32,12 +32,20 @@ scrobble:
   dedup_window: 300                         # ignore same track within 5 min
 
 silence:
-  threshold_db: -22                         # vinyl surface noise is ~-25 dB
-  min_silence_seconds: 3
+  threshold_db: -45                         # line-level USB capture: idle floor is ~-50 dB
+  min_silence_seconds: 8
 
 display:
   enabled: false                            # enable when a screen is connected (HDMI or Waveshare LCD)
   fb_path: "/dev/fb0"                       # framebuffer device; size/depth auto-detected from sysfs
+
+discogs:
+  token: ""                                 # personal access token (discogs.com/settings/developers)
+  username: ""                              # the screen shows "A3 · SIDE A" from your collection's pressings
+
+art:
+  itunes: true                              # 1200 px covers from Apple's catalog
+  deezer: true                              # has the explicit albums Apple's search hides
 
 telegram:
   bot_token: ""                             # from @BotFather

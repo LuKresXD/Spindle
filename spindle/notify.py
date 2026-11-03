@@ -9,7 +9,6 @@ Sends rich notifications via the Telegram Bot API:
 
 import logging
 import threading
-from typing import Optional
 
 import requests
 
@@ -32,9 +31,9 @@ class Notifier:
         self.muted = False
 
         # Now-playing message tracking (for in-place edits)
-        self._np_msg_id: Optional[int] = None
+        self._np_msg_id: int | None = None
         self._np_is_photo: bool = False
-        self.current_art_url: Optional[str] = None
+        self.current_art_url: str | None = None
 
         # Scrobble tracking for session summaries
         self._session_tracks: list[str] = []  # "artist — title" for this session
@@ -45,7 +44,7 @@ class Notifier:
     # ── Low-level Telegram API ───────────────────────────────────────────
 
     def _api(self, method: str, payload: dict,
-             timeout: int = 10) -> Optional[dict]:
+             timeout: int = 10) -> dict | None:
         """Call a Telegram Bot API method. Returns the result dict or None."""
         if not self.enabled:
             return None
@@ -61,7 +60,7 @@ class Notifier:
             logger.debug("Telegram %s error: %s", method, e)
             return None
 
-    def _send_text(self, text: str, silent: Optional[bool] = None) -> Optional[int]:
+    def _send_text(self, text: str, silent: bool | None = None) -> int | None:
         """Send a text message synchronously. Returns message_id."""
         result = self._api("sendMessage", {
             "chat_id": self.cfg.chat_id,
@@ -71,7 +70,7 @@ class Notifier:
         })
         return result.get("message_id") if result else None
 
-    def _send_photo(self, photo_url: str, caption: str) -> Optional[int]:
+    def _send_photo(self, photo_url: str, caption: str) -> int | None:
         """Send a photo message synchronously. Returns message_id."""
         result = self._api("sendPhoto", {
             "chat_id": self.cfg.chat_id,
@@ -108,7 +107,7 @@ class Notifier:
         """Run a function on a background thread (fire-and-forget)."""
         threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True).start()
 
-    def _fire_send(self, text: str, silent: Optional[bool] = None) -> None:
+    def _fire_send(self, text: str, silent: bool | None = None) -> None:
         """Fire-and-forget text send (no message_id needed)."""
         if not self.enabled or self.muted:
             return
@@ -139,7 +138,7 @@ class Notifier:
 
     def album_locked(self, artist: str, album: str, track_num: int,
                      total_tracks: int, first_track: str,
-                     art_url: Optional[str] = None) -> None:
+                     art_url: str | None = None) -> None:
         """Notify when album-lock activates — sends photo if art available."""
         if self.muted:
             self.current_art_url = art_url

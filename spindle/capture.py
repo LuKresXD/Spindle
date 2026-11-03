@@ -1,141 +1,189 @@
-"""Audio capture from ALSA device with sliding window.
+"""Continuous audio capture: one long-running arecord, a ring buffer in memory.
 
-Records in short segments (default 2s) and concatenates the last N into a
-full fingerprint window (default 10s). This gives a new 10s window every 2s,
-dramatically reducing identification latency without sacrificing quality.
+The old design recorded 2 s, then stopped recording while it fingerprinted
+(up to 20 s of network calls), then recorded another 2 s. The "sliding
+window" it fingerprinted was therefore three 2 s pieces from different
+moments glued together, which is poison for Chromaprint. Here arecord runs
+for the life of the process and a reader thread keeps the last
+`window_seconds` (+ a little slack) of raw PCM in a ring buffer. Any caller
+can ask for the level of the last N seconds or a contiguous WAV of the last
+N seconds at any time, independent of how long identification takes.
 
-Example with step=2s, window=10s:
-  t=0s   → record 2s → buffer=[A]           → fingerprint A (2s, short)
-  t=2s   → record 2s → buffer=[A,B]         → fingerprint A+B (4s)
-  ...
-  t=8s   → record 2s → buffer=[A,B,C,D,E]  → fingerprint A+B+C+D+E (10s)
-  t=10s  → record 2s → buffer=[B,C,D,E,F]  → fingerprint B+C+D+E+F (10s)
+If arecord dies (USB device hiccup, unplugged cable) the reader logs it,
+waits, and restarts it. `buffered_seconds()` tells the caller how much
+real audio it has.
 """
 
-import collections
+from __future__ import annotations
+
+import contextlib
+import logging
+import math
 import struct
 import subprocess
 import tempfile
-import logging
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
 
-from .config import AudioConfig, SilenceConfig
+from .config import AudioConfig
 
 logger = logging.getLogger(__name__)
 
-# Default step size (seconds) — how often we get a new window
-DEFAULT_STEP = 2
+DEFAULT_STEP = 2            # seconds between engine ticks
+SILENCE_FLOOR_DB = -120.0   # reported level when there is no audio at all
+_READ_SECONDS = 0.25        # reader granularity
+_RESTART_DELAY = 2.0        # seconds to wait before relaunching a dead arecord
 
 
-class SlidingCapture:
-    """Sliding window audio capture.
+def rms_db(pcm: bytes) -> float:
+    """RMS level of 16-bit little-endian PCM, in dBFS."""
+    if len(pcm) < 2:
+        return SILENCE_FLOOR_DB
+    data = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype=np.int16)
+    if data.size == 0:
+        return SILENCE_FLOOR_DB
+    rms = math.sqrt(float(np.mean(data.astype(np.float64) ** 2)))
+    if rms <= 0:
+        return SILENCE_FLOOR_DB
+    return 20 * math.log10(rms / 32768.0)
 
-    Records `step` seconds at a time, keeps a ring buffer of segments,
-    and concatenates them into `chunk_duration` second windows.
-    """
 
-    def __init__(self, audio_cfg: AudioConfig, step: int = DEFAULT_STEP):
+def write_wav(path: Path, pcm: bytes, sample_rate: int, channels: int) -> None:
+    """Write raw 16-bit PCM as a canonical WAV file."""
+    bps = 16
+    with open(path, "wb") as f:
+        f.write(b"RIFF")
+        f.write(struct.pack("<I", 36 + len(pcm)))
+        f.write(b"WAVE")
+        f.write(b"fmt ")
+        f.write(struct.pack("<IHHIIHH", 16, 1, channels, sample_rate,
+                            sample_rate * channels * bps // 8, channels * bps // 8, bps))
+        f.write(b"data")
+        f.write(struct.pack("<I", len(pcm)))
+        f.write(pcm)
+
+
+class ContinuousCapture:
+    """Ring buffer of the most recent audio, fed by a background arecord."""
+
+    def __init__(self, audio_cfg: AudioConfig, window_seconds: int | None = None,
+                 slack_seconds: float = 2.0):
         self.cfg = audio_cfg
-        self.step = step
-        # How many segments to keep for a full window
-        self.num_segments = max(audio_cfg.chunk_duration // step, 1)
-        self._segments: collections.deque[bytes] = collections.deque(
-            maxlen=self.num_segments,
-        )
-        logger.info(
-            "Sliding capture: %ds window, %ds step (%d segments)",
-            audio_cfg.chunk_duration, step, self.num_segments,
-        )
+        self.window_seconds = int(window_seconds or audio_cfg.chunk_duration)
+        self.bytes_per_second = audio_cfg.sample_rate * audio_cfg.channels * 2
+        self._capacity = int(self.bytes_per_second * (self.window_seconds + slack_seconds))
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen | None = None
+        self.restarts = 0
+        self.last_error: str | None = None
+
+    # ── lifecycle ────────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, name="capture", daemon=True)
+        self._thread.start()
+        logger.info("Capture: %s, %d Hz, %d ch, %ds window",
+                    self.cfg.device, self.cfg.sample_rate, self.cfg.channels,
+                    self.window_seconds)
+
+    def stop(self) -> None:
+        self._running = False
+        proc = self._proc
+        if proc and proc.poll() is None:
+            proc.terminate()
+        if self._thread:
+            self._thread.join(timeout=3)
 
     @property
-    def is_full(self) -> bool:
-        """True when the buffer has enough segments for a full window."""
-        return len(self._segments) >= self.num_segments
+    def running(self) -> bool:
+        return self._running and self._proc is not None and self._proc.poll() is None
 
-    def capture(self) -> Path:
-        """Record one step and return a WAV of the full sliding window."""
-        segment = self._record_segment()
-        self._segments.append(segment)
+    # ── reads ────────────────────────────────────────────────────────────────
 
-        # Concatenate all segments in buffer
-        full_pcm = b"".join(self._segments)
+    def buffered_seconds(self) -> float:
+        with self._lock:
+            return len(self._buf) / self.bytes_per_second
 
-        # Write as WAV
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmp.close()
-        output = Path(tmp.name)
-        self._write_wav(output, full_pcm)
+    def last_pcm(self, seconds: float) -> bytes:
+        n = int(seconds * self.bytes_per_second)
+        n -= n % (self.cfg.channels * 2)              # whole frames only
+        with self._lock:
+            return bytes(self._buf[-n:]) if n > 0 else b""
 
-        duration = len(full_pcm) / (self.cfg.sample_rate * self.cfg.channels * 2)
-        logger.debug("Window: %.1fs (%d segments, %.1f KB)",
-                     duration, len(self._segments), output.stat().st_size / 1024)
-        return output
+    def level_db(self, seconds: float = DEFAULT_STEP) -> float:
+        """RMS level of the most recent `seconds` of audio."""
+        return rms_db(self.last_pcm(seconds))
 
-    def reset(self) -> None:
-        """Clear the buffer (call after silence to start fresh)."""
-        self._segments.clear()
+    def window_wav(self, seconds: float | None = None, min_seconds: float = 2.0) -> Path | None:
+        """Write the last `seconds` (default: the full window) to a temp WAV.
 
-    def _record_segment(self) -> bytes:
-        """Record `step` seconds and return raw PCM bytes."""
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        Returns None when fewer than `min_seconds` are buffered yet. The
+        caller owns the file and must unlink it.
+        """
+        pcm = self.last_pcm(seconds or self.window_seconds)
+        if len(pcm) < min_seconds * self.bytes_per_second:
+            return None
+        tmp = tempfile.NamedTemporaryFile(prefix="spindle-", suffix=".wav", delete=False)
         tmp.close()
         path = Path(tmp.name)
+        write_wav(path, pcm, self.cfg.sample_rate, self.cfg.channels)
+        return path
 
-        cmd = [
-            "arecord",
-            "-D", self.cfg.device,
-            "-f", "S16_LE",
-            "-r", str(self.cfg.sample_rate),
-            "-c", str(self.cfg.channels),
-            "-d", str(self.step),
-            "-q",
-            str(path),
+    def clear(self) -> None:
+        with self._lock:
+            self._buf.clear()
+
+    # ── reader thread ────────────────────────────────────────────────────────
+
+    def _command(self) -> list[str]:
+        return [
+            "arecord", "-D", self.cfg.device, "-f", "S16_LE",
+            "-r", str(self.cfg.sample_rate), "-c", str(self.cfg.channels),
+            "-t", "raw", "-q", "-",
         ]
 
-        try:
-            subprocess.run(cmd, check=True, timeout=self.step + 5)
-            raw = path.read_bytes()
-            return raw[44:] if len(raw) > 44 else b""
-        finally:
-            path.unlink(missing_ok=True)
-
-    def _write_wav(self, path: Path, pcm_data: bytes) -> None:
-        """Write raw PCM data as a WAV file."""
-        ch = self.cfg.channels
-        sr = self.cfg.sample_rate
-        bps = 16
-        with open(path, "wb") as f:
-            f.write(b"RIFF")
-            f.write(struct.pack("<I", 36 + len(pcm_data)))
-            f.write(b"WAVE")
-            f.write(b"fmt ")
-            f.write(struct.pack("<IHHIIHH", 16, 1, ch, sr,
-                                sr * ch * bps // 8, ch * bps // 8, bps))
-            f.write(b"data")
-            f.write(struct.pack("<I", len(pcm_data)))
-            f.write(pcm_data)
-
-
-def is_silence(wav_path: Path, silence_cfg: SilenceConfig) -> bool:
-    """Check if a WAV file is effectively silence."""
-    try:
-        data = np.frombuffer(
-            Path(wav_path).read_bytes()[44:],
-            dtype=np.int16,
-        )
-        if len(data) == 0:
-            return True
-
-        rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
-        if rms == 0:
-            return True
-
-        db = 20 * np.log10(rms / 32768.0)
-        logger.debug("Audio level: %.1f dB (threshold: %.1f dB)", db, silence_cfg.threshold_db)
-        return db < silence_cfg.threshold_db
-
-    except Exception as e:
-        logger.warning("Silence detection failed: %s", e)
-        return False
+    def _run(self) -> None:
+        read_size = int(self.bytes_per_second * _READ_SECONDS)
+        while self._running:
+            try:
+                self._proc = subprocess.Popen(
+                    self._command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+            except OSError as e:
+                self.last_error = str(e)
+                logger.error("Capture: cannot start arecord: %s", e)
+                time.sleep(_RESTART_DELAY)
+                continue
+            proc = self._proc
+            assert proc.stdout is not None
+            while self._running:
+                chunk = proc.stdout.read(read_size)
+                if not chunk:
+                    break
+                with self._lock:
+                    self._buf.extend(chunk)
+                    if len(self._buf) > self._capacity:
+                        del self._buf[: len(self._buf) - self._capacity]
+            # arecord ended (device gone, or we are stopping)
+            err = b""
+            if proc.stderr is not None:
+                with contextlib.suppress(OSError):
+                    err = proc.stderr.read()
+            if proc.poll() is None:
+                proc.terminate()
+            if self._running:
+                self.restarts += 1
+                self.last_error = err.decode(errors="replace").strip() or "arecord exited"
+                logger.warning("Capture: arecord stopped (%s); restarting in %.0fs",
+                               self.last_error, _RESTART_DELAY)
+                self.clear()
+                time.sleep(_RESTART_DELAY)

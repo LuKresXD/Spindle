@@ -191,17 +191,21 @@ logging:
 
 ```
 spindle/
-├── cli.py          # Main loop: capture → identify → scrobble
-├── capture.py      # Sliding window audio capture via arecord
-├── fingerprint.py  # AcoustID + ShazamIO identification
-├── spotify.py      # Spotify API: canonical names + album tracklists
-├── albumlock.py    # Album-lock v2: anchor-based track prediction
-├── scrobbler.py    # Last.fm scrobbling + offline queue
+├── cli.py          # Wiring + the 2 s tick loop
+├── engine.py       # Player: silence/music transitions, identification, scrobbling, ScreenState
+├── state.py        # ScreenState / TrackRow: what the screen (or anything) renders from
+├── capture.py      # Continuous arecord -> ring buffer; levels and contiguous WAV windows
+├── fingerprint.py  # AcoustID (best-supported recording) + ShazamIO fallback, corrections
+├── spotify.py      # Canonical names, album tracklists, release year
+├── session.py      # Album-lock + compilation session, backfill, timing advance
+├── scrobbler.py    # Last.fm scrobbling, offline queue, album play count
+├── art.py          # Cover art: Apple 1200 px -> Deezer -> Spotify, disk cache
+├── discogs.py      # Vinyl side/position (A3) from your Discogs collection
+├── display.py      # Framebuffer renderer (HDMI OLED, or the Waveshare SPI LCD)
 ├── history.py      # Scrobble history (JSONL log for stats)
 ├── notify.py       # Telegram notifications
 ├── bot.py          # Telegram bot command handler
-├── config.py       # YAML config loader
-└── display.py      # Framebuffer display (HDMI OLED, or the Waveshare SPI LCD)
+└── config.py       # YAML config loader
 ```
 
 ## Roadmap
@@ -212,11 +216,47 @@ spindle/
 - [x] Album-lock scrobbling with retroactive backfill
 - [x] Offline scrobble queue (survives WiFi drops + reboots)
 - [x] systemd service (autostart, auto-restart)
-- [x] Sliding window capture (2s step, 10s window)
 - [x] Telegram bot (notifications + `/status`, `/history`, `/stats`)
 - [x] Scrobble history + statistics
 - [x] Rotating log files
 - [x] Framebuffer display: album art + track info, scales to the panel (13.3" HDMI OLED, Waveshare 3.5" LCD)
+- [x] Continuous capture (one arecord, ring buffer; fingerprints are always contiguous audio)
+- [x] Now-playing screen v2: tracklist with the current track lit, progress + time, side/position from Discogs, 1200 px art, listening state, scrobbled tick + play count
+- [x] Last.fm's half-or-4-minutes rule for early-ended tracks; `silence.min_silence_seconds` honoured
+- [x] Tests (`pytest`), lint (`ruff`)
+
+## Screen
+
+With `display.enabled: true` Spindle draws straight to `/dev/fb0` (no X, no
+Wayland): the Pi boots to the console and owns the panel. Idle is pure black,
+so an OLED shows nothing until the needle drops. While a side plays: cover on
+the left, artist / title / album · year, the album's tracklist with the
+current track lit and finished ones ticked, and a footer with the vinyl
+position from your Discogs collection (`discogs:` in config), a progress bar
+with elapsed / remaining time, your Last.fm play count for the album, and a
+tick once the track is scrobbled. Static parts re-render once a minute with a
+small pixel shift (burn-in); the progress band refreshes once a second.
+
+Frames can be rendered offscreen for a look without hardware:
+
+```python
+from spindle.display import Renderer
+from spindle.state import Phase, ScreenState, TrackRow
+r = Renderer(1920, 1080)
+st = ScreenState(phase=Phase.PLAYING, artist="Madvillain", title="Accordion", album="Madvillainy",
+                 tracklist=[TrackRow("Accordion", 72)], current_index=0, track_elapsed=10, track_duration=72)
+frame = r.playing(st, shift=False)
+y0, band = r.playing_band(frame, st)
+frame.image.paste(band, (0, y0)); frame.image.save("preview.png")
+```
+
+## Development
+
+```bash
+pip install -e ".[display,dev]"
+ruff check spindle/ tests/
+pytest
+```
 
 ## License
 

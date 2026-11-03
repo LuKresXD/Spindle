@@ -4,12 +4,11 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import acoustid
 import yaml
 
-from .config import FingerprintConfig, AcoustIDConfig
+from .config import AcoustIDConfig, FingerprintConfig
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +18,9 @@ class TrackInfo:
     """Identified track metadata."""
     title: str
     artist: str
-    album: Optional[str] = None
-    duration: Optional[int] = None  # seconds
-    mbid: Optional[str] = None  # MusicBrainz recording ID
+    album: str | None = None
+    duration: int | None = None  # seconds
+    mbid: str | None = None  # MusicBrainz recording ID
     source: str = "acoustid"  # "acoustid" or "shazam"
     confidence: float = 0.0
 
@@ -31,7 +30,7 @@ class TrackInfo:
 # Each entry: {match: {artist, title}, replace: {artist, title} | null}
 # null → drop the match entirely.
 
-_corrections: Optional[list[dict]] = None
+_corrections: list[dict] | None = None
 _corrections_path: Path = Path.home() / "spindle" / "corrections.yaml"
 
 
@@ -53,7 +52,7 @@ def _load_corrections() -> list[dict]:
     return _corrections
 
 
-def apply_corrections(track: TrackInfo) -> Optional[TrackInfo]:
+def apply_corrections(track: TrackInfo) -> TrackInfo | None:
     """Apply manual corrections to a fingerprint result.
 
     Returns:
@@ -91,8 +90,34 @@ def apply_corrections(track: TrackInfo) -> Optional[TrackInfo]:
     return track
 
 
+def _best_recording(recordings: list[dict]) -> dict:
+    """AcoustID returns every recording sharing the fingerprint, in no
+    particular order; the one with the most submissions is the real one."""
+    def score(r: dict) -> tuple:
+        return (r.get("sources", 0), bool(r.get("artists")), bool(r.get("title")))
+    return max(recordings, key=score)
+
+
+def _best_album(release_groups: list[dict], artist: str) -> str | None:
+    """Prefer a studio album by the same artist over compilations/singles."""
+    if not release_groups:
+        return None
+    def score(rg: dict) -> tuple:
+        rtype = (rg.get("type") or "").lower()
+        secondary = [s.lower() for s in rg.get("secondarytypes", [])]
+        rg_artists = [a.get("name", "").lower() for a in rg.get("artists", [])]
+        same_artist = artist.lower() in rg_artists if rg_artists else True
+        return (
+            same_artist,
+            "compilation" not in secondary and "live" not in secondary,
+            rtype == "album",
+            rtype != "single",
+        )
+    return max(release_groups, key=score).get("title")
+
+
 def identify_acoustid(wav_path: Path, acoustid_cfg: AcoustIDConfig,
-                       fp_cfg: FingerprintConfig) -> Optional[TrackInfo]:
+                       fp_cfg: FingerprintConfig) -> TrackInfo | None:
     """Identify a track using AcoustID/Chromaprint.
 
     Returns TrackInfo or None if no match found.
@@ -117,15 +142,10 @@ def identify_acoustid(wav_path: Path, acoustid_cfg: AcoustIDConfig,
             if not recordings:
                 continue
 
-            rec = recordings[0]
+            rec = _best_recording(recordings)
             artists = rec.get("artists", [{}])
             artist_name = artists[0].get("name", "Unknown") if artists else "Unknown"
-
-            # Try to get album from release groups
-            album = None
-            release_groups = rec.get("releasegroups", [])
-            if release_groups:
-                album = release_groups[0].get("title")
+            album = _best_album(rec.get("releasegroups", []), artist_name)
 
             return TrackInfo(
                 title=rec.get("title", "Unknown"),
@@ -145,7 +165,7 @@ def identify_acoustid(wav_path: Path, acoustid_cfg: AcoustIDConfig,
         return None
 
 
-async def identify_shazam(wav_path: Path) -> Optional[TrackInfo]:
+async def identify_shazam(wav_path: Path) -> TrackInfo | None:
     """Identify a track using ShazamIO as fallback.
 
     Returns TrackInfo or None if no match found.
@@ -185,7 +205,7 @@ async def identify_shazam(wav_path: Path) -> Optional[TrackInfo]:
 
 
 def identify(wav_path: Path, acoustid_cfg: AcoustIDConfig,
-             fp_cfg: FingerprintConfig) -> Optional[TrackInfo]:
+             fp_cfg: FingerprintConfig) -> TrackInfo | None:
     """Identify a track — tries AcoustID first, then ShazamIO fallback.
 
     Returns TrackInfo or None.

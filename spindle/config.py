@@ -1,11 +1,9 @@
 """Configuration loader for Spindle."""
 
-from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
 
 import yaml
-
 
 DEFAULT_CONFIG_PATHS = [
     Path("config.yaml"),
@@ -52,8 +50,8 @@ class ScrobbleConfig:
 
 @dataclass
 class SilenceConfig:
-    threshold_db: float = -22.0
-    min_silence_seconds: float = 3.0
+    threshold_db: float = -45.0
+    min_silence_seconds: float = 8.0   # quiet this long = the side is over (run-out groove)
 
 
 @dataclass
@@ -66,6 +64,18 @@ class DisplayConfig:
 class SpotifyConfig:
     client_id: str = ""
     client_secret: str = ""
+
+
+@dataclass
+class DiscogsConfig:
+    token: str = ""
+    username: str = ""
+
+
+@dataclass
+class ArtConfig:
+    itunes: bool = True       # Apple catalog, 1200 px
+    deezer: bool = True       # Deezer, has the explicit albums Apple's search hides
 
 
 @dataclass
@@ -94,16 +104,15 @@ class SpindleConfig:
     scrobble: ScrobbleConfig = field(default_factory=ScrobbleConfig)
     silence: SilenceConfig = field(default_factory=SilenceConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    discogs: DiscogsConfig = field(default_factory=DiscogsConfig)
+    art: ArtConfig = field(default_factory=ArtConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
-def load_config(path: Optional[Path] = None) -> SpindleConfig:
+def load_config(path: Path | None = None) -> SpindleConfig:
     """Load config from YAML file. Searches default paths if none given."""
-    if path is not None:
-        paths = [Path(path)]
-    else:
-        paths = DEFAULT_CONFIG_PATHS
+    paths = [Path(path)] if path is not None else DEFAULT_CONFIG_PATHS
 
     for p in paths:
         if p.exists():
@@ -135,6 +144,10 @@ def _parse_config(raw: dict) -> SpindleConfig:
         cfg.silence = SilenceConfig(**raw["silence"])
     if "display" in raw:
         cfg.display = DisplayConfig(**raw["display"])
+    if "discogs" in raw:
+        cfg.discogs = DiscogsConfig(**raw["discogs"])
+    if "art" in raw:
+        cfg.art = ArtConfig(**raw["art"])
     if "telegram" in raw:
         cfg.telegram = TelegramConfig(**raw["telegram"])
     if "logging" in raw:

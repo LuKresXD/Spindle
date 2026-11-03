@@ -33,6 +33,10 @@ dependencies = [
 display = [
     "Pillow>=10.0.0",
 ]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
 
 [project.urls]
 Homepage = "https://github.com/LuKresXD/spindle"
@@ -40,3 +44,14 @@ Issues = "https://github.com/LuKresXD/spindle/issues"
 
 [project.scripts]
 spindle = "spindle.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["SIM115"]   # NamedTemporaryFile(delete=False) handed to a caller is deliberate
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
