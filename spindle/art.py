@@ -115,9 +115,8 @@ class ArtProvider:
     def itunes_url(self, artist: str, album: str) -> str | None:
         """Find the album on Apple's catalog and return a 1200 px artwork URL."""
         try:
-            resp = self._http.get(ITUNES_SEARCH, params={
-                "term": f"{artist} {album}", "entity": "album", "limit": 10,
-            }, timeout=10)
+            params: dict[str, str] = {"term": f"{artist} {album}", "entity": "album", "limit": "10"}
+            resp = self._http.get(ITUNES_SEARCH, params=params, timeout=10)
             resp.raise_for_status()
             results = resp.json().get("results", [])
         except (requests.RequestException, ValueError) as e:
@@ -135,9 +134,8 @@ class ArtProvider:
     def deezer_urls(self, artist: str, album: str) -> list[str]:
         """Candidate Deezer cover URLs, largest first (resized, then native xl)."""
         try:
-            resp = self._http.get(DEEZER_SEARCH, params={
-                "q": f'artist:"{artist}" album:"{album}"', "limit": 10,
-            }, timeout=10)
+            params: dict[str, str] = {"q": f'artist:"{artist}" album:"{album}"', "limit": "10"}
+            resp = self._http.get(DEEZER_SEARCH, params=params, timeout=10)
             resp.raise_for_status()
             results = resp.json().get("data", [])
         except (requests.RequestException, ValueError) as e:

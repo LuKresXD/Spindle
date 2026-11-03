@@ -162,11 +162,11 @@ def pack_rows(img: Any, fb: FbInfo) -> bytes:
     else:
         raise ValueError(f"unsupported framebuffer depth: {fb.bpp} bpp")
 
-    raw = raw.reshape(h, row)
+    rows = raw.reshape(h, row)
     if fb.stride == row:
-        return raw.tobytes()
+        return rows.tobytes()
     out = np.zeros((h, fb.stride), dtype=np.uint8)
-    out[:, :row] = raw
+    out[:, :row] = rows
     return out.tobytes()
 
 

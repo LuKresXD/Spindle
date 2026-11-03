@@ -34,6 +34,20 @@ jobs:
       - name: Type check
         run: mypy spindle/ --ignore-missing-imports --no-strict-optional
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          sudo apt-get update && sudo apt-get install -y libchromaprint-tools fonts-dejavu-core
+          pip install -e ".[display,dev]"
+      - name: Tests
+        run: pytest -q
+
   build:
     runs-on: ubuntu-latest
     strategy:
