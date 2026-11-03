@@ -36,8 +36,8 @@ silence:
   min_silence_seconds: 3
 
 display:
-  enabled: false                            # enable when LCD is connected
-  fb_path: "/dev/fb0"                       # framebuffer device for Waveshare LCD
+  enabled: false                            # enable when a screen is connected (HDMI or Waveshare LCD)
+  fb_path: "/dev/fb0"                       # framebuffer device; size/depth auto-detected from sysfs
 
 telegram:
   bot_token: ""                             # from @BotFather

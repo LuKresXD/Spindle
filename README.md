@@ -48,7 +48,7 @@ Spindle records audio from a USB adapter in short chunks, fingerprints each chun
 | USB audio adapter | [Plugable USB-AUDIO](https://plugable.com/products/usb-audio) | Stereo input, line level |
 | RCA Y-splitters | Any | Split turntable output to speakers + Pi |
 | RCA → 3.5mm cable | Any | Connect splitter to USB adapter |
-| *(Optional)* LCD | Waveshare 3.5" IPS | For album art display *(coming soon)* |
+| *(Optional)* Display | 13.3" 1080p OLED portable monitor on HDMI0 | Album art + track; black when idle. Any HDMI screen or the Waveshare 3.5" SPI LCD works (geometry auto-detected) |
 
 ### Signal chain
 
@@ -201,7 +201,7 @@ spindle/
 ├── notify.py       # Telegram notifications
 ├── bot.py          # Telegram bot command handler
 ├── config.py       # YAML config loader
-└── display.py      # LCD display (stub, coming soon)
+└── display.py      # Framebuffer display (HDMI OLED, or the Waveshare SPI LCD)
 ```
 
 ## Roadmap
@@ -216,7 +216,7 @@ spindle/
 - [x] Telegram bot (notifications + `/status`, `/history`, `/stats`)
 - [x] Scrobble history + statistics
 - [x] Rotating log files
-- [ ] Waveshare 3.5" LCD display (album art, track info, progress)
+- [x] Framebuffer display: album art + track info, scales to the panel (13.3" HDMI OLED, Waveshare 3.5" LCD)
 
 ## License
 
