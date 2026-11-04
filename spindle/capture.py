@@ -106,7 +106,14 @@ class ContinuousCapture:
 
     @property
     def running(self) -> bool:
-        return self._running and self._proc is not None and self._proc.poll() is None
+        """True while audio can be expected: arecord is alive, or the reader thread
+        has not had its first chance to launch it yet. False once it has died."""
+        if not self._running:
+            return False
+        proc = self._proc
+        if proc is None:
+            return self.restarts == 0 and self.last_error is None   # still launching
+        return proc.poll() is None
 
     # ── reads ────────────────────────────────────────────────────────────────
 

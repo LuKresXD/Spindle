@@ -60,3 +60,13 @@ def test_write_wav_roundtrip(tmp_path):
     d = p.read_bytes()
     assert len(d) == 44 + 200
     assert struct.unpack("<I", d[24:28])[0] == 8000
+
+
+def test_running_grace_before_first_launch_and_false_after_death():
+    cfg = AudioConfig(device="null", sample_rate=1000, channels=1, chunk_duration=4)
+    cap = ContinuousCapture(cfg)
+    assert not cap.running                                    # not started
+    cap._running = True                                       # started, arecord not launched yet
+    assert cap.running
+    cap.restarts, cap.last_error = 1, "No such device"        # a launch attempt failed
+    assert not cap.running
