@@ -1,10 +1,13 @@
-"""Spotify API lookup for canonical track/artist names + album tracklists.
+"""Spotify Web API: track candidates, canonical names, album tracklists.
 
-Uses client credentials flow (no user auth needed) to search for tracks
-and return Spotify's canonical artist + title format, e.g.:
-  - Artist: "Playboi Carti" (primary only, not "Playboi Carti & Nicki Minaj")
-  - Title:  "Poke It Out (with Nicki Minaj)"
+Client-credentials flow (no user login). `search_tracks()` returns every
+candidate for an artist + title so the resolver can pick the right album
+with more context than Spotify's popularity order (the user's record
+collection, the album that is already locked, album vs single vs
+compilation). `lookup()` is the context-free convenience wrapper.
 """
+
+from __future__ import annotations
 
 import logging
 import re
@@ -15,6 +18,9 @@ import requests
 
 from .config import SpotifyConfig
 from .fingerprint import TrackInfo
+from .tracklist import AlbumTracklist, titles_match
+
+__all__ = ["AlbumTracklist", "SpotifyCandidate", "SpotifyClient", "SpotifyTrack", "EDITION_RE"]
 
 logger = logging.getLogger(__name__)
 
@@ -22,67 +28,70 @@ TOKEN_URL = "https://accounts.spotify.com/api/token"
 SEARCH_URL = "https://api.spotify.com/v1/search"
 ALBUM_URL = "https://api.spotify.com/v1/albums"
 
+# Deluxe / anniversary / remaster editions: fine to fall back to, never preferred.
+EDITION_RE = re.compile(
+    r"\b(?:deluxe|super\s+deluxe|anniversary|remaster(?:ed)?|expanded|bonus|"
+    r"special\s+edition|\d{4}\s+(?:remaster|edition|mix))\b",
+    re.IGNORECASE,
+)
+_FEAT_RE = re.compile(r"\s*[\(\[](feat\.?|ft\.?|featuring)\b[^\)\]]*[\)\]]", re.IGNORECASE)
+
+_LOOKUP_CACHE_MAX = 500
+
+
+@dataclass
+class SpotifyCandidate:
+    """One search hit, flattened."""
+    name: str
+    artists: list = field(default_factory=list)   # list[str], primary first
+    album_id: str = ""
+    album_name: str = ""
+    album_type: str = ""                          # "album" | "single" | "compilation"
+    total_tracks: int = 0
+    release_date: str = ""
+    duration: int | None = None                   # seconds
+    art_url: str = ""
+    rank: int = 0                                 # Spotify's own order (0 = top)
+
+    @property
+    def artist(self) -> str:
+        return self.artists[0] if self.artists else ""
+
+    def to_track(self) -> TrackInfo:
+        return TrackInfo(title=self.name, artist=self.artist, album=self.album_name,
+                         duration=self.duration, source="spotify_lookup", confidence=1.0)
+
 
 @dataclass
 class SpotifyTrack:
-    """Extended track info with album position data."""
+    """Context-free best match (kept for callers that only need a canonical name)."""
     track: TrackInfo
     album_id: str = ""
     album_name: str = ""
     track_number: int = 0
     disc_number: int = 1
     total_tracks: int = 0
-    album_art_url: str = ""  # URL of the best-fit album art image
-
-
-@dataclass
-class AlbumTracklist:
-    """Full album tracklist from Spotify."""
-    album_id: str
-    album_name: str
-    artist: str
-    tracks: list = field(default_factory=list)  # list of TrackInfo, ordered by disc+track number
-    release_date: str = ""                      # "2004-03-23" / "2004" as Spotify gives it
-
-    @property
-    def year(self) -> str:
-        return self.release_date[:4] if self.release_date else ""
-
-    def get_track_at(self, index: int) -> TrackInfo | None:
-        """Get track at 0-based index."""
-        if 0 <= index < len(self.tracks):
-            return self.tracks[index]
-        return None
-
-    def find_track_index(self, title: str) -> int | None:
-        """Find a track's 0-based index by title (case-insensitive)."""
-        title_lower = title.lower()
-        for i, t in enumerate(self.tracks):
-            if t.title.lower() == title_lower:
-                return i
-        return None
+    album_art_url: str = ""
 
 
 class SpotifyClient:
-    def __init__(self, cfg: SpotifyConfig):
+    def __init__(self, cfg: SpotifyConfig, session: requests.Session | None = None):
         self.cfg = cfg
+        self._http = session or requests.Session()
         self._token: str | None = None
         self._token_expiry: float = 0
         self._album_cache: dict[str, AlbumTracklist] = {}
-        self._lookup_cache: dict[str, SpotifyTrack | None] = {}
-        self._art_cache: dict[str, bytes] = {}  # url → image bytes
-        self._backoff_until: float = 0  # rate limit backoff timestamp
+        self._search_cache: dict[str, list[SpotifyCandidate]] = {}
+        self._backoff_until: float = 0
+
+    # ── auth ─────────────────────────────────────────────────────────────────
 
     def _get_token(self) -> str:
-        """Get (or refresh) a client credentials token."""
         if self._token and time.time() < self._token_expiry - 30:
             return self._token
-
-        resp = requests.post(
-            TOKEN_URL,
-            data={"grant_type": "client_credentials"},
-            auth=(self.cfg.client_id, self.cfg.client_secret),
-            timeout=10,
+        resp = self._http.post(
+            TOKEN_URL, data={"grant_type": "client_credentials"},
+            auth=(self.cfg.client_id, self.cfg.client_secret), timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -94,189 +103,176 @@ class SpotifyClient:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._get_token()}"}
 
-    def lookup(self, artist: str, title: str) -> SpotifyTrack | None:
-        """Search Spotify for a track and return canonical info + album position.
-
-        Returns SpotifyTrack with canonical names and album metadata, or None.
-        Results are cached to avoid redundant API calls (important with 2s sliding window).
-        """
-        cache_key = f"{artist.lower()}|||{title.lower()}"
-        if cache_key in self._lookup_cache:
-            return self._lookup_cache[cache_key]
-
-        # Rate limit backoff
+    def _get(self, url: str, params: dict | None = None) -> dict | None:
+        """GET with the 429 backoff. None when backing off or on failure."""
         if time.time() < self._backoff_until:
             logger.debug("Spotify: backing off (rate limited)")
             return None
-
         try:
-            # Strip "(feat. ...)" / "(ft. ...)" etc. — Spotify search chokes on them
-            clean_title = re.sub(
-                r'\s*[\(\[](feat\.?|ft\.?|featuring)\b[^\)\]]*[\)\]]',
-                '', title, flags=re.IGNORECASE,
-            ).strip() or title
-            query = f"track:{clean_title} artist:{artist}"
-            resp = requests.get(
-                SEARCH_URL,
-                params={"q": query, "type": "track", "limit": "10"},
-                headers=self._headers(),
-                timeout=10,
-            )
+            resp = self._http.get(url, params=params, headers=self._headers(), timeout=10)
             resp.raise_for_status()
-            data = resp.json()
-
-            tracks = data.get("tracks", {}).get("items", [])
-            if not tracks:
-                logger.debug("Spotify: no results for '%s - %s'", artist, title)
-                self._lookup_cache[cache_key] = None
-                return None
-
-            # --- Pick best match: artist match + prefer standard album edition ---
-            _EDITION_RE = re.compile(
-                r'\b(?:deluxe|super\s+deluxe|anniversary|remaster(?:ed)?|'
-                r'expanded|bonus|special\s+edition|'
-                r'\d{4}\s+(?:remaster|edition|mix))\b',
-                re.IGNORECASE,
-            )
-
-            def _score(t: dict) -> tuple:
-                """Higher score = better match. Returns (artist_match, standard_album)."""
-                t_artist = t["artists"][0]["name"].lower()
-                a_lower = artist.lower()
-                artist_match = (
-                    a_lower.split("&")[0].strip() in t_artist
-                    or t_artist in a_lower
-                )
-                album_name = t.get("album", {}).get("name", "")
-                standard_album = not bool(_EDITION_RE.search(album_name))
-                return (int(artist_match), int(standard_album))
-
-            best = max(tracks, key=_score)
-
-            # Log if we overrode a deluxe edition
-            album_name_chosen = best.get("album", {}).get("name", "")
-            if _EDITION_RE.search(album_name_chosen):
-                logger.debug(
-                    "Spotify: all results are non-standard editions, using: %s",
-                    album_name_chosen,
-                )
-
-            spotify_artist = best["artists"][0]["name"]
-            spotify_title = best["name"]
-            album_data = best.get("album", {})
-            spotify_album = album_data.get("name", "")
-            album_id = album_data.get("id", "")
-            spotify_duration = int(best.get("duration_ms", 0) / 1000) or None
-
-            logger.info(
-                "Spotify canonical: %s — %s (was: %s — %s)",
-                spotify_artist, spotify_title, artist, title,
-            )
-
-            track_info = TrackInfo(
-                title=spotify_title,
-                artist=spotify_artist,
-                album=spotify_album,
-                duration=spotify_duration,
-                source="spotify_lookup",
-                confidence=1.0,
-            )
-
-            # Largest album art Spotify offers (640 px); the screen shows the
-            # cover at ~1000 px, so this is only the fallback source (see art.py).
-            images = album_data.get("images", [])
-            art_url = ""
-            if images:
-                best_img = max(images, key=lambda i: i.get("width", 0))
-                art_url = best_img.get("url", "")
-
-            result = SpotifyTrack(
-                track=track_info,
-                album_id=album_id,
-                album_name=spotify_album,
-                track_number=best.get("track_number", 0),
-                disc_number=best.get("disc_number", 1),
-                total_tracks=album_data.get("total_tracks", 0),
-                album_art_url=art_url,
-            )
-            self._lookup_cache[cache_key] = result
-            return result
-
+            return resp.json()
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 429:
                 retry_after = int(e.response.headers.get("Retry-After", 30))
                 self._backoff_until = time.time() + retry_after
-                logger.warning("Spotify rate limited — backing off %ds", retry_after)
+                logger.warning("Spotify rate limited: backing off %ds", retry_after)
             else:
-                logger.warning("Spotify lookup failed: %s", e)
+                logger.warning("Spotify request failed: %s", e)
+        except (requests.RequestException, ValueError, KeyError) as e:
+            logger.warning("Spotify request failed: %s", e)
+        return None
+
+    # ── search ───────────────────────────────────────────────────────────────
+
+    def search_tracks(self, artist: str, title: str) -> list[SpotifyCandidate]:
+        """All plausible candidates for a fingerprinted artist + title, Spotify order.
+
+        Field-filtered search first (`track: artist:`); when that finds nothing
+        (feat. tracks whose primary artist differs, odd spellings) a plain
+        query is tried and filtered by title.
+        """
+        key = f"{artist.lower()}|||{title.lower()}"
+        if key in self._search_cache:
+            return self._search_cache[key]
+
+        clean_title = _FEAT_RE.sub("", title).strip() or title
+        items = self._search_items(f"track:{clean_title} artist:{artist}")
+        if items is None:
+            return []                                   # transient: do not cache
+        if not items:
+            plain = self._search_items(f"{clean_title} {artist}")
+            if plain is None:
+                return []
+            items = [t for t in plain if titles_match(t.get("name", ""), title)]
+        cands = [_candidate(t, i) for i, t in enumerate(items)]
+        if len(self._search_cache) >= _LOOKUP_CACHE_MAX:
+            self._search_cache.pop(next(iter(self._search_cache)))
+        self._search_cache[key] = cands
+        if not cands:
+            logger.debug("Spotify: no results for '%s - %s'", artist, title)
+        return cands
+
+    def _search_items(self, query: str) -> list[dict] | None:
+        data = self._get(SEARCH_URL, {"q": query, "type": "track", "limit": "10"})
+        if data is None:
             return None
-        except Exception as e:
-            logger.warning("Spotify lookup failed: %s", e)
+        return data.get("tracks", {}).get("items", []) or []
+
+    def lookup(self, artist: str, title: str) -> SpotifyTrack | None:
+        """Best context-free match: right artist, a real album over singles/compilations,
+        the standard edition over deluxe ones, then Spotify's own order."""
+        cands = self.search_tracks(artist, title)
+        if not cands:
             return None
+
+        def score(c: SpotifyCandidate) -> tuple:
+            return (
+                int(artist_matches(c.artists, artist)),
+                int(titles_match(c.name, title)),
+                {"album": 2, "single": 1}.get(c.album_type, 0),
+                int(not EDITION_RE.search(c.album_name)),
+                -c.rank,
+            )
+
+        best = max(cands, key=score)
+        logger.info("Spotify canonical: %s — %s [%s] (was: %s — %s)",
+                    best.artist, best.name, best.album_name, artist, title)
+        return SpotifyTrack(track=best.to_track(), album_id=best.album_id,
+                            album_name=best.album_name, total_tracks=best.total_tracks,
+                            album_art_url=best.art_url)
+
+    # ── albums ───────────────────────────────────────────────────────────────
 
     def get_album_tracklist(self, album_id: str) -> AlbumTracklist | None:
-        """Fetch full album tracklist from Spotify. Cached per album_id."""
+        """Full tracklist (all pages, discs in order). Cached per album id."""
         if album_id in self._album_cache:
             return self._album_cache[album_id]
-
-        try:
-            resp = requests.get(
-                f"{ALBUM_URL}/{album_id}",
-                headers=self._headers(),
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            album_name = data.get("name", "")
-            album_artist = data["artists"][0]["name"] if data.get("artists") else ""
-
-            tracks = []
-            for item in data.get("tracks", {}).get("items", []):
-                artist_name = item["artists"][0]["name"] if item.get("artists") else album_artist
-                duration_s = int(item.get("duration_ms", 0) / 1000) or None
-                tracks.append(TrackInfo(
-                    title=item["name"],
-                    artist=artist_name,
-                    album=album_name,
-                    duration=duration_s,
-                    source="spotify_album",
-                    confidence=1.0,
-                ))
-
-            tracklist = AlbumTracklist(
-                album_id=album_id,
-                album_name=album_name,
-                artist=album_artist,
-                tracks=tracks,
-                release_date=data.get("release_date", "") or "",
-            )
-
-            logger.info(
-                "Fetched album tracklist: %s — %s (%d tracks)",
-                album_artist, album_name, len(tracks),
-            )
-
-            self._album_cache[album_id] = tracklist
-            return tracklist
-
-        except Exception as e:
-            logger.warning("Failed to fetch album tracklist: %s", e)
+        data = self._get(f"{ALBUM_URL}/{album_id}")
+        if data is None:
             return None
+        album_name = data.get("name", "")
+        album_artist = data["artists"][0]["name"] if data.get("artists") else ""
+        items: list[dict] = list(data.get("tracks", {}).get("items", []) or [])
+        next_url = data.get("tracks", {}).get("next")
+        pages = 0
+        while next_url and pages < 10:                  # 50 tracks per page
+            page = self._get(next_url)
+            if page is None:
+                break
+            items.extend(page.get("items", []) or [])
+            next_url = page.get("next")
+            pages += 1
+
+        tracks = []
+        for item in items:
+            artist_name = item["artists"][0]["name"] if item.get("artists") else album_artist
+            duration_s = int(item.get("duration_ms", 0) / 1000) or None
+            tracks.append(TrackInfo(
+                title=item.get("name", ""), artist=artist_name, album=album_name,
+                duration=duration_s, source="spotify_album", confidence=1.0,
+            ))
+        tl = AlbumTracklist(
+            album_id=album_id, album_name=album_name, artist=album_artist, tracks=tracks,
+            release_date=data.get("release_date", "") or "", source="spotify",
+        )
+        logger.info("Fetched album tracklist: %s — %s (%d tracks)", album_artist, album_name,
+                    len(tracks))
+        self._album_cache[album_id] = tl
+        return tl
 
     def fetch_art(self, url: str) -> bytes | None:
-        """Download album art image bytes. Cached by URL."""
+        """Download album art bytes (kept for the notifier; the screen uses art.py)."""
         if not url:
             return None
-        if url in self._art_cache:
-            return self._art_cache[url]
         try:
-            resp = requests.get(url, timeout=15)
+            resp = self._http.get(url, timeout=15)
             resp.raise_for_status()
-            data = resp.content
-            self._art_cache[url] = data
-            logger.debug("Fetched album art (%d bytes) from %s", len(data), url)
-            return data
-        except Exception as e:
+            return resp.content
+        except requests.RequestException as e:
             logger.warning("Failed to fetch album art: %s", e)
             return None
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _candidate(t: dict, rank: int) -> SpotifyCandidate:
+    album = t.get("album", {}) or {}
+    images = album.get("images", []) or []
+    art = max(images, key=lambda i: i.get("width", 0)).get("url", "") if images else ""
+    return SpotifyCandidate(
+        name=t.get("name", ""),
+        artists=[a.get("name", "") for a in t.get("artists", []) or []],
+        album_id=album.get("id", ""),
+        album_name=album.get("name", ""),
+        album_type=(album.get("album_type") or "").lower(),
+        total_tracks=int(album.get("total_tracks", 0) or 0),
+        release_date=album.get("release_date", "") or "",
+        duration=int(t.get("duration_ms", 0) / 1000) or None,
+        art_url=art,
+        rank=rank,
+    )
+
+
+def _norm_name(s: str) -> str:
+    s = s.lower().replace("$", "s").replace("'", "").replace("’", "")
+    s = re.sub(r"\s*\(\d+\)$", "", s)
+    s = re.sub(r"[^a-z0-9Ѐ-ӿ]+", " ", s)
+    return " ".join(s.split())
+
+
+def artist_matches(candidates: list[str], wanted: str) -> bool:
+    """Fingerprint artists come as "A", "A & B", "A feat. B"; Spotify lists them separately."""
+    w = _norm_name(wanted)
+    if not w:
+        return False
+    parts = [p for p in re.split(r"\b(?:and|feat|ft|featuring|x|with)\b|[&,/+]", w) if p.strip()]
+    for c in candidates:
+        n = _norm_name(c)
+        if not n:
+            continue
+        if n == w or n in w or w in n:
+            return True
+        if any(p.strip() == n for p in parts):
+            return True
+    return False

@@ -36,6 +36,7 @@ DEFAULT_STEP = 2            # seconds between engine ticks
 SILENCE_FLOOR_DB = -120.0   # reported level when there is no audio at all
 _READ_SECONDS = 0.25        # reader granularity
 _RESTART_DELAY = 2.0        # seconds to wait before relaunching a dead arecord
+_RESTART_MAX_DELAY = 30.0   # ... growing to this while it keeps failing
 
 
 def rms_db(pcm: bytes) -> float:
@@ -159,16 +160,25 @@ class ContinuousCapture:
                     self._command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 )
             except OSError as e:
+                self.restarts += 1
                 self.last_error = str(e)
-                logger.error("Capture: cannot start arecord: %s", e)
-                time.sleep(_RESTART_DELAY)
+                delay = min(_RESTART_DELAY * 2 ** min(self.restarts - 1, 4), _RESTART_MAX_DELAY)
+                logger.error("Capture: cannot start arecord: %s (retry in %.0fs)", e, delay)
+                self.clear()
+                time.sleep(delay)
                 continue
             proc = self._proc
             assert proc.stdout is not None
+            got_audio = False
             while self._running:
                 chunk = proc.stdout.read(read_size)
                 if not chunk:
                     break
+                if not got_audio:
+                    got_audio = True
+                    if self.restarts:
+                        logger.info("Capture: arecord is back")
+                        self.restarts = 0
                 with self._lock:
                     self._buf.extend(chunk)
                     if len(self._buf) > self._capacity:
@@ -183,7 +193,8 @@ class ContinuousCapture:
             if self._running:
                 self.restarts += 1
                 self.last_error = err.decode(errors="replace").strip() or "arecord exited"
+                delay = min(_RESTART_DELAY * 2 ** min(self.restarts - 1, 4), _RESTART_MAX_DELAY)
                 logger.warning("Capture: arecord stopped (%s); restarting in %.0fs",
-                               self.last_error, _RESTART_DELAY)
+                               self.last_error, delay)
                 self.clear()
-                time.sleep(_RESTART_DELAY)
+                time.sleep(delay)

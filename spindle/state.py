@@ -47,6 +47,7 @@ class ScreenState:
 
     side: str = ""                  # "A" / "B" ... from Discogs
     position: str = ""              # "A3" from Discogs
+    owned: bool = False             # the pressing is in the Discogs collection
 
     scrobbled: bool = False         # current track already scrobbled
     album_playcount: int | None = None   # Luka's Last.fm plays of this album

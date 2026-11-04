@@ -1,30 +1,33 @@
-"""Vinyl scrobble session — unified album-lock + compilation mode manager.
+"""Vinyl scrobble session: album lock + compilation mode.
 
 Two modes:
 
-  ALBUM       — locked to a specific album/side. Uses Spotify tracklist +
-                timing to infer and scrobble unrecognized tracks. Handles
-                backfill (tracks before first ID), forward-fill (gap between
-                IDs), and timing-based advance.
+  ALBUM       locked to one album (and, when the pressing is known, one side).
+              Uses the tracklist + durations to infer and scrobble tracks the
+              fingerprinter misses: backfill (before the first ID), forward
+              fill (between IDs) and timing advance.
 
-  COMPILATION — active when consecutive identifications come from different
-                albums/artists (bootleg, DJ mix, etc.). No tracklist.
-                Scrobbles each recognized track once; unrecognized = skip.
+  COMPILATION consecutive identifications from different artists (DJ mix,
+              bootleg, mixtape). No tracklist: each recognised track is
+              scrobbled once it has played long enough, with its start time.
 
 Mode selection:
 
-  Always starts in ALBUM mode on first identification.
-  Switches to COMPILATION after MISMATCH_THRESHOLD consecutive IDs that
-  don't belong to the locked album. A valid on-album ID resets the counter,
-  so a single fingerprint false-positive won't trigger a mode switch.
+  The first confirmed identification with a known album starts ALBUM mode.
+  Only identifications by a DIFFERENT artist count toward COMPILATION
+  (MISMATCH_THRESHOLD of them). A same-artist track that is not on the
+  locked album is either a fingerprint confusion within the catalogue or a
+  better album for this record; the latter re-locks the session when the new
+  album also contains the track that is playing (a single upgraded to the
+  album, a streaming edition upgraded to the owned pressing).
 
 Session dedup:
 
-  A set of (artist_lower, normalized_title) is maintained across the entire
-  silence-bounded session. Shared by both modes. Cleared only on silence.
-  Prevents double-scrobbles even when the album-lock session resets
-  internally (e.g. different Spotify editions of the same record).
+  (artist, normalised title) pairs scrobbled in this silence-bounded
+  session, across mode switches and re-locks. Cleared only on silence.
 """
+
+from __future__ import annotations
 
 import logging
 import re
@@ -34,7 +37,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .fingerprint import TrackInfo
-from .spotify import AlbumTracklist, SpotifyClient, SpotifyTrack
+from .resolve import Resolved
+from .tracklist import AlbumTracklist
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +47,10 @@ VINYL_DRIFT          = 0.03  # ±3 % speed tolerance (wow/flutter/motor drift)
 NEEDLE_TOLERANCE     = 15    # seconds of needle-drop imprecision
 ADVANCE_BUFFER_MIN   = 3     # min seconds past duration before auto-advance
 ADVANCE_BUFFER_MAX   = 15    # max seconds past duration before auto-advance
-FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when Spotify has none (4 min)
+FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when nobody knows (4 min)
 
 # ── Compilation detection ─────────────────────────────────────────────────────
-MISMATCH_THRESHOLD = 2      # consecutive off-album IDs → switch to COMPILATION
+MISMATCH_THRESHOLD = 2      # consecutive different-artist IDs → switch to COMPILATION
 CONFIRM_THRESHOLD  = 2      # times a track must be identified before acting on it
 
 
@@ -62,7 +66,6 @@ def normalize_title(title: str) -> str:
       "Heroes (Remastered 2017)"                 →  "heroes"
     """
     s = title
-    # Remove parenthetical / bracketed edition tags
     s = re.sub(
         r'\s*[\(\[]'
         r'(?:\d{4}\s+)?'
@@ -71,16 +74,29 @@ def normalize_title(title: str) -> str:
         r'[^\)\]]*[\)\]]',
         '', s, flags=re.IGNORECASE,
     ).strip()
-    # Remove trailing " - Special Edit", " - Remastered 2008", etc.
     s = re.sub(
         r'\s*[-–—]\s*'
         r'(?:special\s+edit|remaster(?:ed)?(?:\s+\d{4})?|single\s+version|'
         r'radio\s+edit|album\s+version|extended|remix)\s*$',
         '', s, flags=re.IGNORECASE,
     ).strip()
-    # Remove vinyl format markers: 7", 12"
-    s = re.sub(r'\s*\d+["\u201d]\s*', ' ', s).strip()
+    s = re.sub(r'\s*\d+["”]\s*', ' ', s).strip()
     return s.lower() if s else title.lower()
+
+
+def _artist_key(name: str) -> str:
+    s = (name or "").lower().replace("$", "s").replace("'", "").replace("’", "")
+    s = re.sub(r"\s*\(\d+\)$", "", s)
+    return " ".join(re.sub(r"[^a-z0-9Ѐ-ӿ]+", " ", s).split())
+
+
+def same_artist(a: str, b: str) -> bool:
+    ka, kb = _artist_key(a), _artist_key(b)
+    if not ka or not kb:
+        return False
+    if "various" in (ka, kb) or "various artists" in (ka, kb):
+        return True
+    return ka == kb or ka in kb or kb in ka
 
 
 class SessionMode(Enum):
@@ -105,38 +121,36 @@ class AlbumState:
     music_start:         float           # wall-clock time music first started
     anchors:             list = field(default_factory=list)
     current_index:       int   = 0       # best estimate of current track
-    current_track_start: float = 0.0    # estimated wall-clock start of current track
+    current_track_start: float = 0.0     # estimated wall-clock start of current track
     scrobbled:           set   = field(default_factory=set)  # track indices scrobbled
-    exhausted:           bool  = False   # True once we've advanced past the last track
+    exhausted:           bool  = False   # advanced past the last track
+    side_done:           bool  = False   # timing reached the end of the current side
 
 
 # ── Main class ────────────────────────────────────────────────────────────────
 
 class ScrobbleSession:
-    """Manages vinyl scrobbling state for one silence-bounded music session.
+    """Scrobbling state for one silence-bounded music session.
 
     Public API
     ----------
-    on_identified(spotify_track, music_start) → [(TrackInfo, timestamp), ...]
-    check_advance()                            → [(TrackInfo, timestamp), ...]
-    on_silence()                               → [(TrackInfo, timestamp), ...]
-    get_current_track()                        → Optional[TrackInfo]
-    get_progress()                             → Optional[(elapsed, duration)]
-    is_locked()                                → bool
-    album_state                                → Optional[AlbumState]
-    mode                                       → Optional[SessionMode]
+    on_identified(resolved, music_start, at=None) → [(TrackInfo, timestamp), ...]
+    check_advance()                              → [(TrackInfo, timestamp), ...]
+    on_silence()                                 → [(TrackInfo, timestamp), ...]
+    get_current_track()                          → Optional[TrackInfo]
+    get_progress()                               → Optional[(elapsed, duration)]
+    is_locked()                                  → bool
+    album_state / mode / comp_scrobbled_count / locked_album_id / locked_artist
     reset()
     """
 
     def __init__(
         self,
-        spotify: SpotifyClient,
         min_play_seconds: int = 30,
-        chunk_duration: int  = 10,
+        chunk_duration: int = 10,
         min_play_fraction: float = 0.5,
         clock: Callable[[], float] = time.time,
     ):
-        self.spotify           = spotify
         self.min_play_seconds  = min_play_seconds
         self.min_play_fraction = min_play_fraction
         self.chunk_duration    = chunk_duration
@@ -146,18 +160,15 @@ class ScrobbleSession:
 
         self._album: AlbumState | None = None
         self._mismatch_count: int = 0
-        self._comp_count: int = 0  # tracks scrobbled in compilation mode this session
+        self._comp_count: int = 0
+        self._comp_current: TrackInfo | None = None
+        self._comp_start: float = 0.0
 
         # Session-wide dedup: (artist_lower, normalized_title)
-        # Shared across mode switches; cleared only on silence.
         self._session_scrobbled: set[tuple[str, str]] = set()
 
-        # Confirmation counter: (artist_lower, title_lower) → hit count.
-        # A track must be identified CONFIRM_THRESHOLD times before it
-        # affects the session (starts album lock, becomes an anchor, or
-        # gets scrobbled in compilation mode).  One-off false fingerprint
-        # matches never reach 2 and are silently discarded.
-        self._confirm_counts: dict[tuple[str, str], int] = {}
+        # Confirmation gate: (artist_lower, title_lower) → (hits, first_seen)
+        self._confirm: dict[tuple[str, str], tuple[int, float]] = {}
 
     # ── Properties ───────────────────────────────────────────────────────────
 
@@ -167,106 +178,90 @@ class ScrobbleSession:
 
     @property
     def comp_scrobbled_count(self) -> int:
-        """Number of tracks scrobbled in compilation mode this session."""
         return self._comp_count
+
+    @property
+    def locked_album_id(self) -> str:
+        return self._album.album_id if self._album else ""
+
+    @property
+    def locked_artist(self) -> str:
+        return self._album.tracklist.artist if self._album else ""
 
     # ── Public API ───────────────────────────────────────────────────────────
 
     def on_identified(
         self,
-        spotify_track: SpotifyTrack,
+        resolved: Resolved,
         music_start: float,
+        at: float | None = None,
     ) -> list[tuple[TrackInfo, float]]:
-        """Handle a confirmed Spotify-enriched fingerprint match.
+        """Handle a resolved identification made at wall-clock `at`.
 
-        Returns a list of (TrackInfo, timestamp) ready to scrobble.
-        The caller must also call check_advance() each chunk for
-        timing-based track advances.
+        Returns (TrackInfo, timestamp) pairs ready to scrobble. The caller
+        also calls check_advance() every tick for timing-based advances.
         """
-        # ── Confirmation gate: require N identifications before acting ──────
-        if not self._is_confirmed(spotify_track.track):
+        now = self._clock() if at is None else at
+        track = resolved.track
+
+        if not self._is_confirmed(track, now):
             return []
 
-        # ── Compilation mode: no tracklist needed, just dedup + scrobble ────
         if self.mode == SessionMode.COMPILATION:
-            return self._handle_compilation_id(spotify_track)
+            return self._handle_compilation_id(track, now)
 
-        album_id  = spotify_track.album_id
-        if not album_id:
-            return []
+        if not resolved.has_album:
+            return []                                 # no tracklist: the engine's simple mode
 
-        tracklist = self.spotify.get_album_tracklist(album_id)
-        if not tracklist or not tracklist.tracks:
-            return []
-
-        # ── First identification ever: start album session ────────────────
+        assert resolved.tracklist is not None
         if self.mode is None:
-            return self._start_album_session(
-                spotify_track, tracklist, album_id, music_start,
-            )
+            return self._start_album_session(resolved, resolved.tracklist, music_start, now)
 
-        # ── Already in album mode ─────────────────────────────────────────
-        if self.mode == SessionMode.ALBUM:
-            return self._handle_album_id(
-                spotify_track, tracklist, album_id, music_start,
-            )
-
-        # ── In compilation mode: simple per-track scrobble ────────────────
-        return self._handle_compilation_id(spotify_track)
+        return self._handle_album_id(resolved, now)
 
     def check_advance(self) -> list[tuple[TrackInfo, float]]:
-        """Timing-based track advance — call every capture chunk.
+        """Timing-based track advance, called every tick.
 
-        Only active in ALBUM mode. When the current track's duration plus
-        a vinyl-drift buffer has elapsed, scrobbles the completed track and
-        advances the index to the next one.
-
-        Returns any newly completed tracks to scrobble.
+        ALBUM mode only. When the current track's duration plus a drift buffer
+        has elapsed, scrobbles it and moves to the next track, except at the
+        end of a side: there the needle is in the run-out groove and the
+        pointer waits for the flip (silence) or for a fresh anchor.
         """
         if self.mode != SessionMode.ALBUM or not self._album or self._album.exhausted:
             return []
+        al = self._album
+        if al.side_done:
+            return []
 
-        current = self._album.tracklist.get_track_at(self._album.current_index)
+        current = al.tracklist.get_track_at(al.current_index)
         if not current:
             return []
 
-        # Use fallback duration when Spotify has no data (e.g. older releases).
-        # Without this, a None-duration track would block timing advance forever.
         duration = current.duration or FALLBACK_TRACK_DURATION
-
-        elapsed = self._clock() - self._album.current_track_start
-        buffer  = min(
-            max(duration * VINYL_DRIFT, ADVANCE_BUFFER_MIN),
-            ADVANCE_BUFFER_MAX,
-        )
+        elapsed = self._clock() - al.current_track_start
+        buffer = min(max(duration * VINYL_DRIFT, ADVANCE_BUFFER_MIN), ADVANCE_BUFFER_MAX)
         if elapsed < duration + buffer:
             return []
 
         result: list[tuple[TrackInfo, float]] = []
+        result.extend(self._try_scrobble(al.current_index, al.current_track_start))
 
-        # Scrobble the track that just finished
-        result.extend(
-            self._try_scrobble(self._album.current_index, self._album.current_track_start)
-        )
+        if al.tracklist.is_side_end(al.current_index):
+            al.side_done = True
+            logger.info("Session: end of side %s — waiting for the flip",
+                        al.tracklist.side_at(al.current_index))
+            return result
 
-        # Advance pointer
-        next_idx   = self._album.current_index + 1
-        next_track = self._album.tracklist.get_track_at(next_idx)
-
+        next_idx = al.current_index + 1
+        next_track = al.tracklist.get_track_at(next_idx)
         if next_track:
-            self._album.current_index       = next_idx
-            self._album.current_track_start = self._clock()
-            logger.info(
-                "Session: ⏭  track %d — %s — %s",
-                next_idx + 1, next_track.artist, next_track.title,
-            )
+            al.current_index = next_idx
+            al.current_track_start = self._clock()
+            logger.info("Session: ⏭  track %d — %s — %s",
+                        next_idx + 1, next_track.artist, next_track.title)
         else:
-            # End of tracklist. Mark exhausted so check_advance short-circuits
-            # and is_locked() returns False — but on_identified() can still
-            # re-open the session if a side-B anchor arrives.
-            self._album.exhausted = True
+            al.exhausted = True
             logger.info("Session: end of tracklist — waiting for silence")
-
         return result
 
     def played_enough(self, track: TrackInfo, elapsed: float) -> bool:
@@ -281,40 +276,32 @@ class ScrobbleSession:
         return True
 
     def on_silence(self) -> list[tuple[TrackInfo, float]]:
-        """End the session on silence.
-
-        Scrobbles the current track if it has played long enough, then
-        resets all state. Ready for the next session.
-        """
+        """End the session: scrobble what played long enough, reset everything."""
+        now = self._clock()
         result: list[tuple[TrackInfo, float]] = []
 
         if self.mode == SessionMode.ALBUM and self._album:
-            current = self._album.tracklist.get_track_at(self._album.current_index)
-            elapsed = self._clock() - self._album.current_track_start
-            if current and self.played_enough(current, elapsed):
-                result.extend(
-                    self._try_scrobble(
-                        self._album.current_index, self._album.current_track_start,
-                    )
-                )
-            logger.info(
-                "Session: 🔓 ALBUM ended — %s / %s (%d tracks scrobbled)",
-                self._album.tracklist.artist,
-                self._album.tracklist.album_name,
-                len(self._album.scrobbled),
-            )
+            result.extend(self._finalize_album_current(now))
+            logger.info("Session: 🔓 ALBUM ended — %s / %s (%d tracks scrobbled)",
+                        self._album.tracklist.artist, self._album.tracklist.album_name,
+                        len(self._album.scrobbled))
+        elif self.mode == SessionMode.COMPILATION:
+            result.extend(self._finalize_comp(now))
+            logger.info("Session: 🔓 COMPILATION ended (%d tracks scrobbled)", self._comp_count)
 
         self.reset()
         return result
 
     def get_current_track(self) -> TrackInfo | None:
-        """Return the currently predicted track (for now-playing + display)."""
+        """What we believe is playing (now-playing + display)."""
         if self.mode == SessionMode.ALBUM and self._album:
             return self._album.tracklist.get_track_at(self._album.current_index)
+        if self.mode == SessionMode.COMPILATION:
+            return self._comp_current
         return None
 
     def get_progress(self) -> tuple[float, float] | None:
-        """Return (elapsed, duration) for the current track, or None."""
+        """(elapsed, duration) for the current track, or None."""
         if self.mode != SessionMode.ALBUM or not self._album:
             return None
         current = self._album.tracklist.get_track_at(self._album.current_index)
@@ -323,42 +310,49 @@ class ScrobbleSession:
         elapsed = min(self._clock() - self._album.current_track_start, current.duration)
         return (elapsed, current.duration)
 
+    def current_track_start(self) -> float | None:
+        if self.mode == SessionMode.ALBUM and self._album:
+            return self._album.current_track_start
+        if self.mode == SessionMode.COMPILATION and self._comp_current:
+            return self._comp_start
+        return None
+
     def is_locked(self) -> bool:
         """True while in album mode with a live (non-exhausted) album session."""
-        return (
-            self.mode == SessionMode.ALBUM
-            and self._album is not None
-            and not self._album.exhausted
-        )
+        return (self.mode == SessionMode.ALBUM and self._album is not None
+                and not self._album.exhausted)
 
     def reset(self) -> None:
-        """Clear all session state (called automatically on silence)."""
-        self.mode                = None
-        self._album              = None
-        self._mismatch_count     = 0
-        self._comp_count         = 0
+        self.mode = None
+        self._album = None
+        self._mismatch_count = 0
+        self._comp_count = 0
+        self._comp_current = None
+        self._comp_start = 0.0
         self._session_scrobbled.clear()
-        self._confirm_counts.clear()
+        self._confirm.clear()
 
     # ── Confirmation gate ────────────────────────────────────────────────────
 
-    def _is_confirmed(self, track: TrackInfo) -> bool:
-        """Return True once this track has been identified enough times.
+    def _is_confirmed(self, track: TrackInfo, now: float) -> bool:
+        """True once this track has been identified CONFIRM_THRESHOLD times.
 
-        Increments the counter each call.  False fingerprint hits are
-        typically one-offs; real tracks playing on vinyl are identified
-        repeatedly (every ~2 s), so they pass quickly.
+        Real tracks are identified again and again while they play; a
+        one-off false fingerprint match never reaches the threshold.
         """
         key = (track.artist.lower(), track.title.lower())
-        self._confirm_counts[key] = self._confirm_counts.get(key, 0) + 1
-        count = self._confirm_counts[key]
-        if count < CONFIRM_THRESHOLD:
-            logger.debug(
-                "Session: confirm %d/%d — '%s — %s'",
-                count, CONFIRM_THRESHOLD, track.artist, track.title,
-            )
+        hits, first = self._confirm.get(key, (0, now))
+        hits += 1
+        self._confirm[key] = (hits, first)
+        if hits < CONFIRM_THRESHOLD:
+            logger.debug("Session: confirm %d/%d — '%s — %s'", hits, CONFIRM_THRESHOLD,
+                         track.artist, track.title)
             return False
         return True
+
+    def _first_seen(self, track: TrackInfo, default: float) -> float:
+        key = (track.artist.lower(), track.title.lower())
+        return self._confirm.get(key, (0, default))[1]
 
     # ── Session-level dedup ───────────────────────────────────────────────────
 
@@ -373,207 +367,188 @@ class ScrobbleSession:
 
     # ── Album mode: session start ─────────────────────────────────────────────
 
-    def _start_album_session(
-        self,
-        spotify_track: SpotifyTrack,
-        tracklist: AlbumTracklist,
-        album_id: str,
-        music_start: float,
-    ) -> list[tuple[TrackInfo, float]]:
-        """Start a new album session on the very first identification."""
-        now = self._clock()
-
-        track_index = self._resolve_track_index(tracklist, spotify_track.track.title)
+    def _start_album_session(self, resolved: Resolved, tracklist: AlbumTracklist,
+                             music_start: float, now: float) -> list[tuple[TrackInfo, float]]:
+        track_index = tracklist.find_track_index(resolved.track.title)
         if track_index is None:
-            logger.debug(
-                "Session: '%s' not found in tracklist for %s — ignoring",
-                spotify_track.track.title, tracklist.album_name,
-            )
+            logger.debug("Session: '%s' not found in tracklist for %s — ignoring",
+                         resolved.track.title, tracklist.album_name)
             return []
 
         self._album = AlbumState(
-            album_id            = album_id,
-            tracklist           = tracklist,
-            music_start         = music_start,
-            anchors             = [Anchor(track_index, now)],
-            current_index       = track_index,
-            current_track_start = music_start,
+            album_id=resolved.album_id, tracklist=tracklist, music_start=music_start,
+            anchors=[Anchor(track_index, now)], current_index=track_index,
+            current_track_start=music_start,
         )
-        self.mode            = SessionMode.ALBUM
+        self.mode = SessionMode.ALBUM
         self._mismatch_count = 0
 
-        logger.info(
-            "Session: 🔒 ALBUM — %s / %s  (track %d/%d, first ID: '%s')",
-            tracklist.artist, tracklist.album_name,
-            track_index + 1, len(tracklist.tracks),
-            spotify_track.track.title,
-        )
+        pos = tracklist.position_at(track_index)
+        logger.info("Session: 🔒 ALBUM — %s / %s  (track %d/%d%s, first ID: '%s', %s%s)",
+                    tracklist.artist, tracklist.album_name, track_index + 1,
+                    len(tracklist.tracks), f" {pos}" if pos else "", resolved.track.title,
+                    tracklist.source, ", owned" if tracklist.owned else "")
 
-        # Retroactive backfill + refine current_track_start
         return self._retroactive_backfill(track_index, now)
 
     # ── Album mode: ongoing identifications ───────────────────────────────────
 
-    def _handle_album_id(
-        self,
-        spotify_track: SpotifyTrack,
-        tracklist: AlbumTracklist,
-        album_id: str,
-        music_start: float,
-    ) -> list[tuple[TrackInfo, float]]:
-        """Handle an identification while already in album mode."""
+    def _handle_album_id(self, resolved: Resolved, now: float) -> list[tuple[TrackInfo, float]]:
         assert self._album is not None
-        now = self._clock()
+        al = self._album
 
-        track_index = self._find_in_current_album(spotify_track)
+        # A better home for this session? (the owned pressing once the collection has
+        # loaded, the album when we locked onto a single, the edition that has this track)
+        new_tl = resolved.tracklist if resolved.has_album else None
+        if new_tl is not None and new_tl is not al.tracklist and self._is_upgrade(new_tl):
+            return self._relock(resolved, new_tl, now)
 
+        track_index = self._find_in_current_album(resolved)
         if track_index is not None:
-            # Valid anchor — reset mismatch counter
             self._mismatch_count = 0
             return self._apply_anchor(track_index, now)
 
-        # Doesn't fit the locked album
+        # Not on the locked album. Same artist: catalogue confusion, ignore.
+        # Different artist: maybe a compilation.
+        if same_artist(resolved.track.artist, al.tracklist.artist):
+            logger.info("Session: '%s' is not on '%s' (same artist) — ignoring",
+                        resolved.track.title, al.tracklist.album_name)
+            return []
+
         self._mismatch_count += 1
-        logger.info(
-            "Session: mismatch %d/%d — '%s — %s' while locked on '%s'",
-            self._mismatch_count, MISMATCH_THRESHOLD,
-            spotify_track.track.artist, spotify_track.track.title,
-            self._album.tracklist.artist,
-        )
+        logger.info("Session: mismatch %d/%d — '%s — %s' while locked on '%s'",
+                    self._mismatch_count, MISMATCH_THRESHOLD,
+                    resolved.track.artist, resolved.track.title, al.tracklist.artist)
+        if self._mismatch_count < MISMATCH_THRESHOLD:
+            return []
 
-        if self._mismatch_count >= MISMATCH_THRESHOLD:
-            logger.info(
-                "Session: 🎛  switching to COMPILATION mode"
-                " (too many mismatches for album '%s')",
-                self._album.tracklist.album_name,
-            )
-            # Finalize whatever is playing in album mode
-            result = self._finalize_album_current()
-            # Switch mode
-            self.mode            = SessionMode.COMPILATION
-            self._album          = None
-            self._mismatch_count = 0
-            # Also scrobble the triggering track now that we're in compilation
-            result.extend(self._handle_compilation_id(spotify_track))
-            return result
+        logger.info("Session: 🎛  switching to COMPILATION mode (different artists on '%s')",
+                    al.tracklist.album_name)
+        result = self._finalize_album_current(now)
+        self.mode = SessionMode.COMPILATION
+        self._album = None
+        self._mismatch_count = 0
+        result.extend(self._handle_compilation_id(resolved.track, now))
+        return result
 
-        # Single mismatch: tolerate (likely fingerprint noise), do nothing
-        return []
+    def _find_in_current_album(self, resolved: Resolved) -> int | None:
+        """This track's index in the locked album, or None.
 
-    def _find_in_current_album(
-        self, spotify_track: SpotifyTrack,
-    ) -> int | None:
-        """Return this track's index in the locked album, or None.
-
-        Accepts:
-          1. Exact album_id match + exact title match
-          2. Same artist + normalized title match (different Spotify edition)
+        Accepts the same album id with a matching title, or (any edition,
+        any primary artist: feat. tracks differ) a title the tracklist has.
         """
         if not self._album:
             return None
+        return self._album.tracklist.find_track_index(resolved.track.title)
 
-        # 1. Same Spotify album
-        if spotify_track.album_id == self._album.album_id:
-            idx = self._album.tracklist.find_track_index(spotify_track.track.title)
-            if idx is not None:
-                return idx
-            # Try normalized match within same album
-            norm = normalize_title(spotify_track.track.title)
-            for i, t in enumerate(self._album.tracklist.tracks):
-                if normalize_title(t.title) == norm:
-                    return i
-            return None  # same album ID but track not found — odd, treat as mismatch
+    def _is_upgrade(self, new_tl: AlbumTracklist) -> bool:
+        """Is `new_tl` a better home for this session than the locked album?
 
-        # 2. Different edition: same artist, normalized title exists in our tracklist
-        locked_artist = self._album.tracklist.artist.lower()
-        norm = normalize_title(spotify_track.track.title)
-
-        # Accommodate "Various Artists" compilations — skip artist check
-        if (locked_artist != "various artists"
-                and spotify_track.track.artist.lower() != locked_artist):
-            # Different primary artist — but check if the title matches
-            # a track in the locked album anyway. Feat. tracks (e.g.
-            # "Aye (feat. Travis Scott)" by Lil Uzi Vert on a Travis
-            # Scott album) have different primary artists on Spotify
-            # but are still on the album.
-            for i, t in enumerate(self._album.tracklist.tracks):
-                if normalize_title(t.title) == norm:
-                    logger.debug(
-                        "Session: feat. match — '%s — %s' ≈ tracklist '%s' (index %d)",
-                        spotify_track.track.artist, spotify_track.track.title,
-                        t.title, i,
-                    )
-                    return i
-            return None  # genuinely different artist + title not in tracklist
-
-        for i, t in enumerate(self._album.tracklist.tracks):
-            if normalize_title(t.title) == norm:
-                logger.debug(
-                    "Session: edition match — '%s' ≈ '%s' (index %d)",
-                    spotify_track.track.title, t.title, i,
-                )
-                return i
-
-        return None
-
-    def _apply_anchor(
-        self, track_index: int, now: float,
-    ) -> list[tuple[TrackInfo, float]]:
-        """Record a valid anchor and update album session state."""
+        It must be the same artist (or a Various Artists record), contain the
+        track believed to be playing and everything scrobbled so far, and be
+        either the owned pressing when the locked one is not, or a different,
+        longer edition (the album when we locked onto a single; the edition
+        that actually has the track that is playing). An owned pressing is
+        never traded for a streaming edition.
+        """
         assert self._album is not None
-        self._album.anchors.append(Anchor(track_index, now))
-        self._album.exhausted = False  # re-open if a side-B anchor arrives
+        old = self._album.tracklist
+        if old.owned and not new_tl.owned:
+            return False
+        if not same_artist(new_tl.artist, old.artist):
+            return False
+        cur = old.get_track_at(self._album.current_index)
+        if cur is None or new_tl.find_track_index(cur.title) is None:
+            return False
+        for i in self._album.scrobbled:
+            t = old.get_track_at(i)
+            if t and new_tl.find_track_index(t.title) is None:
+                return False
+        if new_tl.owned and not old.owned:
+            return True
+        if new_tl.album_id == old.album_id:
+            return False
+        return len(new_tl.tracks) > len(old.tracks)
 
-        result: list[tuple[TrackInfo, float]] = []
-
-        if track_index == self._album.current_index:
-            logger.debug("Session: anchor confirms track %d ✓", track_index + 1)
-
-        elif track_index > self._album.current_index:
-            # Ahead of prediction — fill the gap
-            gap = self._fill_forward(self._album.current_index, track_index)
-            result.extend(gap)
-            self._album.current_index       = track_index
-            self._album.current_track_start = now
-            logger.info(
-                "Session: anchor → track %d (filled %d gap tracks)",
-                track_index + 1, len(gap),
-            )
-
-        else:
-            # Behind prediction — re-sync (drift or earlier false positive)
-            logger.warning(
-                "Session: anchor behind prediction (%d < %d), re-syncing",
-                track_index + 1, self._album.current_index + 1,
-            )
-            self._album.current_index       = track_index
-            self._album.current_track_start = now
-
+    def _relock(self, resolved: Resolved, new_tl: AlbumTracklist,
+                now: float) -> list[tuple[TrackInfo, float]]:
+        """Move the session onto a better album without losing what played."""
+        assert self._album is not None
+        old = self._album
+        idx = new_tl.find_track_index(resolved.track.title)
+        if idx is None:
+            return []
+        cur = old.tracklist.get_track_at(old.current_index)
+        same_track = cur is not None and new_tl.find_track_index(cur.title) == idx
+        # the same track keeps playing: keep its start; a new one: finish the old first
+        result = [] if same_track else self._finalize_album_current(now)
+        start = old.current_track_start if same_track else now
+        scrobbled: set[int] = set()
+        for i in old.scrobbled:
+            t = old.tracklist.get_track_at(i)
+            j = new_tl.find_track_index(t.title) if t else None
+            if j is not None:
+                scrobbled.add(j)
+        self._album = AlbumState(
+            album_id=resolved.album_id, tracklist=new_tl, music_start=old.music_start,
+            anchors=old.anchors + [Anchor(idx, now)], current_index=idx,
+            current_track_start=start, scrobbled=scrobbled,
+        )
+        self._mismatch_count = 0
+        logger.info("Session: 🔁 re-locked — %s / %s → %s (%d tracks, %s%s), now at track %d",
+                    new_tl.artist, old.tracklist.album_name, new_tl.album_name,
+                    len(new_tl.tracks), new_tl.source, ", owned" if new_tl.owned else "",
+                    idx + 1)
         return result
 
-    def _finalize_album_current(self) -> list[tuple[TrackInfo, float]]:
+    def _apply_anchor(self, track_index: int, now: float) -> list[tuple[TrackInfo, float]]:
+        assert self._album is not None
+        al = self._album
+        al.anchors.append(Anchor(track_index, now))
+        al.exhausted = False
+        result: list[tuple[TrackInfo, float]] = []
+
+        if track_index == al.current_index:
+            logger.debug("Session: anchor confirms track %d ✓", track_index + 1)
+            if al.side_done:
+                # the side "ended" by timing but the same track is still being heard:
+                # the timing model ran fast; keep showing it, the flip will come
+                pass
+        elif track_index > al.current_index:
+            gap = self._fill_forward(al.current_index, track_index)
+            result.extend(gap)
+            al.current_index = track_index
+            al.current_track_start = now
+            al.side_done = False
+            logger.info("Session: anchor → track %d (filled %d gap tracks)",
+                        track_index + 1, len(gap))
+        else:
+            logger.warning("Session: anchor behind prediction (%d < %d), re-syncing",
+                           track_index + 1, al.current_index + 1)
+            al.current_index = track_index
+            al.current_track_start = now
+            al.side_done = False
+        return result
+
+    def _finalize_album_current(self, now: float) -> list[tuple[TrackInfo, float]]:
         """Scrobble the current album track if it has played long enough."""
         if not self._album:
             return []
         current = self._album.tracklist.get_track_at(self._album.current_index)
-        elapsed = self._clock() - self._album.current_track_start
+        elapsed = now - self._album.current_track_start
         if current and self.played_enough(current, elapsed):
-            return self._try_scrobble(
-                self._album.current_index, self._album.current_track_start,
-            )
+            return self._try_scrobble(self._album.current_index,
+                                      self._album.current_track_start)
         return []
 
     # ── Album mode: scrobbling helpers ────────────────────────────────────────
 
-    def _try_scrobble(
-        self, index: int, timestamp: float, force: bool = False,
-    ) -> list[tuple[TrackInfo, float]]:
+    def _try_scrobble(self, index: int, timestamp: float,
+                      force: bool = False) -> list[tuple[TrackInfo, float]]:
         """Scrobble album track at `index` if eligible and not already done.
 
-        Args:
-            force: Skip the min-duration check. Used for gap-fill and
-                   backfill where we *know* the track played (it sits
-                   between two confirmed anchors or timing says so).
+        force: skip the min-duration check (gap-fill / backfill, where the
+        track is known to have played in full).
         """
         if not self._album:
             return []
@@ -584,7 +559,7 @@ class ScrobbleSession:
             return []
         if self._already_scrobbled(track):
             logger.debug("Session dedup: '%s — %s'", track.artist, track.title)
-            self._album.scrobbled.add(index)  # mark to avoid repeated log spam
+            self._album.scrobbled.add(index)
             return []
         if not force and track.duration and track.duration < self.min_play_seconds:
             return []
@@ -594,39 +569,32 @@ class ScrobbleSession:
 
     # ── Album mode: backfill + gap-fill ──────────────────────────────────────
 
-    def _retroactive_backfill(
-        self, anchor_index: int, anchor_time: float,
-    ) -> list[tuple[TrackInfo, float]]:
+    def _retroactive_backfill(self, anchor_index: int,
+                              anchor_time: float) -> list[tuple[TrackInfo, float]]:
         """Infer and scrobble tracks that played before the first identification.
 
-        Logic:
-          elapsed = anchor_time - music_start
-          Walk backwards from anchor - 1. Sum durations. Find the earliest
-          start track such that (elapsed - cumulative_prior_durations) falls
-          within the anchor track's duration ± tolerance. That is the inferred
-          needle-drop position on the album.
+        elapsed = anchor_time - music_start. Walk backwards from anchor - 1
+        summing durations; the earliest start track for which the remaining
+        time falls inside the anchor track (± tolerance) is the needle-drop
+        position. Never crosses a side boundary: the music before this side
+        started was a different silence-bounded session.
         """
         if not self._album or anchor_index == 0:
             return []
-
         elapsed = anchor_time - self._album.music_start
         if elapsed < self.chunk_duration:
             return []
 
         tracklist = self._album.tracklist
         tolerance = elapsed * VINYL_DRIFT + NEEDLE_TOLERANCE
-
         anchor_track = tracklist.get_track_at(anchor_index)
-        anchor_dur   = (
-            anchor_track.duration
-            if anchor_track and anchor_track.duration
-            else 600
-        )
+        anchor_dur = anchor_track.duration if anchor_track and anchor_track.duration else 600
 
-        best_start = anchor_index  # default: no backfill
+        best_start = anchor_index
         cumulative = 0.0
-
         for i in range(anchor_index - 1, -1, -1):
+            if tracklist.is_side_end(i):
+                break                                  # previous side: not this session
             track = tracklist.get_track_at(i)
             if not track or not track.duration:
                 break
@@ -642,31 +610,22 @@ class ScrobbleSession:
 
         result: list[tuple[TrackInfo, float]] = []
         ts = self._album.music_start
-
         for i in range(best_start, anchor_index):
             track = tracklist.get_track_at(i)
             if not track:
                 break
             result.extend(self._try_scrobble(i, ts, force=True))
             ts += track.duration if track.duration else FALLBACK_TRACK_DURATION
-
-        # Refine estimated start time for the anchor track itself
         self._album.current_track_start = ts
 
-        logger.info(
-            "Session: retroactive backfill — %d tracks from track %d"
-            " (%.0fs before first ID)",
-            len(result), best_start + 1, elapsed,
-        )
+        logger.info("Session: retroactive backfill — %d tracks from track %d "
+                    "(%.0fs before first ID)", len(result), best_start + 1, elapsed)
         for track, _ in result:
             logger.info("  ↳ %s — %s", track.artist, track.title)
-
         return result
 
-    def _fill_forward(
-        self, from_index: int, to_index: int,
-    ) -> list[tuple[TrackInfo, float]]:
-        """Scrobble all tracks from from_index up to (not including) to_index."""
+    def _fill_forward(self, from_index: int, to_index: int) -> list[tuple[TrackInfo, float]]:
+        """Scrobble tracks from from_index up to (not including) to_index."""
         if not self._album:
             return []
         result: list[tuple[TrackInfo, float]] = []
@@ -676,46 +635,32 @@ class ScrobbleSession:
             if not track:
                 break
             result.extend(self._try_scrobble(i, ts, force=True))
-            # Use fallback so the next track gets a distinct timestamp even
-            # when Spotify has no duration data — duplicate timestamps are
-            # silently rejected by Last.fm.
             ts += track.duration if track.duration else FALLBACK_TRACK_DURATION
         return result
 
     # ── Compilation mode ──────────────────────────────────────────────────────
 
-    def _handle_compilation_id(
-        self, spotify_track: SpotifyTrack,
-    ) -> list[tuple[TrackInfo, float]]:
-        """Compilation mode: scrobble this track if not already done."""
-        track = spotify_track.track
-        if self._already_scrobbled(track):
-            logger.debug(
-                "Session: compilation dedup — '%s — %s'", track.artist, track.title,
-            )
+    def _handle_compilation_id(self, track: TrackInfo, now: float) -> list[tuple[TrackInfo, float]]:
+        """A new confirmed track in a mix: finish the previous one, start this one."""
+        if self._comp_current and self._dedup_key(track) == self._dedup_key(self._comp_current):
             return []
-        if track.duration and track.duration < self.min_play_seconds:
+        result = self._finalize_comp(now)
+        self._comp_current = track
+        self._comp_start = self._first_seen(track, now)
+        logger.info("Session: 🎛  COMPILATION now — %s — %s", track.artist, track.title)
+        return result
+
+    def _finalize_comp(self, now: float) -> list[tuple[TrackInfo, float]]:
+        cur = self._comp_current
+        if cur is None:
             return []
-        self._mark_scrobbled(track)
+        self._comp_current = None
+        if self._already_scrobbled(cur):
+            return []
+        if not self.played_enough(cur, now - self._comp_start):
+            return []
+        self._mark_scrobbled(cur)
         self._comp_count += 1
-        logger.info(
-            "Session: 🎛  COMPILATION scrobble #%d — %s — %s",
-            self._comp_count, track.artist, track.title,
-        )
-        return [(track, self._clock())]
-
-    # ── Shared utility ────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _resolve_track_index(
-        tracklist: AlbumTracklist, title: str,
-    ) -> int | None:
-        """Find track index by exact title, then by normalized title."""
-        idx = tracklist.find_track_index(title)
-        if idx is not None:
-            return idx
-        norm = normalize_title(title)
-        for i, t in enumerate(tracklist.tracks):
-            if normalize_title(t.title) == norm:
-                return i
-        return None
+        logger.info("Session: 🎛  COMPILATION scrobble #%d — %s — %s",
+                    self._comp_count, cur.artist, cur.title)
+        return [(cur, self._comp_start)]

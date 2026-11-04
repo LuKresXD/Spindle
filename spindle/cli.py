@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import functools
 import logging
 import logging.handlers
 import signal
@@ -17,10 +16,11 @@ from .bot import SpindleBot
 from .capture import DEFAULT_STEP, ContinuousCapture
 from .config import SpindleConfig, load_config
 from .display import Display
-from .engine import Extras, Player
-from .fingerprint import identify
+from .engine import Extras, IdentifyWorker, Player
+from .fingerprint import Corrections, Identifier
 from .history import ScrobbleHistory
 from .notify import Notifier
+from .resolve import Resolver
 from .scrobbler import Scrobbler
 from .session import ScrobbleSession
 from .spotify import SpotifyClient
@@ -57,22 +57,6 @@ def _setup_logging(cfg: SpindleConfig, verbose: bool) -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-def build_extras(cfg: SpindleConfig, scrobbler: Scrobbler | None) -> Extras:
-    """Optional screen enrichments; each one is independent and may be absent."""
-    extras = Extras()
-    if cfg.discogs.token and cfg.discogs.username:
-        try:
-            from .discogs import DiscogsCollection
-            collection = DiscogsCollection(cfg.discogs.token, cfg.discogs.username)
-            extras.position = collection.position
-            logger.info("Discogs positions enabled for %s", cfg.discogs.username)
-        except ImportError:
-            logger.warning("Discogs configured but module missing")
-    if scrobbler is not None:
-        extras.album_playcount = scrobbler.album_playcount
-    return extras
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="spindle",
@@ -92,32 +76,61 @@ def main() -> None:
         logger.error("AcoustID API key not set: check config.yaml")
         sys.exit(1)
 
-    # Last.fm
+    notifier = Notifier(cfg.telegram)
+
+    # Last.fm (its own outbox thread; the engine never waits on it)
     scrobbler = None
     if not args.dry_run:
         if not cfg.lastfm.api_key or not cfg.lastfm.username:
             logger.error("Last.fm credentials not set: check config.yaml")
             sys.exit(1)
-        scrobbler = Scrobbler(cfg.lastfm, cfg.scrobble)
+        scrobbler = Scrobbler(cfg.lastfm, cfg.scrobble, on_error=notifier.error)
         scrobbler.connect()
 
-    # Spotify + smart session
-    spotify = session = None
+    # Spotify (canonical names, tracklists) and the Discogs collection (the records he owns)
+    spotify = None
     if cfg.spotify.client_id and cfg.spotify.client_secret:
         spotify = SpotifyClient(cfg.spotify)
+        logger.info("Spotify lookup enabled")
+    else:
+        logger.info("Spotify lookup disabled (no credentials)")
+
+    collection = None
+    if cfg.discogs.token and cfg.discogs.username:
+        from .discogs import DiscogsCollection
+        collection = DiscogsCollection(cfg.discogs.token, cfg.discogs.username)
+        collection.start()
+        st = collection.stats()
+        logger.info("Discogs collection for %s: %d releases cached (%d with tracklists); "
+                    "refreshing in the background", cfg.discogs.username, st["releases"],
+                    st["loaded"])
+
+    # Album lock needs a tracklist source: Spotify or the collection
+    session = None
+    if spotify or collection:
         session = ScrobbleSession(
-            spotify,
             min_play_seconds=cfg.scrobble.min_play_seconds,
             chunk_duration=DEFAULT_STEP,
             min_play_fraction=cfg.scrobble.min_play_fraction,
         )
-        logger.info("Spotify lookup + smart session enabled")
+        sources = [n for n, on in (("spotify", spotify), ("discogs", collection)) if on]
+        logger.info("Album-lock session enabled (%s)", " + ".join(sources))
     else:
-        logger.info("Spotify lookup disabled (no credentials): simple mode only")
+        logger.info("No tracklist source: simple mode only")
 
-    notifier = Notifier(cfg.telegram)
     history = ScrobbleHistory()
     art = ArtProvider(itunes=cfg.art.itunes, deezer=cfg.art.deezer)
+
+    corrections = Corrections(Path(cfg.fingerprint.corrections)) if cfg.fingerprint.corrections \
+        else Corrections()
+    identifier = Identifier(cfg.acoustid, cfg.fingerprint, corrections)
+    worker = IdentifyWorker(identifier.identify, Resolver(spotify, collection), art)
+
+    extras = Extras()
+    if collection is not None:
+        extras.position = collection.position
+    if scrobbler is not None:
+        extras.album_playcount = scrobbler.album_playcount
 
     display = Display(enabled=cfg.display.enabled, fb_path=cfg.display.fb_path)
     display.init()
@@ -128,17 +141,16 @@ def main() -> None:
                 cfg.audio.device, cfg.audio.chunk_duration, DEFAULT_STEP)
 
     player = Player(
-        cfg, capture,
-        functools.partial(identify, acoustid_cfg=cfg.acoustid, fp_cfg=cfg.fingerprint),
-        session=session, spotify=spotify, scrobbler=scrobbler,
-        notifier=notifier, history=history, art=art,
-        extras=build_extras(cfg, scrobbler), dry_run=args.dry_run,
+        cfg, capture, worker,
+        session=session, scrobbler=scrobbler, notifier=notifier, history=history,
+        extras=extras, dry_run=args.dry_run,
     )
 
     bot = None
     if cfg.telegram.bot_token and cfg.telegram.chat_id and not args.dry_run:
         bot = SpindleBot(bot_token=cfg.telegram.bot_token, chat_id=cfg.telegram.chat_id,
-                         session=session, history=history, notifier=notifier, player=player)
+                         session=session, history=history, notifier=notifier, player=player,
+                         collection=collection, scrobbler=scrobbler)
         bot.start()
 
     signal.signal(signal.SIGINT, _signal_handler)
@@ -177,6 +189,12 @@ def main() -> None:
     display.clear()
     display.stop()
     capture.stop()
+    worker.close()
+    identifier.close()
+    if collection is not None:
+        collection.stop()
+    if scrobbler is not None:
+        scrobbler.close()
     logger.info("Spindle stopped")
 
 

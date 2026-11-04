@@ -26,19 +26,19 @@ Turntable → RCA Y-splitter → USB audio adapter → Raspberry Pi → Last.fm
             Speakers
 ```
 
-Spindle records audio from a USB adapter in short chunks, fingerprints each chunk to identify the track, then scrobbles to Last.fm. It uses Spotify's API for canonical artist/title formatting so vinyl scrobbles stack perfectly with your Spotify plays.
+Spindle listens to a USB audio adapter, fingerprints the last few seconds every 2 s, works out which record is on the platter (your Discogs collection decides when a track lives on several albums), locks onto its tracklist, and scrobbles the side to Last.fm with Spotify-canonical names so vinyl plays stack with your streaming plays. The design is written up in [`docs/ENGINE.md`](docs/ENGINE.md).
 
 ### Key features
 
-- **Dual fingerprinting** — [AcoustID](https://acoustid.org) (Chromaprint) primary, [ShazamIO](https://github.com/dotX12/shazamio) fallback. Catches everything from mainstream to niche.
-- **Sliding window capture** — Records in 2-second steps with 10-second overlapping windows. New fingerprint attempt every 2 seconds for fast identification without sacrificing audio quality.
-- **Album-lock** — Identify one track, scrobble the whole side. Uses Spotify's tracklist + track durations to predict and scrobble tracks even when fingerprinting misses. Retroactively backfills tracks that played before the first identification.
-- **Spotify-canonical names** — Scrobbles use Spotify's formatting (e.g., `Playboi Carti — Poke It Out (with Nicki Minaj)`) so they stack with Spotify plays on Last.fm.
-- **Offline queue** — WiFi drops? Scrobbles are saved locally and flushed when the connection is back. Survives reboots.
-- **Telegram bot** — Live notifications when album-lock activates, tracks advance, and sides finish. Interactive commands: `/status`, `/history`, `/stats`.
-- **Vinyl-aware timing** — Accounts for ±3% speed drift, inter-track gaps, and needle-drop imprecision.
-- **30-second rule** — Respects Last.fm's scrobble spec: tracks must play ≥30s to count.
-- **systemd service** — Starts on boot, restarts on crash. Set it and forget it.
+- **Dual fingerprinting** — [AcoustID](https://acoustid.org) (Chromaprint) primary, [ShazamIO](https://github.com/dotX12/shazamio) fallback, off the main loop so the screen and silence detection never stall.
+- **Continuous capture** — one long-running `arecord` feeding a ring buffer; every fingerprint window is contiguous audio, a new attempt every 2 s.
+- **Your collection decides** — the Discogs collection is the prior: when a track sits on the album, a single and three compilations, the pressing you own wins. Records Spotify never got still lock from the Discogs tracklist alone.
+- **Album-lock, side-aware** — identify one track, scrobble the whole side. Backfills what played before the first ID, forward-fills gaps, advances by duration, and stops at the end of a side to wait for the flip. Re-locks onto a better tracklist when one appears (the album after a single, the owned pressing once the collection loaded).
+- **Spotify-canonical names** — `Playboi Carti — Poke It Out (with Nicki Minaj)`, so vinyl plays stack with streaming plays on Last.fm.
+- **Last.fm's rules, properly** — half the track or 4 minutes for early-ended tracks; an outbox thread with an offline queue that survives reboots; rejected scrobbles are reported, not retried forever.
+- **Telegram bot** — album-lock card, live now-playing edits, side summaries; `/now`, `/album`, `/history`, `/stats`, `/collection`.
+- **Screen** — cover, tracklist with the current track lit, `A3 · SIDE A`, progress, play count, on any framebuffer (13.3" HDMI OLED or the Waveshare SPI LCD).
+- **systemd service** — starts on boot, restarts on crash.
 
 ## Hardware
 
@@ -93,8 +93,9 @@ Edit `config.yaml` with your API keys:
 | [AcoustID](https://acoustid.org/new-application) | Register an application | ✅ |
 | [Last.fm](https://www.last.fm/api/account/create) | Create API account | ✅ |
 | [Spotify](https://developer.spotify.com/dashboard) | Create an app | Recommended |
+| [Discogs](https://www.discogs.com/settings/developers) | Personal access token + your username | Recommended |
 
-> Spotify enables album-lock and canonical naming. Without it, Spindle still works but falls back to basic fingerprint → scrobble mode.
+> Spotify gives canonical names and tracklists; Discogs gives the records you actually own (album choice, side positions, tracklists Spotify lacks). Album-lock works with either; with neither, Spindle falls back to plain fingerprint → scrobble.
 
 Find your audio device:
 
@@ -109,9 +110,6 @@ arecord -l
 ```bash
 # Dry run — identify tracks without scrobbling
 spindle --dry-run -v
-
-# With Last.fm canonicalization preview
-spindle --dry-run --canonicalize-preview -v
 ```
 
 ### 5. Run
@@ -137,24 +135,31 @@ journalctl -u spindle -f
 
 ## Album-lock scrobbling
 
-Spindle's signature feature. When a track is identified:
+Spindle's signature feature. When a track is identified (twice: one-off false matches never count):
 
-1. **Lock** — Fetches the album tracklist from Spotify
-2. **Backfill** — Calculates how long music has been playing. Walks backwards through the tracklist to scrobble tracks that played before identification
-3. **Predict** — Tracks forward using durations. Auto-advances and scrobbles when each track's time elapses
-4. **Confirm** — Subsequent fingerprint hits confirm or correct the prediction
-5. **End** — Silence (needle lift, side flip, end of record) cleanly ends the session
+1. **Resolve** — which album? Your Discogs collection first, then the album already locked, then album > single > compilation. Owned pressing + Spotify edition are merged: record order and `A1…D3` positions, Spotify names and durations.
+2. **Lock** — the session takes that tracklist
+3. **Backfill** — how long has music been playing? Walk backwards through the side to scrobble tracks that played before the first ID
+4. **Predict** — advance by duration; scrobble each track as its time elapses; stop at the end of the side
+5. **Confirm** — later fingerprint hits confirm, correct, or re-lock onto a better tracklist
+6. **End** — silence (needle lift, side flip, end of record) ends the session
 
 This means: **drop the needle, walk away, come back to a fully scrobbled side** — even if fingerprinting only caught 1 out of 6 tracks.
 
 ### Edge cases handled
 
-- Needle dropped mid-album → only backfills tracks that fit in elapsed time
-- 20-second interludes → advance buffer scales (3s for short tracks, 15s for long)
-- 13-minute epics → same system, just longer between advances
-- Side flip → silence breaks the lock, Side B starts a fresh session
-- Different record → old session finalized, new album locked
-- Vinyl speed drift → ±3% tolerance on all timing calculations
+- Needle dropped mid-side → backfills only what fits in the elapsed time, never across a side boundary
+- Track on the album *and* a single *and* a compilation → the record you own wins; otherwise the album
+- Record not on Spotify → Discogs tracklist locks the album; Shazam/AcoustID name the tracks
+- Locked onto a single by mistake → re-locks onto the album when the next track arrives
+- Same artist, wrong title (sample, catalogue confusion) → ignored, the lock holds
+- Two different artists in a row → compilation mode, each track scrobbled when it ends
+- Needle lifted early → Last.fm's half-or-4-minutes rule decides
+- 20-second interludes / 13-minute epics → advance buffer scales (3–15 s)
+- Side flip → silence ends the session; side B starts fresh
+- Vinyl speed drift → ±3 % tolerance on all timing
+- USB adapter hiccup → the session holds instead of hearing "silence"; `arecord` is relaunched with backoff
+- WiFi down → scrobbles queue on disk and flush when it returns; a scrobble Last.fm rejects is reported, not retried forever
 
 ## Configuration
 
@@ -167,8 +172,13 @@ audio:
   # Capture step is 2s — new window every 2s for fast identification
 
 silence:
-  threshold_db: -22         # vinyl surface noise is ~-25 dB
-  min_silence_seconds: 3
+  threshold_db: -45         # line-level USB capture: idle floor is ~-50 dB
+  min_silence_seconds: 8    # quiet this long = side over (run-out groove)
+  start_margin_db: 6        # music must clear threshold + margin to start a session
+
+discogs:
+  token: ""                 # personal access token
+  username: ""              # your Discogs username
 
 scrobble:
   min_play_seconds: 30      # Last.fm 30-second rule
@@ -192,15 +202,17 @@ logging:
 ```
 spindle/
 ├── cli.py          # Wiring + the 2 s tick loop
-├── engine.py       # Player: silence/music transitions, identification, scrobbling, ScreenState
+├── engine.py       # Player + IdentifyWorker: transitions, identification off-thread, ScreenState
 ├── state.py        # ScreenState / TrackRow: what the screen (or anything) renders from
 ├── capture.py      # Continuous arecord -> ring buffer; levels and contiguous WAV windows
 ├── fingerprint.py  # AcoustID (best-supported recording) + ShazamIO fallback, corrections
-├── spotify.py      # Canonical names, album tracklists, release year
-├── session.py      # Album-lock + compilation session, backfill, timing advance
-├── scrobbler.py    # Last.fm scrobbling, offline queue, album play count
+├── resolve.py      # Fingerprint -> album: Discogs collection, locked album, album > single
+├── spotify.py      # Track candidates, canonical names, album tracklists
+├── discogs.py      # Your collection: releases, tracklists, positions (background refresh)
+├── tracklist.py    # AlbumTracklist, sides, Discogs <-> Spotify merge
+├── session.py      # Album-lock (side-aware, re-lock) + compilation session, backfill, timing
+├── scrobbler.py    # Last.fm outbox thread, offline queue, error classes, album play count
 ├── art.py          # Cover art: Apple 1200 px -> Deezer -> Spotify, disk cache
-├── discogs.py      # Vinyl side/position (A3) from your Discogs collection
 ├── display.py      # Framebuffer renderer (HDMI OLED, or the Waveshare SPI LCD)
 ├── history.py      # Scrobble history (JSONL log for stats)
 ├── notify.py       # Telegram notifications
@@ -216,14 +228,16 @@ spindle/
 - [x] Album-lock scrobbling with retroactive backfill
 - [x] Offline scrobble queue (survives WiFi drops + reboots)
 - [x] systemd service (autostart, auto-restart)
-- [x] Telegram bot (notifications + `/status`, `/history`, `/stats`)
+- [x] Telegram bot (notifications + `/now`, `/album`, `/history`, `/stats`, `/collection`)
 - [x] Scrobble history + statistics
 - [x] Rotating log files
 - [x] Framebuffer display: album art + track info, scales to the panel (13.3" HDMI OLED, Waveshare 3.5" LCD)
 - [x] Continuous capture (one arecord, ring buffer; fingerprints are always contiguous audio)
 - [x] Now-playing screen v2: tracklist with the current track lit, progress + time, side/position from Discogs, 1200 px art, listening state, scrobbled tick + play count
 - [x] Last.fm's half-or-4-minutes rule for early-ended tracks; `silence.min_silence_seconds` honoured
-- [x] Tests (`pytest`), lint (`ruff`)
+- [x] Tests (`pytest`), lint (`ruff`), types (`mypy`)
+- [x] v0.2: the Discogs collection as the identification prior (owned album wins, Discogs-only locks, merged pressings), side-aware timing, re-lock, compilation-mode timing, identification and Last.fm off the tick thread, scrobble error classes
+- [ ] Touch "Claw mode" for the wall screen (Wayland kiosk)
 
 ## Screen
 
@@ -264,4 +278,4 @@ pytest
 
 ## Credits
 
-Built with [pyacoustid](https://github.com/beetbox/pyacoustid), [ShazamIO](https://github.com/dotX12/shazamio), [pylast](https://github.com/pylast/pylast), and the [Spotify Web API](https://developer.spotify.com/documentation/web-api).
+Built with [pyacoustid](https://github.com/beetbox/pyacoustid), [ShazamIO](https://github.com/dotX12/shazamio), [pylast](https://github.com/pylast/pylast), the [Spotify Web API](https://developer.spotify.com/documentation/web-api) and the [Discogs API](https://www.discogs.com/developers).

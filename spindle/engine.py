@@ -1,27 +1,34 @@
 """The player: one `tick()` every STEP seconds, one `ScreenState` out.
 
-This is the old 400-line main loop pulled apart into named steps with the
-loop state as attributes instead of locals. The engine does not record
-audio itself (that is `ContinuousCapture`, running in its own thread) and
-does not draw (that is `Display`); it decides what is happening and tells
-everyone.
+The engine decides what is happening and tells everyone; it does not record
+(`ContinuousCapture`), draw (`Display`), or wait on the network. Everything
+slow runs elsewhere and reports back:
+
+  * identification + resolution + cover art: `IdentifyWorker` (own thread)
+  * Last.fm calls: the `Scrobbler`'s outbox thread
+  * Discogs: its own refresh thread; lookups here are memory-only
+  * play counts: a one-worker executor, results read from a cache
 
 Tick outline:
-  1. level = loudness of the last STEP seconds
+  1. level = loudness of the last STEP seconds (capture down → hold)
   2. quiet for >= silence.min_silence_seconds  -> end the session (IDLE)
-     loud after quiet                           -> music started (LISTENING)
+     loud after quiet (with hysteresis)        -> music started (LISTENING)
   3. while music plays:
        a. timing advance for a locked album (session.check_advance)
-       b. identify the last window, at a lower cadence once an album is locked
-       c. feed the session, scrobble, update now-playing, notify
+       b. drain finished identifications, apply each at the time its audio ended
+       c. submit a new window to the worker when it is idle (slower once locked)
   4. publish ScreenState
 """
 
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .art import Art, ArtProvider
@@ -30,9 +37,9 @@ from .config import SpindleConfig
 from .fingerprint import TrackInfo
 from .history import ScrobbleHistory
 from .notify import Notifier
+from .resolve import ResolveContext, Resolved, Resolver
 from .scrobbler import Scrobbler
 from .session import ScrobbleSession, SessionMode
-from .spotify import SpotifyClient, SpotifyTrack
 from .state import Phase, ScreenState, TrackRow
 
 logger = logging.getLogger(__name__)
@@ -43,10 +50,111 @@ IdentifyFn = Callable[[Path], TrackInfo | None]
 # fingerprints only serve as anchors, so there is no need to hit AcoustID
 # (and Shazam on every miss) every 2 s.
 LOCKED_IDENTIFY_INTERVAL = 8.0
+HOT_INPUT_DB = -6.0          # RMS this high means the capture is clipping
 
+
+# ── Identification worker ────────────────────────────────────────────────────
+
+@dataclass
+class IdentifyJob:
+    wav: Path
+    ctx: ResolveContext
+    at: float                       # wall-clock time the audio window ended
+    art_hint: str = ""
+
+
+@dataclass
+class IdentifyResult:
+    at: float
+    raw: TrackInfo | None
+    resolved: Resolved | None = None
+    art: Art | None = None
+    took: float = 0.0
+
+
+class IdentifyWorker:
+    """One job in flight at a time: identify -> resolve -> cover art, off the tick thread."""
+
+    def __init__(self, identify: IdentifyFn, resolver: Resolver | None,
+                 art: ArtProvider | None = None, threaded: bool = True):
+        self.identify = identify
+        self.resolver = resolver
+        self.art = art
+        self.threaded = threaded
+        self._jobs: queue.Queue[IdentifyJob | None] = queue.Queue(maxsize=1)
+        self._results: queue.Queue[IdentifyResult] = queue.Queue()
+        self._busy = threading.Event()
+        self._thread: threading.Thread | None = None
+        if threaded:
+            self._thread = threading.Thread(target=self._run, name="identify", daemon=True)
+            self._thread.start()
+
+    @property
+    def busy(self) -> bool:
+        return self._busy.is_set()
+
+    def submit(self, job: IdentifyJob) -> bool:
+        """Accept the job if idle. The worker owns (and deletes) the WAV from here on."""
+        if self._busy.is_set():
+            return False
+        self._busy.set()
+        if not self.threaded:
+            self._results.put(self._work(job))
+            self._busy.clear()
+            return True
+        self._jobs.put(job)
+        return True
+
+    def results(self) -> list[IdentifyResult]:
+        out = []
+        while True:
+            try:
+                out.append(self._results.get_nowait())
+            except queue.Empty:
+                return out
+
+    def close(self) -> None:
+        if self._thread:
+            self._jobs.put(None)
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            try:
+                self._results.put(self._work(job))
+            except Exception as e:  # never kill the worker
+                logger.error("identify worker: %s", e, exc_info=True)
+                self._results.put(IdentifyResult(job.at, None))
+            finally:
+                self._busy.clear()
+
+    def _work(self, job: IdentifyJob) -> IdentifyResult:
+        t0 = time.monotonic()
+        try:
+            raw = self.identify(job.wav)
+        finally:
+            job.wav.unlink(missing_ok=True)
+        if raw is None:
+            return IdentifyResult(job.at, None, took=time.monotonic() - t0)
+        resolved = self.resolver.resolve(raw, job.ctx) if self.resolver else Resolved(raw)
+        art = None
+        if self.art is not None:
+            album = resolved.track.album or (resolved.tracklist.album_name
+                                             if resolved.tracklist else "") or ""
+            try:
+                art = self.art.get(resolved.track.artist, album, resolved.art_url)
+            except Exception as e:
+                logger.debug("Art fetch failed: %s", e)
+        return IdentifyResult(job.at, raw, resolved, art, time.monotonic() - t0)
+
+
+# ── Extras ───────────────────────────────────────────────────────────────────
 
 class Extras:
-    """Optional enrichments the screen shows. Plugged in by cli; all may be None."""
+    """Optional screen enrichments, plugged in by cli; each may be None."""
 
     def __init__(self) -> None:
         self.position: Callable[[str, str, str], tuple[str, str]] | None = None
@@ -54,19 +162,30 @@ class Extras:
         self.year: Callable[[str, str], str] | None = None
 
 
+# ── Player ───────────────────────────────────────────────────────────────────
+
+@dataclass
+class _Playing:
+    """What we believe is playing right now (any mode)."""
+    track: TrackInfo | None = None
+    since: float = 0.0              # when this track (or the music, if unknown) started
+    scrobbled: bool = False
+    simple: bool = False            # came from simple mode (no album known)
+    art: Art | None = None
+    art_key: tuple = field(default_factory=lambda: ("", ""))
+
+
 class Player:
     def __init__(
         self,
         cfg: SpindleConfig,
         capture: ContinuousCapture,
-        identify: IdentifyFn,
+        worker: IdentifyWorker,
         *,
         session: ScrobbleSession | None,
-        spotify: SpotifyClient | None,
         scrobbler: Scrobbler | None,
         notifier: Notifier,
         history: ScrobbleHistory,
-        art: ArtProvider | None = None,
         extras: Extras | None = None,
         dry_run: bool = False,
         clock: Callable[[], float] = time.time,
@@ -74,13 +193,11 @@ class Player:
     ) -> None:
         self.cfg = cfg
         self.capture = capture
-        self.identify = identify
+        self.worker = worker
         self.session = session
-        self.spotify = spotify
         self.scrobbler = scrobbler
         self.notifier = notifier
         self.history = history
-        self.art = art
         self.extras = extras or Extras()
         self.dry_run = dry_run
         self.clock = clock
@@ -91,20 +208,38 @@ class Player:
         self.level_db = -120.0
         self.music_since: float | None = None      # when the current music run began
         self.silent_since: float | None = None     # when the current quiet run began
-        self.last_identify_at = 0.0
+        self.last_submit_at = 0.0
         self._loud_ticks = 0
+        self._hot_warned = False
+        self._capture_down_logged = False
 
-        # what we believe is playing (any mode)
-        self.current_track: TrackInfo | None = None
-        self.current_art: Art | None = None
-        self.track_start = 0.0                      # simple mode only
-        self.track_scrobbled = False
+        self.playing = _Playing()
         self._playcount_cache: dict[tuple[str, str], int | None] = {}
+        self._playcount_pending: set[tuple[str, str]] = set()
+        self._bg = ThreadPoolExecutor(max_workers=1, thread_name_prefix="enrich")
+
+    # ── compatibility accessors (bot, tests) ─────────────────────────────────
+
+    @property
+    def current_track(self) -> TrackInfo | None:
+        return self.playing.track
+
+    @property
+    def track_scrobbled(self) -> bool:
+        return self.playing.scrobbled
 
     # ── public ───────────────────────────────────────────────────────────────
 
     def tick(self) -> ScreenState:
         now = self.clock()
+        if not getattr(self.capture, "running", True):
+            # no audio is arriving: hold everything rather than hearing "silence"
+            if not self._capture_down_logged:
+                logger.warning("Capture is down: holding state until audio returns")
+                self._capture_down_logged = True
+            return self._publish(now)
+        self._capture_down_logged = False
+
         self.level_db = self.capture.level_db(self.step)
         sil = self.cfg.silence
         quiet = self.level_db < sil.threshold_db
@@ -129,17 +264,17 @@ class Player:
         return self._publish(now)
 
     def _publish(self, now: float) -> ScreenState:
-
         self.state = self._build_state(now)
         return self.state
 
     def close(self) -> None:
         """Flush what is still playing (process shutdown)."""
+        now = self.clock()
         if self.session:
             for t, ts in self.session.on_silence():
                 self._scrobble(t, ts)
-        elif self.current_track and not self.track_scrobbled:
-            self._finalize_simple(self.current_track, self.track_start)
+        self._finalize_simple(now)
+        self._bg.shutdown(wait=False)
 
     # ── silence / music transitions ──────────────────────────────────────────
 
@@ -154,28 +289,34 @@ class Player:
 
     def _end_session(self, now: float) -> None:
         logger.info("Silence: session over (%.0fs quiet)", now - (self.silent_since or now))
+        # late identifications belong to the session that just ended; drop them
+        for res in self.worker.results():
+            logger.debug("Dropping identification that arrived after silence (%s)",
+                         res.raw.title if res.raw else "no match")
         if self.session:
             al = self.session.album_state
             al_artist = al.tracklist.artist if al else None
             al_album = al.tracklist.album_name if al else None
-            comp_count = self.session.comp_scrobbled_count   # read before reset()
+            al_scrobbled = len(al.scrobbled) if al else 0
+            al_played = (al.current_index + 1) if al else 0
+            comp_count = self.session.comp_scrobbled_count     # read before reset()
             for t, ts in self.session.on_silence():
                 self._scrobble(t, ts)
-            if al_artist and al and al.scrobbled:
-                self.notifier.side_finished(al_artist, al_album or "",
-                                            len(al.scrobbled), al.current_index + 1)
-            elif comp_count > 0:
-                self.notifier.compilation_finished(comp_count)
-        elif self.current_track and not self.track_scrobbled:
-            self._finalize_simple(self.current_track, self.track_start)
+            if al is not None:
+                al_scrobbled = len(al.scrobbled)
+            if al_artist and al_scrobbled:
+                self.notifier.side_finished(al_artist, al_album or "", al_scrobbled, al_played)
+            elif comp_count > 0 or self.session.comp_scrobbled_count > 0:
+                self.notifier.compilation_finished(
+                    max(comp_count, self.session.comp_scrobbled_count))
+        self._finalize_simple(now)
 
         self.phase = Phase.IDLE
         self._loud_ticks = 0
+        self._hot_warned = False
         self.music_since = None
-        self.current_track = None
-        self.current_art = None
-        self.track_scrobbled = False
-        self.last_identify_at = 0.0
+        self.playing = _Playing()
+        self.last_submit_at = 0.0
 
     def _music_tick(self, now: float) -> None:
         self.silent_since = None
@@ -184,11 +325,19 @@ class Player:
             self.music_since = now - self.step * max(1, self._loud_ticks)
             self.phase = Phase.LISTENING
             logger.info("Music started (%.1f dB)", self.level_db)
+        if self.level_db > HOT_INPUT_DB and not self._hot_warned:
+            self._hot_warned = True
+            logger.warning("Input is hot (%.1f dB RMS): the capture is probably clipping; "
+                           "lower the preamp or adapter gain", self.level_db)
 
         self._timing_advance()
-        self._maybe_identify(now)
+        for res in self.worker.results():
+            self._apply_result(res)
+        self._maybe_submit(now)
+        for res in self.worker.results():          # a synchronous worker answers at once
+            self._apply_result(res)
 
-        if self.current_track is not None:
+        if self.playing.track is not None:
             self.phase = Phase.PLAYING
 
     # ── album-lock timing ────────────────────────────────────────────────────
@@ -205,8 +354,7 @@ class Player:
         predicted = s.get_current_track()
         if not predicted:
             return
-        self.current_track = predicted
-        self.track_scrobbled = True
+        self._set_playing(predicted, s.current_track_start() or self.clock(), scrobbled=True)
         self._now_playing(predicted)
         al = s.album_state
         if advanced and al and al.current_index != prev_idx:
@@ -217,103 +365,106 @@ class Player:
 
     # ── identification ───────────────────────────────────────────────────────
 
-    def _maybe_identify(self, now: float) -> None:
+    def _maybe_submit(self, now: float) -> None:
+        if self.worker.busy:
+            return
         locked = bool(self.session and self.session.is_locked())
-        if locked and now - self.last_identify_at < LOCKED_IDENTIFY_INTERVAL:
+        if locked and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL:
             return
         if self.capture.buffered_seconds() < self.capture.window_seconds:
             return
         wav = self.capture.window_wav()
         if wav is None:
             return
-        self.last_identify_at = now
-        try:
-            track = self.identify(wav)
-        finally:
+        ctx = ResolveContext(
+            locked_album_id=self.session.locked_album_id if self.session else "",
+            locked_artist=self.session.locked_artist if self.session else "",
+        )
+        if self.worker.submit(IdentifyJob(wav, ctx, now)):
+            self.last_submit_at = now
+        else:
             wav.unlink(missing_ok=True)
 
-        if not track:
-            if locked:
-                predicted = self.session.get_current_track() if self.session else None
+    def _apply_result(self, res: IdentifyResult) -> None:
+        if res.took > 15:
+            logger.warning("Identification took %.0fs", res.took)
+        if res.resolved is None:
+            if self.session and self.session.is_locked():
+                predicted = self.session.get_current_track()
                 if predicted:
                     self._now_playing(predicted)
             return
+        self._apply_identification(res.resolved, res.at, res.art)
 
-        self._apply_identification(track, now)
-
-    def _apply_identification(self, track: TrackInfo, now: float) -> None:
-        spotify_result: SpotifyTrack | None = None
-        if self.spotify:
-            spotify_result = self.spotify.lookup(track.artist, track.title)
-            if spotify_result:
-                track = spotify_result.track
-
-        self._update_art(track, spotify_result)
-
+    def _apply_identification(self, resolved: Resolved, at: float, art: Art | None) -> None:
+        track = resolved.track
         s = self.session
-        if s and spotify_result and not self.dry_run:
+
+        if art is not None:
+            self.playing.art = art
+
+        if s and resolved.has_album and not self.dry_run:
             was_locked = s.is_locked()
+            was_album = s.locked_album_id
             was_mode = s.mode
-            for t, ts in s.on_identified(spotify_result, self.music_since or now):
-                self._scrobble(t, ts, backfill=True)
+            out = s.on_identified(resolved, self.music_since or at, at=at)
             if s.is_locked() and not was_locked:
-                al = s.album_state
-                if al:
-                    self.notifier.album_locked(
-                        al.tracklist.artist, al.tracklist.album_name,
-                        al.current_index + 1, len(al.tracklist.tracks), track.title,
-                        art_url=spotify_result.album_art_url or None,
-                    )
+                self._finalize_simple(at)             # a simple-mode track gave way to the lock
+            for t, ts in out:
+                self._scrobble(t, ts, backfill=True)
+            al = s.album_state
+            if al and s.is_locked() and (not was_locked or al.album_id != was_album):
+                self.notifier.album_locked(
+                    al.tracklist.artist, al.tracklist.album_name,
+                    al.current_index + 1, len(al.tracklist.tracks), track.title,
+                    art_url=resolved.art_url or None,
+                )
             if s.mode == SessionMode.COMPILATION and was_mode != SessionMode.COMPILATION:
                 logger.info("Session: compilation mode active (per-track scrobble only)")
+        elif s and s.mode == SessionMode.COMPILATION and not self.dry_run:
+            for t, ts in s.on_identified(resolved, self.music_since or at, at=at):
+                self._scrobble(t, ts)
 
         if self.dry_run:
             self._log_dry_run(track)
-            self.current_track = (s.get_current_track() if s and s.is_locked() else None) or track
+            cur = (s.get_current_track() if s and s.is_locked() else None) or track
+            self._set_playing(cur, at)
             return
 
         if s and s.is_locked():
             predicted = s.get_current_track() or track
+            self._set_playing(predicted, s.current_track_start() or at, scrobbled=True)
             self._now_playing(predicted)
-            self.current_track = predicted
-            self.track_scrobbled = True
         elif s and s.mode == SessionMode.COMPILATION:
-            self._now_playing(track)
-            self.current_track = track
-            self.track_scrobbled = True
+            cur = s.get_current_track() or track
+            self._set_playing(cur, s.current_track_start() or at, scrobbled=True)
+            self._now_playing(cur)
         else:
-            self._simple_mode(track, now)
+            self._simple_mode(track, at)
 
     def _simple_mode(self, track: TrackInfo, now: float) -> None:
-        """No Spotify (or no match): scrobble by elapsed time alone."""
-        cur = self.current_track
-        if cur is None or _key(track) != _key(cur):
-            if cur and not self.track_scrobbled:
-                self._finalize_simple(cur, self.track_start)
-            self.current_track = track
-            self.track_start = now
-            self.track_scrobbled = False
+        """No album known: scrobble by elapsed time alone."""
+        p = self.playing
+        cur = p.track
+        if cur is None or not p.simple or _key(track) != _key(cur):
+            self._finalize_simple(now)
+            self._set_playing(track, now, scrobbled=False, simple=True)
             logger.info("Now playing: %s - %s", track.artist, track.title)
             self._now_playing(track)
         else:
-            if not self.track_scrobbled and self._eligible(cur, self.track_start, now):
-                self._scrobble(cur, self.track_start)
-                self.track_scrobbled = True
+            if not p.scrobbled and self._eligible(cur, p.since, now):
+                self._scrobble(cur, p.since)
+                p.scrobbled = True
             self._now_playing(track)
 
-    def _update_art(self, track: TrackInfo, spotify_result: SpotifyTrack | None) -> None:
-        if not self.art:
-            return
-        album = track.album or (spotify_result.album_name if spotify_result else "") or ""
-        if self.current_art and self._art_key == (track.artist, album):
-            return
-        url = spotify_result.album_art_url if spotify_result else ""
-        got = self.art.get(track.artist, album, url)
-        if got:
-            self.current_art = got
-            self._art_key = (track.artist, album)
-
-    _art_key: tuple[str, str] = ("", "")
+    def _set_playing(self, track: TrackInfo, since: float, scrobbled: bool = False,
+                     simple: bool = False) -> None:
+        p = self.playing
+        if p.track is None or _key(p.track) != _key(track):
+            p.since = since
+        p.track = track
+        p.scrobbled = scrobbled
+        p.simple = simple
 
     # ── scrobbling plumbing ──────────────────────────────────────────────────
 
@@ -321,7 +472,9 @@ class Player:
         played = now - start
         if played < self.cfg.scrobble.min_play_seconds:
             return False
-        return not (t.duration and played < t.duration * self.cfg.scrobble.min_play_fraction)
+        if t.duration:
+            return played >= min(t.duration * self.cfg.scrobble.min_play_fraction, 240)
+        return True
 
     def _scrobble(self, t: TrackInfo, timestamp: float, backfill: bool = False) -> None:
         if self.scrobbler and not self.dry_run:
@@ -334,11 +487,14 @@ class Player:
         if self.scrobbler and not self.dry_run:
             self.scrobbler.update_now_playing(t)
 
-    def _finalize_simple(self, t: TrackInfo, start: float) -> None:
-        if self.dry_run:
+    def _finalize_simple(self, now: float) -> None:
+        """Scrobble a simple-mode track that is ending (silence, lock, next track)."""
+        p = self.playing
+        if self.dry_run or p.track is None or not p.simple or p.scrobbled:
             return
-        if self._eligible(t, start, self.clock()):
-            self._scrobble(t, start)
+        if self._eligible(p.track, p.since, now):
+            self._scrobble(p.track, p.since)
+        p.scrobbled = True
 
     def _log_dry_run(self, track: TrackInfo) -> None:
         line = f"{track.artist} - {track.title}"
@@ -358,36 +514,41 @@ class Player:
 
     def _build_state(self, now: float) -> ScreenState:
         st = ScreenState(phase=self.phase, level_db=self.level_db, updated_at=now)
-        if self.phase != Phase.PLAYING or self.current_track is None:
+        t = self.playing.track
+        if self.phase != Phase.PLAYING or t is None:
             return st
 
-        t = self.current_track
         st.artist, st.title, st.album = t.artist, t.title, t.album or ""
-        if self.current_art:
-            st.art, st.art_source = self.current_art.data, self.current_art.source
+        if self.playing.art:
+            st.art, st.art_source = self.playing.art.data, self.playing.art.source
 
         s = self.session
         al = s.album_state if s and s.mode == SessionMode.ALBUM else None
         if al:
-            st.artist = al.tracklist.artist or st.artist
-            st.album = al.tracklist.album_name or st.album
+            tl = al.tracklist
+            st.artist = tl.artist or st.artist
+            st.album = tl.album_name or st.album
             st.tracklist = [
-                TrackRow(title=tr.title, duration=tr.duration, scrobbled=i in al.scrobbled)
-                for i, tr in enumerate(al.tracklist.tracks)
+                TrackRow(title=tr.title, duration=tr.duration, position=tl.position_at(i),
+                         scrobbled=i in al.scrobbled)
+                for i, tr in enumerate(tl.tracks)
             ]
             st.current_index = al.current_index
-            st.year = al.tracklist.year
-            cur = al.tracklist.get_track_at(al.current_index)
+            st.year = tl.year
+            cur = tl.get_track_at(al.current_index)
             st.track_duration = float(cur.duration) if cur and cur.duration else None
             st.track_elapsed = max(0.0, now - al.current_track_start)
             st.scrobbled = al.current_index in al.scrobbled
             st.session_scrobbles = len(al.scrobbled)
+            st.position = tl.position_at(al.current_index)
+            st.side = tl.side_at(al.current_index)
+            st.owned = tl.owned
         else:
             st.track_duration = float(t.duration) if t.duration else None
-            if self.track_start:
-                st.track_elapsed = max(0.0, now - self.track_start)
-            st.scrobbled = self.track_scrobbled
-            st.session_scrobbles = s.comp_scrobbled_count if s else int(self.track_scrobbled)
+            if self.playing.since:
+                st.track_elapsed = max(0.0, now - self.playing.since)
+            st.scrobbled = self.playing.scrobbled
+            st.session_scrobbles = s.comp_scrobbled_count if s else int(self.playing.scrobbled)
 
         self._enrich(st)
         return st
@@ -395,22 +556,34 @@ class Player:
     def _enrich(self, st: ScreenState) -> None:
         ex = self.extras
         try:
-            if ex.position and st.album:
+            if ex.position and st.album and not st.position:
                 side, pos = ex.position(st.artist, st.album, st.title)
                 st.side, st.position = side, pos
                 if st.tracklist and pos:
                     for row in st.tracklist:
-                        _, rpos = ex.position(st.artist, st.album, row.title)
-                        row.position = rpos
+                        if not row.position:
+                            _, rpos = ex.position(st.artist, st.album, row.title)
+                            row.position = rpos
             if ex.album_playcount and st.album:
                 key = (st.artist.lower(), st.album.lower())
-                if key not in self._playcount_cache:
-                    self._playcount_cache[key] = ex.album_playcount(st.artist, st.album)
-                st.album_playcount = self._playcount_cache[key]
+                if key in self._playcount_cache:
+                    st.album_playcount = self._playcount_cache[key]
+                elif key not in self._playcount_pending:
+                    self._playcount_pending.add(key)
+                    self._bg.submit(self._fetch_playcount, key, st.artist, st.album)
             if ex.year and st.album and not st.year:
                 st.year = ex.year(st.artist, st.album)
         except Exception as e:  # enrichment must never take the screen down
             logger.debug("Extras failed: %s", e)
+
+    def _fetch_playcount(self, key: tuple[str, str], artist: str, album: str) -> None:
+        try:
+            self._playcount_cache[key] = self.extras.album_playcount(artist, album)  # type: ignore[misc]
+        except Exception as e:
+            logger.debug("Playcount lookup failed: %s", e)
+            self._playcount_cache[key] = None
+        finally:
+            self._playcount_pending.discard(key)
 
 
 def _key(t: TrackInfo) -> str:

@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,7 @@ DEEZER_SEARCH = "https://api.deezer.com/search/album"
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "spindle" / "art"
 ITUNES_SIZE = 1200
 DEEZER_SIZE = 1200
+NEGATIVE_TTL = 600        # seconds before a failed lookup is tried again
 _UA = "spindle/0.2 (+https://github.com/LuKresXD/Spindle)"
 
 
@@ -69,7 +71,7 @@ class ArtProvider:
         self.deezer = deezer
         self._http = session or requests.Session()
         self._http.headers.update({"User-Agent": _UA})
-        self._mem: dict[str, Art | None] = {}
+        self._mem: dict[str, tuple[Art | None, float]] = {}   # key -> (art, retry_after)
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -78,15 +80,21 @@ class ArtProvider:
     # ── public ───────────────────────────────────────────────────────────────
 
     def get(self, artist: str, album: str, spotify_url: str = "") -> Art | None:
+        """Cover for an album: memory, then disk, then the network. A miss is
+        remembered for NEGATIVE_TTL only, so a flaky moment does not leave a
+        record without its cover until the next restart."""
         key = self._key(artist, album)
-        if key in self._mem:
-            return self._mem[key]
+        hit = self._mem.get(key)
+        if hit is not None:
+            art, retry_after = hit
+            if art is not None or time.time() < retry_after:
+                return art
         art = self._from_disk(key)
         if art is None:
             art = self._fetch(artist, album, spotify_url)
             if art is not None:
                 self._to_disk(key, art)
-        self._mem[key] = art
+        self._mem[key] = (art, time.time() + NEGATIVE_TTL)
         return art
 
     # ── fetching ─────────────────────────────────────────────────────────────

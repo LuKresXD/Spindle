@@ -10,6 +10,7 @@ Commands:
   /top [period] — top artists/albums (today|week|month|all)
   /streak       — listening streak info
   /corrections  — view fingerprint corrections
+  /collection   — Discogs collection status ("/collection refresh" to re-sync)
   /mute         — mute notifications
   /unmute       — unmute notifications
   /help         — command list
@@ -26,9 +27,11 @@ import requests
 import yaml
 
 if TYPE_CHECKING:
+    from .discogs import DiscogsCollection
     from .engine import Player
     from .history import ScrobbleHistory
     from .notify import Notifier
+    from .scrobbler import Scrobbler
     from .session import ScrobbleSession
 
 logger = logging.getLogger(__name__)
@@ -44,13 +47,17 @@ class SpindleBot:
                  history: "ScrobbleHistory | None" = None,
                  notifier: "Notifier | None" = None,
                  start_time: float | None = None,
-                 player: "Player | None" = None):
+                 player: "Player | None" = None,
+                 collection: "DiscogsCollection | None" = None,
+                 scrobbler: "Scrobbler | None" = None):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.session = session
         self.history = history
         self.notifier = notifier
         self.player = player
+        self.collection = collection
+        self.scrobbler = scrobbler
         self.start_time = start_time or time.time()
         self._running = False
         self._thread: threading.Thread | None = None
@@ -141,6 +148,9 @@ class SpindleBot:
             period = args.strip().lower() if args.strip() else "week"
             self._send(self._cmd_top(period))
             return
+        if cmd == "/collection":
+            self._send(self._cmd_collection(args.strip().lower()))
+            return
 
         handler = handlers.get(cmd)
         if handler:
@@ -184,8 +194,12 @@ class SpindleBot:
             ear = f"\n🎚 {st.level_db:.1f} dB · {st.phase.value}"
             if st.position:
                 ear += f" · {st.position}"
+            if st.owned:
+                ear += " · owned"
             if st.art_source:
                 ear += f" · art: {st.art_source}"
+            if self.scrobbler is not None and self.scrobbler.queue_size():
+                ear += f" · {self.scrobbler.queue_size()} queued offline"
 
         if self.session and self.session.is_locked():
             al = self.session.album_state
@@ -496,6 +510,30 @@ class SpindleBot:
 
         return "\n".join(lines)
 
+    def _cmd_collection(self, arg: str = "") -> str:
+        """Discogs collection status; "/collection refresh" forces a re-sync."""
+        if self.collection is None:
+            return "💽 Discogs is not configured (discogs.token + username in config.yaml)"
+        if arg == "refresh":
+            self.collection.refresh_now()
+            return "💽 Refreshing the Discogs collection in the background…"
+        st = self.collection.stats()
+        if not st["releases"]:
+            err = f"\n⚠️ {_esc(str(st['error']))}" if st["error"] else ""
+            return "💽 Collection not loaded yet" + err
+        age = time.time() - st["fetched_at"] if st["fetched_at"] else None
+        lines = [
+            "💽 <b>Discogs collection</b>",
+            f"Releases: <b>{st['releases']}</b>",
+            f"Tracklists loaded: {st['loaded']}/{st['releases']}",
+        ]
+        if age is not None:
+            lines.append(f"Refreshed: {_format_duration(age)} ago")
+        if st["error"]:
+            lines.append(f"⚠️ Last error: {_esc(str(st['error']))}")
+        lines.append("\n/collection refresh — re-sync now")
+        return "\n".join(lines)
+
     def _cmd_mute(self) -> str:
         """Mute notifications."""
         if self.notifier:
@@ -528,6 +566,7 @@ class SpindleBot:
             "/streak — listening streak\n\n"
             "<b>Settings</b>\n"
             "/corrections — view fingerprint corrections\n"
+            "/collection — Discogs collection status\n"
             "/mute · /unmute — toggle notifications\n"
             "/help — this message"
         )

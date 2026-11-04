@@ -13,6 +13,7 @@ lastfm:
   api_secret: "your-lastfm-shared-secret"
   username: "your-lastfm-username"
   # password_hash: "md5-of-your-password"   # run: python3 -c "import hashlib; print(hashlib.md5(b'YOUR_PASSWORD').hexdigest())"
+  # session_key: ""                         # preferred: a Last.fm web-service session key (no password hash on disk)
 
 audio:
   device: "plughw:CARD=Device,DEV=0"        # find yours: arecord -l
@@ -24,6 +25,7 @@ fingerprint:
   acoustid_timeout: 10
   shazam_fallback: true                     # ShazamIO catches tracks AcoustID misses
   min_confidence: 0.5
+  # corrections: "corrections.yaml"         # manual fixes, relative to this file (default ~/spindle/corrections.yaml)
 
 scrobble:
   min_play_seconds: 30                      # Last.fm 30-second rule
@@ -43,7 +45,9 @@ display:
 
 discogs:
   token: ""                                 # personal access token (discogs.com/settings/developers)
-  username: ""                              # the screen shows "A3 · SIDE A" from your collection's pressings
+  username: ""                              # your collection = the records on the shelf: it decides which
+                                            # album a track belongs to, locks albums Spotify lacks, and
+                                            # gives the screen "A3 · SIDE A" and side boundaries
 
 art:
   itunes: true                              # 1200 px covers from Apple's catalog

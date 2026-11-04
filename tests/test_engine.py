@@ -1,8 +1,8 @@
-from conftest import FakeClock, FakeSpotify, make_album
+from conftest import FakeClock, FakeResolver, make_album
 
 from spindle.art import Art
 from spindle.config import SpindleConfig
-from spindle.engine import Extras, Player
+from spindle.engine import Extras, IdentifyWorker, Player
 from spindle.fingerprint import TrackInfo
 from spindle.session import ScrobbleSession
 from spindle.state import Phase
@@ -15,6 +15,8 @@ class FakeCapture:
         self.level = -60.0
         self.window_seconds = 6
         self.tmp = tmp_path
+        self.running = True
+        self.windows = 0
 
     def level_db(self, seconds=2):
         return self.level
@@ -23,7 +25,8 @@ class FakeCapture:
         return 10.0
 
     def window_wav(self, seconds=None, min_seconds=2.0):
-        p = self.tmp / "w.wav"
+        self.windows += 1
+        p = self.tmp / f"w{self.windows}.wav"
         p.write_bytes(b"RIFF")
         return p
 
@@ -70,30 +73,35 @@ class FakeArt:
         return Art(b"\x89PNG-not-really", "test", "u")
 
 
-def make_player(tmp_path, clock, identify, with_session=True):
+def make_player(tmp_path, clock, identify, with_session=True, albums=None):
     cfg = SpindleConfig()
     cfg.silence.threshold_db = -45
     cfg.silence.min_silence_seconds = 8
-    album = make_album([115, 72, 109])
-    sp = FakeSpotify(album)
-    session = (ScrobbleSession(sp, min_play_seconds=30, chunk_duration=2, clock=clock)
+    albums = albums if albums is not None else [make_album([115, 72, 109])]
+    resolver = FakeResolver(*albums) if with_session else None
+    session = (ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
                if with_session else None)
     rec = Recorder()
     cap = FakeCapture(tmp_path)
     extras = Extras()
     extras.album_playcount = rec.album_playcount
-    player = Player(cfg, cap, identify, session=session, spotify=sp if with_session else None,
-                    scrobbler=rec, notifier=rec, history=FakeHistory(), art=FakeArt(),
-                    extras=extras, clock=clock, step=2)
+    worker = IdentifyWorker(identify, resolver, FakeArt(), threaded=False)
+    player = Player(cfg, cap, worker, session=session, scrobbler=rec, notifier=rec,
+                    history=FakeHistory(), extras=extras, clock=clock, step=2)
     return player, cap, rec
+
+
+def settle(player):
+    """Let the one-worker playcount executor finish."""
+    player._bg.shutdown(wait=True)
+    from concurrent.futures import ThreadPoolExecutor
+    player._bg = ThreadPoolExecutor(max_workers=1)
 
 
 def test_idle_until_music_then_listening_then_playing(tmp_path):
     clock = FakeClock()
-    hits = {"n": 0}
 
     def identify(path):
-        hits["n"] += 1
         return TrackInfo(title="Track 2", artist="Madvillain", album="Madvillainy", duration=72)
 
     player, cap, rec = make_player(tmp_path, clock, identify)
@@ -103,9 +111,11 @@ def test_idle_until_music_then_listening_then_playing(tmp_path):
     assert player.tick().phase == Phase.IDLE        # one loud tick is not a session yet
     clock.advance(2)
     st = player.tick()
-    # first ID shows the track right away (no tracklist yet: not confirmed)
+    # first ID shows the track right away (not confirmed yet: no tracklist)
     assert st.phase == Phase.PLAYING and st.title == "Track 2" and not st.tracklist
     clock.advance(2)
+    st = player.tick()
+    settle(player)
     st = player.tick()
     assert st.phase == Phase.PLAYING
     assert st.title == "Track 2" and st.album == "Madvillainy" and st.year == "2004"
@@ -114,6 +124,7 @@ def test_idle_until_music_then_listening_then_playing(tmp_path):
     assert st.album_playcount == 7
     assert st.art == b"\x89PNG-not-really"
     assert rec.now_playing[-1] == "Track 2"
+    assert ("album_locked", ("Madvillain", "Madvillainy", 2, 3, "Track 2")) in rec.events
 
 
 def test_runout_noise_near_threshold_never_starts_a_session(tmp_path):
@@ -159,7 +170,7 @@ def test_quiet_pause_does_not_end_session(tmp_path):
         clock.advance(2)
     assert st.phase == Phase.IDLE
     assert not player.session.is_locked()
-    assert ("side_finished", ) not in rec.events  # nothing scrobbled (too short)
+    assert all(e[0] != "side_finished" for e in rec.events)  # nothing scrobbled (too short)
 
 
 def test_timing_advance_scrobbles_and_identify_slows_when_locked(tmp_path):
@@ -167,7 +178,6 @@ def test_timing_advance_scrobbles_and_identify_slows_when_locked(tmp_path):
     calls = {"n": 0}
     def identify(path):
         calls["n"] += 1
-        # fingerprints agree with the record for the first minute, then nothing matches
         if clock.t - 1_700_000_000.0 < 60:
             return TrackInfo(title="Track 1", artist="Madvillain", duration=115)
         return None
@@ -181,9 +191,10 @@ def test_timing_advance_scrobbles_and_identify_slows_when_locked(tmp_path):
     assert rec.scrobbles and rec.scrobbles[0][0] == "Track 1"
     assert player.state.current_index == 1        # advanced to Track 2 by timing
     assert calls["n"] < ticks / 2                  # locked: far fewer fingerprints than ticks
+    assert ("track_advanced", ("Madvillain", "Madvillainy", "Track 2", 2, 3)) in rec.events
 
 
-def test_simple_mode_without_spotify(tmp_path):
+def test_simple_mode_without_any_tracklist_source(tmp_path):
     clock = FakeClock()
     def identify(path):
         return TrackInfo(title="Song", artist="Someone", duration=100)
@@ -193,4 +204,77 @@ def test_simple_mode_without_spotify(tmp_path):
         st = player.tick()
         clock.advance(2)
     assert st.phase == Phase.PLAYING and st.title == "Song" and not st.tracklist
-    assert rec.scrobbles == [("Song", 1_700_000_000.0 - 0)] or rec.scrobbles[0][0] == "Song"
+    assert rec.scrobbles[0][0] == "Song"
+    assert st.track_elapsed is not None and st.track_elapsed > 30
+
+
+def test_unknown_track_then_silence_still_scrobbles_it(tmp_path):
+    """Spotify and Discogs know nothing about this record: simple mode, and the
+    needle lift finalises the track (this used to be lost when a session existed)."""
+    clock = FakeClock()
+    def identify(path):
+        return TrackInfo(title="White Label", artist="Nobody", duration=200)
+    player, cap, rec = make_player(tmp_path, clock, identify)   # session present, no album
+    cap.level = -20
+    for _ in range(60):                            # 120 s: over half of 200 s
+        player.tick()
+        clock.advance(2)
+    assert player.phase == Phase.PLAYING and not player.session.is_locked()
+    cap.level = -80
+    for _ in range(6):
+        player.tick()
+        clock.advance(2)
+    assert player.phase == Phase.IDLE
+    assert [t for t, _ in rec.scrobbles] == ["White Label"]
+
+
+def test_capture_down_holds_the_session(tmp_path):
+    clock = FakeClock()
+    def identify(path):
+        return TrackInfo(title="Track 1", artist="Madvillain", duration=115)
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -20
+    for _ in range(3):
+        player.tick()
+        clock.advance(2)
+    assert player.phase == Phase.PLAYING
+    cap.running = False
+    cap.level = -120                               # the buffer was cleared: digital silence
+    for _ in range(10):                            # 20 s of "silence" while arecord is dead
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.PLAYING and player.session.is_locked()
+    cap.running = True
+    cap.level = -20
+    assert player.tick().phase == Phase.PLAYING
+
+
+def test_identification_applies_at_window_time_and_worker_runs_one_job(tmp_path):
+    clock = FakeClock()
+    seen = []
+    def identify(path):
+        seen.append(path)
+        return TrackInfo(title="Track 1", artist="Madvillain", duration=115)
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -20
+    for _ in range(8):                             # lock, then one slow-cadence re-identify
+        player.tick()
+        clock.advance(2)
+    # every submitted WAV was deleted by the worker
+    assert seen and all(not p.exists() for p in seen)
+    assert 2 < len(seen) < 6                       # locked after 2 IDs: 8 s cadence from then on
+    ctx = player.worker.resolver.calls[-1][1]
+    assert ctx.locked_album_id == "alb1" and ctx.locked_artist == "Madvillain"
+
+
+def test_hot_input_warns_once(tmp_path, caplog):
+    clock = FakeClock()
+    def identify(path):
+        return None
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -2
+    with caplog.at_level("WARNING"):
+        for _ in range(4):
+            player.tick()
+            clock.advance(2)
+    assert sum("hot" in r.message for r in caplog.records) == 1

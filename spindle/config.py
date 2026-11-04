@@ -1,9 +1,18 @@
-"""Configuration loader for Spindle."""
+"""Configuration loader for Spindle.
 
-from dataclasses import dataclass, field
+Unknown keys are reported and ignored rather than crashing the service: a
+typo in config.yaml should cost a warning line, not a restart loop.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATHS = [
     Path("config.yaml"),
@@ -23,6 +32,7 @@ class LastFMConfig:
     api_secret: str = ""
     username: str = ""
     password_hash: str = ""
+    session_key: str = ""     # preferred over password_hash when set (pylast session key)
 
 
 @dataclass
@@ -38,6 +48,7 @@ class FingerprintConfig:
     acoustid_timeout: int = 10
     shazam_fallback: bool = True
     min_confidence: float = 0.5
+    corrections: str = ""     # path to corrections.yaml (default: ~/spindle/corrections.yaml)
 
 
 @dataclass
@@ -113,46 +124,45 @@ class SpindleConfig:
 
 
 def load_config(path: Path | None = None) -> SpindleConfig:
-    """Load config from YAML file. Searches default paths if none given."""
+    """Load config from YAML. Searches the default paths when none is given."""
     paths = [Path(path)] if path is not None else DEFAULT_CONFIG_PATHS
-
     for p in paths:
         if p.exists():
             with open(p) as f:
                 raw = yaml.safe_load(f) or {}
-            return _parse_config(raw)
-
-    # No config file found — return defaults
+            cfg = _parse_config(raw)
+            if cfg.fingerprint.corrections and not Path(cfg.fingerprint.corrections).is_absolute():
+                cfg.fingerprint.corrections = str(p.parent / cfg.fingerprint.corrections)
+            return cfg
     return SpindleConfig()
 
 
+def _section(cls, raw: dict, name: str):
+    """Build a dataclass from a YAML section, ignoring (and naming) unknown keys."""
+    data = raw.get(name)
+    if data is None:
+        return cls()
+    if not isinstance(data, dict):
+        logger.warning("config: '%s' should be a mapping, ignoring", name)
+        return cls()
+    known = {f.name for f in fields(cls)}
+    unknown = sorted(k for k in data if k not in known)
+    if unknown:
+        logger.warning("config: unknown key(s) in '%s': %s (ignored)", name, ", ".join(unknown))
+    kwargs = {k: v for k, v in data.items() if k in known}
+    for f in fields(cls):
+        if f.name in kwargs and kwargs[f.name] is None:
+            del kwargs[f.name]                       # "key:" with no value = default
+    return cls(**kwargs)
+
+
 def _parse_config(raw: dict) -> SpindleConfig:
-    """Parse raw YAML dict into SpindleConfig."""
     cfg = SpindleConfig()
-
-    if "acoustid" in raw:
-        cfg.acoustid = AcoustIDConfig(**raw["acoustid"])
-    if "lastfm" in raw:
-        cfg.lastfm = LastFMConfig(**raw["lastfm"])
-    if "spotify" in raw:
-        cfg.spotify = SpotifyConfig(**raw["spotify"])
-    if "audio" in raw:
-        cfg.audio = AudioConfig(**raw["audio"])
-    if "fingerprint" in raw:
-        cfg.fingerprint = FingerprintConfig(**raw["fingerprint"])
-    if "scrobble" in raw:
-        cfg.scrobble = ScrobbleConfig(**raw["scrobble"])
-    if "silence" in raw:
-        cfg.silence = SilenceConfig(**raw["silence"])
-    if "display" in raw:
-        cfg.display = DisplayConfig(**raw["display"])
-    if "discogs" in raw:
-        cfg.discogs = DiscogsConfig(**raw["discogs"])
-    if "art" in raw:
-        cfg.art = ArtConfig(**raw["art"])
-    if "telegram" in raw:
-        cfg.telegram = TelegramConfig(**raw["telegram"])
-    if "logging" in raw:
-        cfg.logging = LoggingConfig(**raw["logging"])
-
+    for f in fields(SpindleConfig):
+        setattr(cfg, f.name, _section(f.type if isinstance(f.type, type) else
+                                      type(getattr(cfg, f.name)), raw, f.name))
+    known = {f.name for f in fields(SpindleConfig)}
+    unknown = sorted(k for k in raw if k not in known)
+    if unknown:
+        logger.warning("config: unknown top-level key(s): %s (ignored)", ", ".join(unknown))
     return cfg
