@@ -210,6 +210,7 @@ def test_streaming_edition_upgrades_to_owned_pressing(clock):
     s.on_identified(resolved_for(owned, "Track 1"), music_start)
     assert s.album_state.tracklist is owned and s.album_state.tracklist.owned
     assert s.album_state.current_track_start == start
+    assert s.album_state.starts == {0: start}      # per-track starts carried over by title
     assert s.get_current_track().title == "Track 1"
     # never the other way round: a streaming edition does not replace the owned pressing
     s.on_identified(resolved_for(streaming, "Track 1"), music_start)
@@ -222,3 +223,85 @@ def test_no_album_resolution_leaves_session_untouched(clock):
     for _ in range(3):
         assert s.on_identified(r, clock.t) == []
     assert s.mode is None
+
+
+def test_forward_fill_is_bounded_by_the_clock(clock, album):
+    """A record that does not follow the tracklist (a bootleg cut, a skipped
+    track): gap tracks the clock had no room for never played."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    clock.advance(115 + 10 - 4)                    # Track 1 (115 s) done, 10 s into the next one
+    out = confirmed(s, album, "Track 4", music_start)   # the fingerprint says Track 4
+    assert [(t.title, ts) for t, ts in out] == [("Track 1", music_start)]
+    assert s.album_state.current_index == 3        # Tracks 2 and 3: no time for them, not filled
+    assert s.album_state.current_track_start == clock.t
+    assert s.album_state.scrobbled == {0}
+
+
+def test_forward_fill_scrobbles_a_cut_short_track_only_if_it_played_enough(clock, album):
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    clock.advance(70 - 4)                          # Track 1 played 70 of 115 s: over half
+    out = confirmed(s, album, "Track 3", music_start)
+    assert [t.title for t, _ in out] == ["Track 1"]  # it counts; Track 2 never played
+    assert s.album_state.current_index == 2
+
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    clock.advance(40 - 4)                          # 40 s of 115: under half
+    assert confirmed(s, album, "Track 3", music_start) == []
+    assert s.album_state.current_index == 2 and s.album_state.scrobbled == set()
+
+
+def test_lagging_id_of_the_track_that_just_ended_keeps_its_start(clock, album):
+    """The capture window trails the audio: Track 1 is heard again right after
+    the clock moved on. Nothing re-scrobbles and no timestamp moves."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    clock.advance(115 + 5 - 4)
+    assert [t.title for t, _ in s.check_advance()] == ["Track 1"]
+    assert s.get_current_track().title == "Track 2"
+    clock.advance(3)
+    assert confirmed(s, album, "Track 1", music_start) == []     # the lagging ID
+    assert s.get_current_track().title == "Track 1"
+    assert s.album_state.current_track_start == music_start      # start kept, not "now"
+    assert s.check_advance() == []                               # re-advances, no second scrobble
+    assert s.get_current_track().title == "Track 2"
+    t2_start = s.album_state.current_track_start
+    assert t2_start == clock.t
+    clock.advance(72 + 6)
+    out = confirmed(s, album, "Track 3", music_start)
+    assert [(t.title, ts) for t, ts in out] == [("Track 2", t2_start)]  # in order, in the past
+    assert out[0][1] < clock.t
+
+
+def test_restarting_the_side_scrobbles_it_again(clock, album):
+    """Three tracks play, the needle goes back to the first: a second play."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    for dur in (115, 72, 109):
+        clock.advance(dur + 10)
+        s.check_advance()
+    assert s.album_state.scrobbled == {0, 1, 2}
+    assert s.get_current_track().title == "Track 4"
+    clock.advance(20)                              # 20 s into Track 4, then the needle goes back
+    replay_start = clock.t
+    out = s.on_identified(resolved_for(album, "Track 1"), music_start)  # confirmed before: acts
+    assert out == []                               # Track 4 (20 s) did not play enough
+    assert s.get_current_track().title == "Track 1"
+    assert s.album_state.scrobbled == set()
+    assert s.album_state.current_track_start == replay_start
+    clock.advance(115 + 10)
+    out = s.check_advance()
+    assert [(t.title, ts) for t, ts in out] == [("Track 1", replay_start)]
+    assert s.get_current_track().title == "Track 2"

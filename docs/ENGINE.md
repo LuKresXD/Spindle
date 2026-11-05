@@ -61,6 +61,19 @@ engine are memory-only.
 * **Album lock**: first confirmed track with a known album. Backfills what
   played before the first ID by elapsed time; forward-fills gaps between
   anchors; advances by duration (+3 % drift, 3–15 s buffer).
+* **Clock-bounded fill**: a gap track is scrobbled only when the elapsed
+  time since the current track started had room for it in full; the first
+  track that does not fit is scrobbled only if it played enough, the rest
+  never played. The record need not follow the tracklist (a bootleg cut, a
+  skipped track, the needle moved): Graduation, 2026-11-04, scrobbled two
+  tracks the pressing does not have before this rule existed.
+* **Backwards anchor**: a track identified before the predicted one is a
+  lagging identification of the track that just ended, so its original
+  start is kept and the timing model simply re-advances. If that track
+  started more than its duration plus 45 s ago it has played in full:
+  the needle went back, the session is replaying, and that track and
+  everything after it may scrobble again (the second play of a side is a
+  real play).
 * **Side aware**: when the pressing is known, timing stops at the last track
   of a side (the run-out) and waits for the flip; backfill never crosses a
   side boundary.

@@ -5,7 +5,17 @@ Two modes:
   ALBUM       locked to one album (and, when the pressing is known, one side).
               Uses the tracklist + durations to infer and scrobble tracks the
               fingerprinter misses: backfill (before the first ID), forward
-              fill (between IDs) and timing advance.
+              fill (between IDs) and timing advance. Every inference is
+              bounded by the clock: a gap track is scrobbled only when the
+              elapsed time had room for it, because the record need not
+              follow the tracklist (a bootleg cut, a skipped track, the
+              needle moved).
+
+              A fingerprint that names a track BEFORE the predicted one is
+              a lagging identification of the track that just ended, unless
+              that track started more than its duration plus REPLAY_SLACK
+              ago: then the needle went back and the session is replaying,
+              so that track and everything after it may scrobble again.
 
   COMPILATION consecutive identifications from different artists (DJ mix,
               bootleg, mixtape). No tracklist: each recognised track is
@@ -48,6 +58,7 @@ NEEDLE_TOLERANCE     = 15    # seconds of needle-drop imprecision
 ADVANCE_BUFFER_MIN   = 3     # min seconds past duration before auto-advance
 ADVANCE_BUFFER_MAX   = 15    # max seconds past duration before auto-advance
 FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when nobody knows (4 min)
+REPLAY_SLACK         = 45    # s past a track's end: a backwards anchor is a replay, not lag
 
 # ── Compilation detection ─────────────────────────────────────────────────────
 MISMATCH_THRESHOLD = 2      # consecutive different-artist IDs → switch to COMPILATION
@@ -123,6 +134,7 @@ class AlbumState:
     current_index:       int   = 0       # best estimate of current track
     current_track_start: float = 0.0     # estimated wall-clock start of current track
     scrobbled:           set   = field(default_factory=set)  # track indices scrobbled
+    starts:              dict  = field(default_factory=dict) # index → wall-clock start, this pass
     exhausted:           bool  = False   # advanced past the last track
     side_done:           bool  = False   # timing reached the end of the current side
 
@@ -255,8 +267,7 @@ class ScrobbleSession:
         next_idx = al.current_index + 1
         next_track = al.tracklist.get_track_at(next_idx)
         if next_track:
-            al.current_index = next_idx
-            al.current_track_start = self._clock()
+            self._set_current(next_idx, self._clock())
             logger.info("Session: ⏭  track %d — %s — %s",
                         next_idx + 1, next_track.artist, next_track.title)
         else:
@@ -365,6 +376,13 @@ class ScrobbleSession:
     def _mark_scrobbled(self, track: TrackInfo) -> None:
         self._session_scrobbled.add(self._dedup_key(track))
 
+    def _set_current(self, index: int, start: float) -> None:
+        """Make `index` the current track, started at wall-clock `start`."""
+        assert self._album is not None
+        self._album.current_index = index
+        self._album.current_track_start = start
+        self._album.starts[index] = start
+
     # ── Album mode: session start ─────────────────────────────────────────────
 
     def _start_album_session(self, resolved: Resolved, tracklist: AlbumTracklist,
@@ -378,7 +396,7 @@ class ScrobbleSession:
         self._album = AlbumState(
             album_id=resolved.album_id, tracklist=tracklist, music_start=music_start,
             anchors=[Anchor(track_index, now)], current_index=track_index,
-            current_track_start=music_start,
+            current_track_start=music_start, starts={track_index: music_start},
         )
         self.mode = SessionMode.ALBUM
         self._mismatch_count = 0
@@ -489,10 +507,17 @@ class ScrobbleSession:
             j = new_tl.find_track_index(t.title) if t else None
             if j is not None:
                 scrobbled.add(j)
+        starts: dict[int, float] = {}
+        for i, started in old.starts.items():
+            t = old.tracklist.get_track_at(i)
+            j = new_tl.find_track_index(t.title) if t else None
+            if j is not None:
+                starts[j] = started
+        starts[idx] = start
         self._album = AlbumState(
             album_id=resolved.album_id, tracklist=new_tl, music_start=old.music_start,
             anchors=old.anchors + [Anchor(idx, now)], current_index=idx,
-            current_track_start=start, scrobbled=scrobbled,
+            current_track_start=start, scrobbled=scrobbled, starts=starts,
         )
         self._mismatch_count = 0
         logger.info("Session: 🔁 re-locked — %s / %s → %s (%d tracks, %s%s), now at track %d",
@@ -515,19 +540,52 @@ class ScrobbleSession:
                 # the timing model ran fast; keep showing it, the flip will come
                 pass
         elif track_index > al.current_index:
-            gap = self._fill_forward(al.current_index, track_index)
+            gap, consumed, complete = self._fill_forward(al.current_index, track_index, now)
             result.extend(gap)
-            al.current_index = track_index
-            al.current_track_start = now
+            # every gap track fit the clock: the anchored track began when they ran out
+            start = min(now, al.current_track_start + consumed) if complete else now
+            self._set_current(track_index, start)
             al.side_done = False
             logger.info("Session: anchor → track %d (filled %d gap tracks)",
                         track_index + 1, len(gap))
         else:
+            result.extend(self._anchor_backwards(track_index, now))
+        return result
+
+    def _anchor_backwards(self, track_index: int, now: float) -> list[tuple[TrackInfo, float]]:
+        """The fingerprint names a track before the one the clock predicts.
+
+        A lagging identification of the track that just ended (the capture
+        window and the lookup trail the audio) keeps that track's start, so
+        the timing model re-advances without moving any timestamp. A track
+        that started more than its duration plus REPLAY_SLACK ago has played
+        in full: hearing it again means the needle went back, and it and
+        everything after it may scrobble once more.
+        """
+        assert self._album is not None
+        al = self._album
+        track = al.tracklist.get_track_at(track_index)
+        duration = track.duration if track and track.duration else FALLBACK_TRACK_DURATION
+        prev_start = al.starts.get(track_index)
+        result: list[tuple[TrackInfo, float]] = []
+        if prev_start is not None and now - prev_start > duration + REPLAY_SLACK:
+            result.extend(self._finalize_album_current(now))
+            replayed = sorted(i for i in al.scrobbled if i >= track_index)
+            for i in replayed:
+                al.scrobbled.discard(i)
+                t = al.tracklist.get_track_at(i)
+                if t:
+                    self._session_scrobbled.discard(self._dedup_key(t))
+            for i in [i for i in al.starts if i >= track_index]:
+                del al.starts[i]
+            logger.info("Session: ↩  replay from track %d (%d scrobbled tracks eligible again)",
+                        track_index + 1, len(replayed))
+            self._set_current(track_index, now)
+        else:
             logger.warning("Session: anchor behind prediction (%d < %d), re-syncing",
                            track_index + 1, al.current_index + 1)
-            al.current_index = track_index
-            al.current_track_start = now
-            al.side_done = False
+            self._set_current(track_index, prev_start if prev_start is not None else now)
+        al.side_done = False
         return result
 
     def _finalize_album_current(self, now: float) -> list[tuple[TrackInfo, float]]:
@@ -615,8 +673,9 @@ class ScrobbleSession:
             if not track:
                 break
             result.extend(self._try_scrobble(i, ts, force=True))
+            self._album.starts[i] = ts
             ts += track.duration if track.duration else FALLBACK_TRACK_DURATION
-        self._album.current_track_start = ts
+        self._set_current(anchor_index, ts)
 
         logger.info("Session: retroactive backfill — %d tracks from track %d "
                     "(%.0fs before first ID)", len(result), best_start + 1, elapsed)
@@ -624,19 +683,47 @@ class ScrobbleSession:
             logger.info("  ↳ %s — %s", track.artist, track.title)
         return result
 
-    def _fill_forward(self, from_index: int, to_index: int) -> list[tuple[TrackInfo, float]]:
-        """Scrobble tracks from from_index up to (not including) to_index."""
+    def _fill_forward(self, from_index: int, to_index: int,
+                      now: float) -> tuple[list[tuple[TrackInfo, float]], float, bool]:
+        """Scrobble the tracks from from_index up to (not including) to_index
+        that the clock had room for since the current track started.
+
+        The record need not follow the tracklist (a bootleg cut, a skipped
+        track, the needle moved), so a track is filled only while the elapsed
+        time still covers it in full. The first one that does not fit is
+        scrobbled only if it played enough; the rest never played. Returns
+        (scrobbles, seconds consumed, whether every gap track fit).
+        """
         if not self._album:
-            return []
+            return [], 0.0, False
+        al = self._album
         result: list[tuple[TrackInfo, float]] = []
-        ts = self._album.current_track_start
+        budget = now - al.current_track_start
+        tolerance = budget * VINYL_DRIFT + NEEDLE_TOLERANCE
+        ts = al.current_track_start
+        consumed = 0.0
         for i in range(from_index, to_index):
-            track = self._album.tracklist.get_track_at(i)
+            track = al.tracklist.get_track_at(i)
             if not track:
                 break
+            duration = track.duration if track.duration else FALLBACK_TRACK_DURATION
+            if consumed + duration > budget + tolerance:
+                played = max(0.0, budget - consumed)
+                counted = self.played_enough(track, played)
+                if counted:
+                    result.extend(self._try_scrobble(i, ts))
+                    al.starts[i] = ts
+                logger.info("Session: %.0fs since track %d started: %s heard %.0fs (%s), "
+                            "%d gap track(s) not filled",
+                            budget, from_index + 1, track.title, played,
+                            "counts" if counted else "too short",
+                            to_index - i - (1 if counted else 0))
+                return result, consumed, False
             result.extend(self._try_scrobble(i, ts, force=True))
-            ts += track.duration if track.duration else FALLBACK_TRACK_DURATION
-        return result
+            al.starts[i] = ts
+            ts += duration
+            consumed += duration
+        return result, consumed, True
 
     # ── Compilation mode ──────────────────────────────────────────────────────
 
