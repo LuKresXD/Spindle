@@ -112,6 +112,7 @@ def main() -> None:
             min_play_seconds=cfg.scrobble.min_play_seconds,
             chunk_duration=DEFAULT_STEP,
             min_play_fraction=cfg.scrobble.min_play_fraction,
+            window_seconds=cfg.audio.chunk_duration,
         )
         sources = [n for n, on in (("spotify", spotify), ("discogs", collection)) if on]
         logger.info("Album-lock session enabled (%s)", " + ".join(sources))

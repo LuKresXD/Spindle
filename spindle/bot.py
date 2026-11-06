@@ -192,6 +192,8 @@ class SpindleBot:
         if self.player is not None:
             st = self.player.state
             ear = f"\n🎚 {st.level_db:.1f} dB · {st.phase.value}"
+            if st.steady_noise:
+                ear += f" · steady noise, not music (motion {st.motion or 0:.2f})"
             if st.position:
                 ear += f" · {st.position}"
             if st.owned:

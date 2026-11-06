@@ -13,6 +13,7 @@ class FakeCapture:
 
     def __init__(self, tmp_path):
         self.level = -60.0
+        self.motion_value = 0.4          # moves like music unless a test says otherwise
         self.window_seconds = 6
         self.tmp = tmp_path
         self.running = True
@@ -20,6 +21,9 @@ class FakeCapture:
 
     def level_db(self, seconds=2):
         return self.level
+
+    def motion(self, seconds=None):
+        return self.motion_value
 
     def buffered_seconds(self):
         return 10.0
@@ -278,3 +282,55 @@ def test_hot_input_warns_once(tmp_path, caplog):
             player.tick()
             clock.advance(2)
     assert sum("hot" in r.message for r in caplog.records) == 1
+
+
+def test_steady_loud_input_stays_idle_and_looks_up_slowly(tmp_path, clock):
+    """An empty turntable: loud enough, but the spectrum stands still. No
+    session, screen black, a lookup after 20 s then backing off; a drop
+    in level ends the run."""
+    player, cap, rec = make_player(tmp_path, clock, identify=lambda p: None)
+    cap.level = -38.0
+    cap.motion_value = 0.05
+    t0 = clock.t
+    for _ in range(3):
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.IDLE and st.steady_noise and st.motion == 0.05
+    assert player.music_since is None
+    assert player.noise_since == t0 - 2                      # the loud run began a step earlier
+    assert cap.windows == 0 and rec.now_playing == []
+    while clock.t < t0 + 60:
+        player.tick()
+        clock.advance(2)
+    assert cap.windows == 2                                   # lookups at 20 s, then 40 s later
+    while clock.t < t0 + 140:
+        player.tick()
+        clock.advance(2)
+    assert cap.windows == 3                                   # the next one 80 s after that
+    cap.level = -60.0
+    st = player.tick()
+    assert not st.steady_noise and player.noise_since is None
+
+
+def test_steady_input_that_identifies_becomes_a_session(tmp_path, clock):
+    track = TrackInfo(title="Drone", artist="Someone", duration=600)
+    player, cap, rec = make_player(tmp_path, clock, identify=lambda p: track, with_session=False)
+    cap.level = -30.0
+    cap.motion_value = 0.05
+    t0 = clock.t
+    for _ in range(12):                                      # past the first lookup at +20 s
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.PLAYING and st.title == "Drone"
+    assert player.music_since == t0 - 2                      # the session dates from the loud start
+    assert not st.steady_noise
+
+
+def test_music_gate_fails_open_without_a_motion_reading(tmp_path, clock):
+    player, cap, rec = make_player(tmp_path, clock, identify=lambda p: None)
+    cap.level = -30.0
+    cap.motion_value = None
+    for _ in range(3):
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.LISTENING and not st.steady_noise

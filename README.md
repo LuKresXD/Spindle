@@ -169,6 +169,8 @@ See [`config.example.yaml`](config.example.yaml) for all options. Key settings:
 audio:
   device: "plughw:CARD=Device,DEV=0"
   chunk_duration: 10        # fingerprint window size (seconds)
+  capture_gain_db: 20       # set the card's capture gain at start (a USB mic input at its
+                            # full 31 dB clips a line-level turntable and lifts its idle noise)
   # Capture step is 2s — new window every 2s for fast identification
 
 silence:

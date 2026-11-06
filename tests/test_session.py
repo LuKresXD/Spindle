@@ -296,7 +296,9 @@ def test_restarting_the_side_scrobbles_it_again(clock, album):
     assert s.get_current_track().title == "Track 4"
     clock.advance(20)                              # 20 s into Track 4, then the needle goes back
     replay_start = clock.t
-    out = s.on_identified(resolved_for(album, "Track 1"), music_start)  # confirmed before: acts
+    assert s.on_identified(resolved_for(album, "Track 1"), music_start) == []  # one ID: a new run
+    assert s.get_current_track().title == "Track 4"                            # not acted on yet
+    out = s.on_identified(resolved_for(album, "Track 1"), music_start)         # confirmed: acts
     assert out == []                               # Track 4 (20 s) did not play enough
     assert s.get_current_track().title == "Track 1"
     assert s.album_state.scrobbled == set()
@@ -305,3 +307,120 @@ def test_restarting_the_side_scrobbles_it_again(clock, album):
     out = s.check_advance()
     assert [(t.title, ts) for t, ts in out] == [("Track 1", replay_start)]
     assert s.get_current_track().title == "Track 2"
+
+
+def identified(session, tracklist, title, music_start, at, offset=None):
+    """One identification with a fingerprint offset (Shazam-style)."""
+    res = resolved_for(tracklist, title)
+    res.offset = offset
+    return session.on_identified(res, music_start, at=at)
+
+
+def test_any_order_listening_scrobbles_each_play(clock, album):
+    """3, then the needle to 1, then 2 and 3 by timing: four scrobbles, 3 twice."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    assert confirmed(s, album, "Track 3", music_start) == []     # needle dropped on Track 3
+    clock.advance(60)                                            # 60 s of 109: over half
+    back_at = clock.t
+    out = confirmed(s, album, "Track 1", music_start)            # the needle went back to Track 1
+    assert [(t.title, ts) for t, ts in out] == [("Track 3", music_start)]
+    assert s.get_current_track().title == "Track 1"
+    assert s.album_state.current_track_start == back_at
+    scrobbles = list(out)
+    for _ in range(3):                                           # 1, 2, 3 run to their ends
+        cur = s.get_current_track()
+        clock.advance(cur.duration + 10)
+        scrobbles.extend(s.check_advance())
+    assert [t.title for t, _ in scrobbles] == ["Track 3", "Track 1", "Track 2", "Track 3"]
+    stamps = [ts for _, ts in scrobbles]
+    assert stamps == sorted(stamps) and stamps[-1] > stamps[0]   # the second Track 3 is a new play
+    assert s.get_current_track().title == "Track 4"
+
+
+def test_needle_back_to_a_cut_short_track_is_a_new_play(clock, album):
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    clock.advance(70 - 4)                                        # 70 s of Track 1, then a skip
+    out = confirmed(s, album, "Track 3", music_start)
+    assert [t.title for t, _ in out] == ["Track 1"]              # it counted (over half)
+    clock.advance(100)                                           # 100 s of Track 3
+    out = confirmed(s, album, "Track 1", music_start)            # and back to Track 1
+    assert [t.title for t, _ in out] == ["Track 3"]
+    assert s.get_current_track().title == "Track 1"
+    assert s.album_state.scrobbled == {2}                        # Track 1 is eligible again
+    clock.advance(115 + 10)
+    out = s.check_advance()
+    assert [t.title for t, _ in out] == ["Track 1"]
+
+
+def test_a_single_id_after_a_long_gap_does_not_act(clock, album):
+    """Confirmation is per run: hearing a track again two minutes later needs
+    two identifications, like any other track."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    clock.advance(115 + 5 - 4)
+    s.check_advance()                                            # Track 1 done by timing
+    assert s.get_current_track().title == "Track 2"
+    clock.advance(5)
+    assert s.on_identified(resolved_for(album, "Track 1"), music_start) == []
+    assert s.get_current_track().title == "Track 2"              # one late ID: not acted on
+    assert s.on_identified(resolved_for(album, "Track 1"), music_start) == []
+    assert s.get_current_track().title == "Track 1"              # two: the lagging ID re-syncs
+    assert s.album_state.current_track_start == music_start
+
+
+def test_offsets_pin_the_needle_drop_position(clock, album):
+    """The needle dropped 30 s into Track 1. Two IDs of Track 3 whose offsets
+    advance with the clock say exactly when Track 3 began, so the backfill
+    knows Track 2 played whole and Track 1 played 85 s (enough)."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    music_start = clock.t
+    assert identified(s, album, "Track 3", music_start, at=music_start + 177, offset=14) == []
+    out = identified(s, album, "Track 3", music_start, at=music_start + 185, offset=22)
+    assert [(t.title, ts) for t, ts in out] == [("Track 1", music_start),
+                                                ("Track 2", music_start + 85)]
+    assert s.album_state.current_track_start == music_start + 157
+    clock.t = music_start + 185
+    assert s.get_progress() == (28, 109)
+
+
+def test_offset_backfill_skips_a_cut_in_track_that_played_too_little(clock, album):
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    music_start = clock.t
+    # Track 3 began 90 s after the music did: Track 2 (72 s) whole, 18 s of Track 1 before it
+    identified(s, album, "Track 3", music_start, at=music_start + 100, offset=4)
+    out = identified(s, album, "Track 3", music_start, at=music_start + 108, offset=12)
+    assert [(t.title, ts) for t, ts in out] == [("Track 2", music_start + 18)]
+    assert s.album_state.current_track_start == music_start + 90
+
+
+def test_disagreeing_offsets_fall_back_to_the_clock(clock, album):
+    """A repeated section (intro = outro) makes the offsets jump: ignore them."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    music_start = clock.t
+    identified(s, album, "Track 3", music_start, at=music_start + 177, offset=14)
+    out = identified(s, album, "Track 3", music_start, at=music_start + 185, offset=60)
+    # the clock's guess, as without offsets: Tracks 1 and 2 whole, Track 3 from 187 s
+    assert [(t.title, ts) for t, ts in out] == [("Track 1", music_start),
+                                                ("Track 2", music_start + 115)]
+    assert s.album_state.current_track_start == music_start + 187
+
+
+def test_same_track_offsets_correct_the_clock(clock, album):
+    """Locked by the clock's guess, the offsets of later IDs move the start to
+    where the track really began, so the elapsed time on screen is right."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    music_start = clock.t
+    clock.advance(185)
+    confirmed(s, album, "Track 3", music_start)                  # clock: Track 3 from 187 s
+    assert s.album_state.current_track_start == music_start + 187
+    identified(s, album, "Track 3", music_start, at=music_start + 200, offset=44)
+    identified(s, album, "Track 3", music_start, at=music_start + 210, offset=54)
+    assert s.album_state.current_track_start == music_start + 150
+    assert s.album_state.scrobbled == {0, 1}                     # nothing re-scrobbled

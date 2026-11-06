@@ -52,6 +52,17 @@ IdentifyFn = Callable[[Path], TrackInfo | None]
 LOCKED_IDENTIFY_INTERVAL = 8.0
 HOT_INPUT_DB = -6.0          # RMS this high means the capture is clipping
 
+# Loud is not enough to be music: an empty turntable (motor, preamp, mains) can
+# sit above the threshold for as long as it spins, with a spectrum that never
+# moves. Music scores well above this on `capture.motion()`; the measured
+# empty-turntable noise scored 0.05-0.07 and the steadiest music 0.29.
+MUSIC_MOTION_MIN = 0.15
+# A record that really is this steady (a drone, a test tone) would never pass
+# the gate, so a steady input still gets a lookup now and then, backing off
+# while nothing is recognised; a hit turns the run into a session.
+NOISE_IDENTIFY_FIRST = 20.0
+NOISE_IDENTIFY_MAX = 300.0
+
 
 # ── Identification worker ────────────────────────────────────────────────────
 
@@ -212,6 +223,10 @@ class Player:
         self._loud_ticks = 0
         self._hot_warned = False
         self._capture_down_logged = False
+        self.motion: float | None = None           # last spectral-motion reading at the gate
+        self.noise_since: float | None = None      # loud-but-steady input began (not music)
+        self._noise_identify_at = 0.0
+        self._noise_identify_interval = NOISE_IDENTIFY_FIRST
 
         self.playing = _Playing()
         self._playcount_cache: dict[tuple[str, str], int | None] = {}
@@ -250,11 +265,15 @@ class Player:
         # for min_silence_seconds.
         if self.phase == Phase.IDLE:
             if self.level_db >= sil.threshold_db + sil.start_margin_db:
-                self._loud_ticks += 1
+                self._loud_ticks = min(self._loud_ticks + 1, max(1, sil.start_ticks))
             else:
                 self._loud_ticks = 0
             if self._loud_ticks < max(1, sil.start_ticks):
                 self._quiet_tick(now)
+                return self._publish(now)
+            # loud enough for long enough: music, or a turntable running empty?
+            if not self._music_like():
+                self._noise_tick(now)
                 return self._publish(now)
 
         if quiet:
@@ -282,10 +301,54 @@ class Player:
         if self.silent_since is None:
             self.silent_since = now
         if self.phase == Phase.IDLE:
+            if self.noise_since is not None:
+                logger.info("Steady noise stopped after %.0fs", now - self.noise_since)
+                self._end_noise_run()
             return
         if now - self.silent_since < self.cfg.silence.min_silence_seconds:
             return                                   # a pause, not the end
         self._end_session(now)
+
+    def _music_like(self) -> bool:
+        """Does the recent audio move like music? Fail open: with no reading
+        (too little audio buffered) music must never be kept off the screen."""
+        self.motion = self.capture.motion()
+        return self.motion is None or self.motion >= MUSIC_MOTION_MIN
+
+    def _noise_tick(self, now: float) -> None:
+        """Loud, but the spectrum stands still: the turntable is running with
+        nothing on it (or something equally steady). The screen stays black and
+        no session starts; a slow lookup keeps running in case it is a record
+        that really sounds like that, and a hit starts the session from the
+        moment the input got loud."""
+        self.silent_since = None
+        if self.noise_since is None:
+            self.noise_since = now - self.step * max(1, self._loud_ticks)
+            self._noise_identify_interval = NOISE_IDENTIFY_FIRST
+            self._noise_identify_at = self.noise_since + NOISE_IDENTIFY_FIRST
+            logger.info("Input is steady noise (%.1f dB RMS, motion %.2f < %.2f): "
+                        "not music, staying idle", self.level_db, self.motion or 0.0,
+                        MUSIC_MOTION_MIN)
+        for res in self.worker.results():
+            if res.resolved is not None:
+                logger.info("Steady input identified as %s — %s: music after all",
+                            res.resolved.track.artist, res.resolved.track.title)
+                self.music_since = self.noise_since
+                self._end_noise_run()
+                self.phase = Phase.LISTENING
+                self._apply_result(res)
+                if self.playing.track is not None:
+                    self.phase = Phase.PLAYING
+                return
+        if now >= self._noise_identify_at and self._maybe_submit(now):
+            self._noise_identify_interval = min(self._noise_identify_interval * 2,
+                                                NOISE_IDENTIFY_MAX)
+            self._noise_identify_at = now + self._noise_identify_interval
+
+    def _end_noise_run(self) -> None:
+        self.noise_since = None
+        self._noise_identify_at = 0.0
+        self._noise_identify_interval = NOISE_IDENTIFY_FIRST
 
     def _end_session(self, now: float) -> None:
         logger.info("Silence: session over (%.0fs quiet)", now - (self.silent_since or now))
@@ -315,16 +378,23 @@ class Player:
         self._loud_ticks = 0
         self._hot_warned = False
         self.music_since = None
+        self._end_noise_run()
         self.playing = _Playing()
         self.last_submit_at = 0.0
 
     def _music_tick(self, now: float) -> None:
         self.silent_since = None
         if self.phase == Phase.IDLE:
-            # the session began when the loud run began, not on this tick
-            self.music_since = now - self.step * max(1, self._loud_ticks)
+            # the session began when the loud run began (a steady start that
+            # then came alive still counts from its first loud tick), not now
+            if self.noise_since is not None:
+                self.music_since = self.noise_since
+                self._end_noise_run()
+            else:
+                self.music_since = now - self.step * max(1, self._loud_ticks)
             self.phase = Phase.LISTENING
-            logger.info("Music started (%.1f dB)", self.level_db)
+            logger.info("Music started (%.1f dB, motion %.2f)", self.level_db,
+                        self.motion if self.motion is not None else float("nan"))
         if self.level_db > HOT_INPUT_DB and not self._hot_warned:
             self._hot_warned = True
             logger.warning("Input is hot (%.1f dB RMS): the capture is probably clipping; "
@@ -365,25 +435,28 @@ class Player:
 
     # ── identification ───────────────────────────────────────────────────────
 
-    def _maybe_submit(self, now: float) -> None:
+    def _maybe_submit(self, now: float) -> bool:
+        """Hand the current window to the identify worker when it is free.
+        Returns True when a job was submitted."""
         if self.worker.busy:
-            return
+            return False
         locked = bool(self.session and self.session.is_locked())
         if locked and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL:
-            return
+            return False
         if self.capture.buffered_seconds() < self.capture.window_seconds:
-            return
+            return False
         wav = self.capture.window_wav()
         if wav is None:
-            return
+            return False
         ctx = ResolveContext(
             locked_album_id=self.session.locked_album_id if self.session else "",
             locked_artist=self.session.locked_artist if self.session else "",
         )
         if self.worker.submit(IdentifyJob(wav, ctx, now)):
             self.last_submit_at = now
-        else:
-            wav.unlink(missing_ok=True)
+            return True
+        wav.unlink(missing_ok=True)
+        return False
 
     def _apply_result(self, res: IdentifyResult) -> None:
         if res.took > 15:
@@ -513,7 +586,8 @@ class Player:
     # ── screen state ─────────────────────────────────────────────────────────
 
     def _build_state(self, now: float) -> ScreenState:
-        st = ScreenState(phase=self.phase, level_db=self.level_db, updated_at=now)
+        st = ScreenState(phase=self.phase, level_db=self.level_db, updated_at=now,
+                         motion=self.motion, steady_noise=self.noise_since is not None)
         t = self.playing.track
         if self.phase != Phase.PLAYING or t is None:
             return st

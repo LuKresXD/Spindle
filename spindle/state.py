@@ -32,6 +32,8 @@ class TrackRow:
 class ScreenState:
     phase: Phase = Phase.IDLE
     level_db: float = -120.0        # most recent audio level (listening state)
+    motion: float | None = None     # spectral motion at the music gate (None = not measured)
+    steady_noise: bool = False      # loud but standing still: an empty turntable, not music
 
     artist: str = ""
     title: str = ""

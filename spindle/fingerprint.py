@@ -33,6 +33,10 @@ class TrackInfo:
     mbid: str | None = None  # MusicBrainz recording ID
     source: str = "acoustid"  # acoustid | shazam | spotify_lookup | spotify_album | discogs
     confidence: float = 0.0
+    # Seconds into the track at the START of the identified audio window (Shazam reports
+    # it; AcoustID does not). Two identifications whose offsets advance with the clock
+    # pin the track's position; a repeated section can make a single one lie.
+    offset: float | None = None
 
 
 # ── Corrections ──────────────────────────────────────────────────────────────
@@ -86,7 +90,7 @@ class Corrections:
                     artist=replace.get("artist", track.artist),
                     album=replace.get("album", track.album),
                     duration=track.duration, mbid=None,
-                    source=track.source, confidence=track.confidence,
+                    source=track.source, confidence=track.confidence, offset=track.offset,
                 )
         return track
 
@@ -170,6 +174,16 @@ def _shazam_album(track: dict) -> str | None:
     return None
 
 
+def _shazam_offset(result: dict) -> float | None:
+    """Where in the track the sample begins, from the first match (seconds)."""
+    for m in result.get("matches") or []:
+        off = m.get("offset")
+        if isinstance(off, int | float) and off >= 0:
+            return float(off)
+        break
+    return None
+
+
 def _shazam_track(result: dict) -> TrackInfo | None:
     track = result.get("track")
     if not track:
@@ -177,6 +191,7 @@ def _shazam_track(result: dict) -> TrackInfo | None:
     return TrackInfo(
         title=track.get("title", "Unknown"), artist=track.get("subtitle", "Unknown"),
         album=_shazam_album(track), source="shazam", confidence=1.0,
+        offset=_shazam_offset(result),
     )
 
 

@@ -41,6 +41,11 @@ class AudioConfig:
     sample_rate: int = 44100
     channels: int = 2
     chunk_duration: int = 6
+    # ALSA capture gain applied at start (dB, as the card's mixer reports it); None = leave
+    # the card alone. A USB "mic" input at full gain clips a line-level turntable and lifts
+    # the empty-turntable noise above the music threshold.
+    capture_gain_db: float | None = None
+    mixer_control: str = "Mic"     # the simple mixer control that carries the capture gain
 
 
 @dataclass

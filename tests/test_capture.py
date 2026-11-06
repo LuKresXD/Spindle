@@ -70,3 +70,51 @@ def test_running_grace_before_first_launch_and_false_after_death():
     assert cap.running
     cap.restarts, cap.last_error = 1, "No such device"        # a launch attempt failed
     assert not cap.running
+
+
+def _pcm(mono: np.ndarray, ch=2) -> bytes:
+    return np.repeat((mono * 32767).astype(np.int16), ch).tobytes()
+
+
+def test_spectral_motion_tells_steady_noise_from_music_like_audio():
+    from spindle.capture import spectral_motion
+    sr = 8000
+    rng = np.random.default_rng(1)
+    steady = rng.normal(0, 0.05, 6 * sr)                          # same spectrum every second
+    assert spectral_motion(_pcm(steady), sr, 2) < 0.15
+    t = np.arange(sr) / sr
+    pieces = []
+    for i in range(6):                                            # the spectrum changes each second
+        f = 200.0 if i % 2 == 0 else 2000.0
+        pieces.append(np.sin(2 * np.pi * f * t) * 0.2 + rng.normal(0, 0.01, sr))
+    moving = np.concatenate(pieces)
+    assert spectral_motion(_pcm(moving), sr, 2) > 0.5
+    assert spectral_motion(_pcm(steady[: sr + 100]), sr, 2) is None   # under two pieces
+
+
+def test_mixer_device_for_capture_device_names():
+    from spindle.capture import mixer_device_for
+    assert mixer_device_for("plughw:CARD=Device,DEV=0") == "hw:CARD=Device"
+    assert mixer_device_for("hw:3,0") == "hw:3"
+    assert mixer_device_for("plughw:Device") == "hw:CARD=Device"
+    assert mixer_device_for("default") is None
+
+
+def test_set_capture_gain_runs_amixer_and_reads_back(monkeypatch):
+    import subprocess
+
+    from spindle.capture import set_capture_gain
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        out = "  Mono: Playback 8 [2%] [0.50dB] [off] Capture 320 [65%] [20.00dB] [on]\n"
+        stdout = out if cmd[3] == "sget" else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rb = set_capture_gain("plughw:CARD=Device,DEV=0", "Mic", 20)
+    assert calls[0] == ["amixer", "-D", "hw:CARD=Device", "sset", "Mic", "capture", "20dB"]
+    assert calls[1][:4] == ["amixer", "-D", "hw:CARD=Device", "sget"]
+    assert rb and "20.00dB" in rb
+    assert set_capture_gain("default", "Mic", 20) is None          # no card to address

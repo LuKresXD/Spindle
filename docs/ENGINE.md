@@ -28,9 +28,22 @@ tick ◄────────────────────────
 | PLAYING | we know the track | cover, tracklist, progress |
 
 Starting a session needs `threshold + start_margin_db` for `start_ticks`
-consecutive ticks (run-out groove noise sits at the threshold). Ending one
-needs `min_silence_seconds` below the plain threshold. A dead capture
-(arecord gone) holds the state instead of counting as silence.
+consecutive ticks (run-out groove noise sits at the threshold), **and audio
+that moves like music**: the spectral motion of the last window (mean change
+of the 1/3-octave log band profile from one second to the next) must reach
+`MUSIC_MOTION_MIN` (0.15). A turntable running with nothing on it is loud
+enough (the Plugable input at full gain put it at -38 dB RMS, 1 dB over the
+gate) but its spectrum never moves (measured 0.05-0.07; the steadiest music
+0.29, an ambient drone 0.5). Such input stays IDLE with the screen black; a
+lookup still runs 20 s into the run, then 40 s later, doubling to every 5
+min, so a record that really sounds that steady still gets found, and a hit
+starts the session from the first loud tick. Ending a session needs
+`min_silence_seconds` below the plain threshold. A dead capture (arecord
+gone) holds the state instead of counting as silence.
+
+`audio.capture_gain_db` sets the card's capture gain through amixer at every
+start, so the level the thresholds were tuned for survives a reboot or a
+re-plug (the USB device's own default is full gain).
 
 ## Resolution: which album?
 
@@ -57,7 +70,18 @@ engine are memory-only.
 ## Session rules
 
 * **Confirmation gate**: a track must be identified twice before it changes
-  anything. One-off false matches never do.
+  anything. One-off false matches never do. Confirmation is per *run*: two
+  identifications more than 120 s apart do not confirm each other, so a
+  track heard again later in the session is confirmed afresh and its
+  first-heard time describes this play.
+* **Fingerprint offsets**: Shazam reports where in the track the window
+  sits. When two identifications of one run have offsets that advance with
+  the clock (within 5 s), the track's start is known exactly: it pins the
+  needle-drop position for the backfill, the gap budget between anchors,
+  the start of a track the needle was moved to, and the elapsed time on
+  screen (a same-track anchor corrects the clock's guess). Offsets that
+  disagree (a repeated section, intro = outro) are ignored and the clock
+  decides, as it does for AcoustID hits, which carry no offset.
 * **Album lock**: first confirmed track with a known album. Backfills what
   played before the first ID by elapsed time; forward-fills gaps between
   anchors; advances by duration (+3 % drift, 3–15 s buffer).
@@ -67,13 +91,19 @@ engine are memory-only.
   never played. The record need not follow the tracklist (a bootleg cut, a
   skipped track, the needle moved): Graduation, 2026-11-04, scrobbled two
   tracks the pressing does not have before this rule existed.
-* **Backwards anchor**: a track identified before the predicted one is a
-  lagging identification of the track that just ended, so its original
-  start is kept and the timing model simply re-advances. If that track
-  started more than its duration plus 45 s ago it has played in full:
-  the needle went back, the session is replaying, and that track and
-  everything after it may scrobble again (the second play of a side is a
-  real play).
+* **Backwards anchor**: a track identified before the predicted one is one
+  of three things. *Lag*: the timing model ran that track to its end within
+  the last 45 s and the capture window still carried it; its start is kept
+  and the model re-advances. *Replay*: it ran to its end longer ago; the
+  needle went back, and it and everything after it may scrobble again (the
+  second play of a side is a real play). *Needle move*: it never played
+  this pass, or was cut short; the current track is finished off (half-or-4-
+  minutes rule) and the new one starts where it was heard, or where the
+  offsets say it began.
+* **Any order is a play**: entering a track whose previous play on this
+  pass is over (its recorded start lies a full duration before the new
+  start) clears it for scrobbling again, whether the timing model or an
+  anchor got there. Listening to 3, then 1, 2, 3 scrobbles 3 twice.
 * **Side aware**: when the pressing is known, timing stops at the last track
   of a side (the run-out) and waits for the flip; backfill never crosses a
   side boundary.

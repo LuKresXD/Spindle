@@ -58,6 +58,7 @@ class Resolved:
     art_url: str = ""
     owned: bool = False
     reason: str = ""                        # how the album was chosen (logs)
+    offset: float | None = None             # the fingerprint's position in the track (s)
 
     @property
     def has_album(self) -> bool:
@@ -70,6 +71,11 @@ class Resolver:
         self.collection = collection
 
     def resolve(self, track: TrackInfo, ctx: ResolveContext | None = None) -> Resolved:
+        res = self._resolve(track, ctx)
+        res.offset = track.offset           # canonical names from the album, position from the ID
+        return res
+
+    def _resolve(self, track: TrackInfo, ctx: ResolveContext | None = None) -> Resolved:
         ctx = ctx or ResolveContext()
         owned_titles = self._owned_titles(track.artist)
 

@@ -20,6 +20,9 @@ audio:
   sample_rate: 44100
   channels: 2                               # stereo — important for ShazamIO accuracy
   chunk_duration: 10                         # seconds per fingerprint chunk
+  # capture_gain_db: 20                      # ALSA capture gain set at start (amixer); a USB mic
+  #                                          # input at full gain clips a line-level turntable
+  # mixer_control: "Mic"                     # the simple control that carries that gain
 
 fingerprint:
   acoustid_timeout: 10

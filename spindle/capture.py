@@ -38,6 +38,12 @@ _READ_SECONDS = 0.25        # reader granularity
 _RESTART_DELAY = 2.0        # seconds to wait before relaunching a dead arecord
 _RESTART_MAX_DELAY = 30.0   # ... growing to this while it keeps failing
 
+# Spectral motion: 1/3-octave bands from 100 Hz to ~10 kHz. Music moves between
+# bands from second to second; the noise of an empty turntable (motor, preamp,
+# mains) keeps the same spectrum for as long as it runs.
+MOTION_BAND_EDGES = tuple(100.0 * 2 ** (i / 3) for i in range(21))
+MOTION_SUB_SECONDS = 1.0
+
 
 def rms_db(pcm: bytes) -> float:
     """RMS level of 16-bit little-endian PCM, in dBFS."""
@@ -50,6 +56,90 @@ def rms_db(pcm: bytes) -> float:
     if rms <= 0:
         return SILENCE_FLOOR_DB
     return 20 * math.log10(rms / 32768.0)
+
+
+def _mono(pcm: bytes, channels: int) -> np.ndarray:
+    data = np.frombuffer(pcm[: len(pcm) - len(pcm) % (2 * channels)], dtype=np.int16)
+    x = data.astype(np.float64) / 32768.0
+    if channels > 1:
+        x = x.reshape(-1, channels).mean(axis=1)
+    return x
+
+
+def _band_profile(seg: np.ndarray, sample_rate: int) -> np.ndarray:
+    """log10 of the fraction of the segment's power in each motion band."""
+    win = np.hanning(len(seg))
+    power = np.abs(np.fft.rfft(seg * win)) ** 2
+    freqs = np.fft.rfftfreq(len(seg), 1.0 / sample_rate)
+    bands = np.array([power[(freqs >= lo) & (freqs < hi)].sum()
+                      for lo, hi in zip(MOTION_BAND_EDGES, MOTION_BAND_EDGES[1:], strict=False)])
+    bands = bands / max(float(bands.sum()), 1e-20)
+    return np.log10(bands + 1e-9)
+
+
+def spectral_motion(pcm: bytes, sample_rate: int, channels: int,
+                    sub_seconds: float = MOTION_SUB_SECONDS) -> float | None:
+    """How much the spectrum moves from one second to the next, averaged over
+    the whole buffer: the mean absolute change of the log band profile between
+    consecutive `sub_seconds` pieces.
+
+    Steady noise scores well under 0.1 (an empty turntable measured 0.05-0.07);
+    music scores 0.3 and up, a sustained ambient drone 0.5. None when the
+    buffer holds fewer than two pieces.
+    """
+    x = _mono(pcm, channels)
+    n = int(sub_seconds * sample_rate)
+    if n <= 0 or len(x) < 2 * n:
+        return None
+    pieces = [x[i:i + n] for i in range(0, len(x) - n + 1, n)]
+    profiles = [_band_profile(p, sample_rate) for p in pieces]
+    moves = [float(np.mean(np.abs(b - a)))
+             for a, b in zip(profiles, profiles[1:], strict=False)]
+    return float(np.mean(moves))
+
+
+def mixer_device_for(capture_device: str) -> str | None:
+    """The ALSA control device for a capture PCM name: plughw:CARD=Device,DEV=0
+    -> hw:CARD=Device; hw:3,0 -> hw:3. None for "default" and other names that
+    carry no card (amixer would then address whatever card is default)."""
+    name = capture_device.strip()
+    if ":" not in name:
+        return None
+    _, spec = name.split(":", 1)
+    parts = [p for p in spec.split(",") if p]
+    if not parts:
+        return None
+    card = parts[0]
+    if card.upper().startswith("CARD="):
+        return f"hw:{card}"
+    if card.isdigit():
+        return f"hw:{card}"
+    return f"hw:CARD={card}"
+
+
+def set_capture_gain(capture_device: str, control: str, gain_db: float) -> str | None:
+    """Set the card's capture gain through amixer. Returns the readback line, or
+    None when the card cannot be addressed or amixer refused (logged, never fatal:
+    a wrong gain is a worse-sounding capture, not a dead service)."""
+    dev = mixer_device_for(capture_device)
+    if dev is None:
+        logger.warning("Capture gain: cannot tell the card from device '%s'; not set",
+                       capture_device)
+        return None
+    try:
+        subprocess.run(["amixer", "-D", dev, "sset", control, "capture", f"{gain_db:g}dB"],
+                       check=True, capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["amixer", "-D", dev, "sget", control],
+                             check=True, capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        detail = getattr(e, "stderr", "") or str(e)
+        logger.warning("Capture gain: amixer failed on %s '%s': %s", dev, control,
+                       str(detail).strip())
+        return None
+    readback = next((ln.strip() for ln in out.splitlines() if "Capture" in ln), "").strip()
+    logger.info("Capture gain: %s '%s' set to %g dB (%s)", dev, control, gain_db,
+                readback or "no readback")
+    return readback or None
 
 
 def write_wav(path: Path, pcm: bytes, sample_rate: int, channels: int) -> None:
@@ -89,6 +179,8 @@ class ContinuousCapture:
     def start(self) -> None:
         if self._running:
             return
+        if self.cfg.capture_gain_db is not None:
+            set_capture_gain(self.cfg.device, self.cfg.mixer_control, self.cfg.capture_gain_db)
         self._running = True
         self._thread = threading.Thread(target=self._run, name="capture", daemon=True)
         self._thread.start()
@@ -130,6 +222,11 @@ class ContinuousCapture:
     def level_db(self, seconds: float = DEFAULT_STEP) -> float:
         """RMS level of the most recent `seconds` of audio."""
         return rms_db(self.last_pcm(seconds))
+
+    def motion(self, seconds: float | None = None) -> float | None:
+        """Spectral motion of the most recent `seconds` (default: the window)."""
+        return spectral_motion(self.last_pcm(seconds or self.window_seconds),
+                               self.cfg.sample_rate, self.cfg.channels)
 
     def window_wav(self, seconds: float | None = None, min_seconds: float = 2.0) -> Path | None:
         """Write the last `seconds` (default: the full window) to a temp WAV.
