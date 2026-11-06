@@ -424,3 +424,21 @@ def test_same_track_offsets_correct_the_clock(clock, album):
     identified(s, album, "Track 3", music_start, at=music_start + 210, offset=54)
     assert s.album_state.current_track_start == music_start + 150
     assert s.album_state.scrobbled == {0, 1}                     # nothing re-scrobbled
+
+
+def test_offsets_tolerate_turntable_speed_drift(clock, album):
+    """A 3 % fast deck gains 6 s in 200 s: that is drift, not a repeated section."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    music_start = clock.t
+    identified(s, album, "Track 6", music_start, at=music_start + 20, offset=10)
+    identified(s, album, "Track 6", music_start, at=music_start + 28, offset=18.3)
+    assert s.album_state.current_track_start == music_start + 28 - 18.3 - 6
+    at = music_start + 28
+    off = 18.3
+    for _ in range(20):                                          # 200 s of IDs, 3 % fast
+        at += 10
+        off += 10.3
+        identified(s, album, "Track 6", music_start, at=at, offset=off)
+    assert s._run_start(album.tracks[5]) is not None             # still trusted
+    identified(s, album, "Track 6", music_start, at=at + 10, offset=off + 48)   # a real jump
+    assert s._run_start(album.tracks[5]) is None

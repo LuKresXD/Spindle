@@ -394,10 +394,13 @@ class ScrobbleSession:
             if run.ref is None:
                 run.ref = (now, offset)
             elif now > run.ref[0]:
+                # the offsets must advance with the clock, allowing for the turntable's
+                # speed error over the interval (a 3 % fast deck gains 6 s in 200 s)
                 ref_at, ref_offset = run.ref
                 drift = (offset - ref_offset) - (now - ref_at)
-                if abs(drift) <= OFFSET_TOLERANCE:
+                if abs(drift) <= OFFSET_TOLERANCE + VINYL_DRIFT * (now - ref_at):
                     run.start = now - offset - self.window_seconds
+                    run.ref = (now, offset)          # consistent: measure the next one from here
                 else:
                     run.start = None
                     logger.info("Session: offsets of '%s' disagree with the clock by %.0fs "
