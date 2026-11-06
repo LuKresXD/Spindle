@@ -108,7 +108,8 @@ def test_set_capture_gain_runs_amixer_and_reads_back(monkeypatch):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        out = "  Mono: Playback 8 [2%] [0.50dB] [off] Capture 320 [65%] [20.00dB] [on]\n"
+        out = ("  Capture channels: Mono\n"
+               "  Mono: Playback 8 [2%] [0.50dB] [off] Capture 320 [65%] [20.00dB] [on]\n")
         stdout = out if cmd[3] == "sget" else ""
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 

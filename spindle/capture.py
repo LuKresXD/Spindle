@@ -136,7 +136,8 @@ def set_capture_gain(capture_device: str, control: str, gain_db: float) -> str |
         logger.warning("Capture gain: amixer failed on %s '%s': %s", dev, control,
                        str(detail).strip())
         return None
-    readback = next((ln.strip() for ln in out.splitlines() if "Capture" in ln), "").strip()
+    lines = [ln.strip() for ln in out.splitlines() if "Capture" in ln]
+    readback = next((ln for ln in lines if "dB]" in ln), lines[0] if lines else "")
     logger.info("Capture gain: %s '%s' set to %g dB (%s)", dev, control, gain_db,
                 readback or "no readback")
     return readback or None
