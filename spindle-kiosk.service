@@ -1,0 +1,34 @@
+[Unit]
+Description=Spindle touch display (Chromium kiosk under cage)
+# The screen is Spindle's web UI; without the service there is nothing to show.
+After=spindle.service systemd-user-sessions.service
+Wants=spindle.service
+
+[Service]
+Type=simple
+User=luka
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+Environment=XDG_SESSION_TYPE=wayland
+# the KMS card with the HDMI connector (card0 on this Pi is the render-only v3d node)
+Environment=WLR_DRM_DEVICES=/dev/dri/card1
+# wait for the web server, then show it full screen, no chrome, touch only
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/healthz >/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/bin/cage -d -- /usr/bin/chromium \
+  --kiosk --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
+  --disable-features=TranslateUI --password-store=basic --overscroll-history-navigation=0 \
+  --disable-pinch --touch-events=enabled --autoplay-policy=no-user-gesture-required \
+  --ozone-platform=wayland --force-device-scale-factor=1 --enable-gpu-rasterization \
+  --ignore-gpu-blocklist --user-data-dir=/home/luka/.config/spindle-kiosk \
+  http://127.0.0.1:8787/
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -147,6 +147,14 @@ def main() -> None:
         extras=extras, dry_run=args.dry_run,
     )
 
+    web = None
+    if cfg.web.enabled:
+        from .web import WebServer
+        web = WebServer(cfg.web, collection=collection, scrobbler=scrobbler, history=history)
+        web.start()
+        player.side_listeners.append(web.hub.side_ended)
+        logger.info("Touch display served at http://%s:%d/", cfg.web.host, cfg.web.port)
+
     bot = None
     if cfg.telegram.bot_token and cfg.telegram.chat_id and not args.dry_run:
         bot = SpindleBot(bot_token=cfg.telegram.bot_token, chat_id=cfg.telegram.chat_id,
@@ -169,6 +177,8 @@ def main() -> None:
         try:
             state = player.tick()
             display.update(state)
+            if web is not None:
+                web.hub.publish(state)
             if scrobbler and time.monotonic() - last_flush >= QUEUE_FLUSH_EVERY:
                 last_flush = time.monotonic()
                 if scrobbler.queue_size():
@@ -187,6 +197,8 @@ def main() -> None:
     player.close()
     if bot:
         bot.stop()
+    if web is not None:
+        web.stop()
     display.clear()
     display.stop()
     capture.stop()

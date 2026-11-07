@@ -91,6 +91,14 @@ class DiscogsConfig:
 
 
 @dataclass
+class WebConfig:
+    """The touch display: a local web UI served by Spindle, shown by a kiosk browser."""
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8787
+
+
+@dataclass
 class ArtConfig:
     itunes: bool = True       # Apple catalog, 1200 px
     deezer: bool = True       # Deezer, has the explicit albums Apple's search hides
@@ -123,6 +131,7 @@ class SpindleConfig:
     silence: SilenceConfig = field(default_factory=SilenceConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
     discogs: DiscogsConfig = field(default_factory=DiscogsConfig)
+    web: WebConfig = field(default_factory=WebConfig)
     art: ArtConfig = field(default_factory=ArtConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)

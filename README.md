@@ -281,3 +281,31 @@ pytest
 ## Credits
 
 Built with [pyacoustid](https://github.com/beetbox/pyacoustid), [ShazamIO](https://github.com/dotX12/shazamio), [pylast](https://github.com/pylast/pylast), the [Spotify Web API](https://developer.spotify.com/documentation/web-api) and the [Discogs API](https://www.discogs.com/developers).
+
+## Touch display (the 13.3" OLED)
+
+Since v0.3.0 the screen is a web page Spindle serves itself, shown full screen by
+Chromium under the `cage` Wayland compositor. The framebuffer renderer
+(`display.enabled: true`) is the fallback for a plain HDMI panel.
+
+```yaml
+web:
+  enabled: true           # serve the display at http://127.0.0.1:8787/
+display:
+  enabled: false          # the kiosk owns the screen; fb0 writes would vanish behind it
+```
+
+Install the kiosk once (Raspberry Pi OS, console boot, user `luka`):
+
+```bash
+sudo apt install cage chromium
+sudo cp spindle-kiosk.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now spindle-kiosk
+```
+
+The page: cover, title, progress with "Side A · 10 min left", this side's
+tracklist; tap the title or **Lyrics** for time-synced lyrics (LRCLIB); swipe
+up or **Info** for the pressing (Discogs), credits, the story (Wikipedia) and
+your plays (Last.fm); a card when a side finishes; swipe right for a black
+screen, tap to wake. Idle is pure black (OLED off).

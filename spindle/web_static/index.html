@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Spindle</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="phase-idle">
+<div id="bg" class="bg"></div>
+<div class="veil"></div>
+
+<main id="home" class="stage hidden">
+  <section class="left">
+    <div id="sidepill" class="glass pill"><span class="dot"></span><span id="sidetext">Side A</span></div>
+    <img id="art" class="art" alt="">
+    <div id="albumline" class="meta"></div>
+  </section>
+  <section class="centre">
+    <div id="title" class="title"></div>
+    <div id="artist" class="artist"></div>
+    <div class="progress">
+      <div class="track"><i id="fill"></i></div>
+      <div class="times meta"><span id="elapsed">0:00</span><span id="remaining">-0:00</span></div>
+    </div>
+  </section>
+  <section class="right">
+    <div id="list" class="glass list"></div>
+    <div id="lyrics" class="lyrics hidden"><div id="lyriclines" class="lyriclines"></div></div>
+  </section>
+  <div class="corner">
+    <button id="btn-lyrics" class="glass pill" type="button">Lyrics</button>
+    <button id="btn-info" class="glass pill" type="button">Info</button>
+  </div>
+</main>
+
+<div id="listening" class="listening hidden">
+  <div class="glass pill big"><span class="dot pulse"></span><span>Listening</span><span class="level"><i id="levelfill"></i></span></div>
+</div>
+
+<div id="sheet" class="glass sheet hidden">
+  <div class="grab"></div>
+  <div id="tiles" class="tiles"></div>
+</div>
+
+<div id="ended" class="ended hidden">
+  <div class="glass card">
+    <div id="ended-kicker" class="meta kicker">SIDE A FINISHED</div>
+    <div id="ended-title" class="title">5 tracks scrobbled</div>
+    <div id="ended-sub" class="artist">Flip for Side B</div>
+  </div>
+</div>
+
+<div id="off" class="off hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

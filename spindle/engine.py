@@ -30,6 +30,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .art import Art, ArtProvider
 from .capture import DEFAULT_STEP, ContinuousCapture
@@ -39,7 +40,7 @@ from .history import ScrobbleHistory
 from .notify import Notifier
 from .resolve import ResolveContext, Resolved, Resolver
 from .scrobbler import Scrobbler
-from .session import ScrobbleSession, SessionMode, normalize_title
+from .session import ScrobbleSession, SessionMode, _artist_key, normalize_title
 from .state import Phase, ScreenState, TrackRow
 
 logger = logging.getLogger(__name__)
@@ -235,6 +236,8 @@ class Player:
         self._recent_titles: set[str] = set()      # this artist's titles scrobbled recently
         self._recent_key = ""
         self._recent_at = 0.0
+        # called with a summary dict when a session ends (the touch display's end card)
+        self.side_listeners: list[Callable[[dict], None]] = []
 
         self.playing = _Playing()
         self._playcount_cache: dict[tuple[str, str], int | None] = {}
@@ -377,6 +380,8 @@ class Player:
                 al_scrobbled = len(al.scrobbled)
             if al_artist and al_scrobbled:
                 self.notifier.side_finished(al_artist, al_album or "", al_scrobbled, al_played)
+            if al is not None and al_scrobbled:
+                self._announce_side_end(al, al_scrobbled)
             if self.session.deck_speed_samples >= 3:
                 logger.info("Deck speed: %+.1f%% (%d offset pairs)",
                             (self.session.deck_speed() - 1) * 100,
@@ -490,9 +495,6 @@ class Player:
         track = resolved.track
         s = self.session
 
-        if art is not None:
-            self.playing.art = art
-
         if s and resolved.has_album and not self.dry_run:
             was_locked = s.is_locked()
             was_album = s.locked_album_id
@@ -522,6 +524,7 @@ class Player:
             self._log_dry_run(track)
             cur = (s.get_current_track() if s and s.is_locked() else None) or track
             self._set_playing(cur, at)
+            self._take_art(art, track)
             return
 
         if s and s.is_locked():
@@ -534,6 +537,23 @@ class Player:
             self._now_playing(cur)
         else:
             self._simple_mode(track, at)
+        self._take_art(art, track)
+
+    def _take_art(self, art: Art | None, identified: TrackInfo) -> None:
+        """Keep the cover only when the identified track is the one we believe is
+        playing: a sample at the end of a song (the O'Jays inside Drake, 2026-11-06)
+        identifies as its source, the session rightly ignores it, and the screen
+        must not change its cover either."""
+        if art is None:
+            return
+        cur = self.playing.track
+        if cur is None:
+            return
+        same = (normalize_title(cur.title) == normalize_title(identified.title)
+                and _artist_key(cur.artist) == _artist_key(identified.artist))
+        if same or (cur.album and identified.album
+                    and cur.album.lower() == identified.album.lower()):
+            self.playing.art = art
 
     def _simple_mode(self, track: TrackInfo, now: float) -> None:
         """No album known: scrobble by elapsed time alone."""
@@ -649,6 +669,26 @@ class Player:
 
         self._enrich(st)
         return st
+
+    def _announce_side_end(self, al: Any, scrobbled: int) -> None:
+        """Tell the display listeners which side ended and what comes next."""
+        tl = al.tracklist
+        side = tl.side_at(al.current_index) if al.current_index >= 0 else ""
+        next_side, next_title = "", ""
+        if side:
+            for i in range(al.current_index + 1, len(tl.tracks)):
+                s_i = tl.side_at(i)
+                if s_i and s_i != side:
+                    next_side, next_title = s_i, tl.tracks[i].title
+                    break
+        info = {"artist": tl.artist, "album": tl.album_name, "side": side,
+                "scrobbled": scrobbled, "next_side": next_side, "next_title": next_title,
+                "at": self.clock()}
+        for fn in self.side_listeners:
+            try:
+                fn(info)
+            except Exception as e:  # a display problem must not touch scrobbling
+                logger.debug("side listener failed: %s", e)
 
     def _recently_scrobbled(self, artist: str, now: float) -> set[str]:
         """Normalised titles by `artist` scrobbled within RECENT_PLAY_WINDOW, from

@@ -146,3 +146,21 @@ send flushes the queue; otherwise it is retried every 10 minutes.
 | `art.py` | cover art with a disk cache |
 | `display.py` | framebuffer renderer |
 | `bot.py` / `notify.py` | Telegram |
+
+## Touch display
+
+`web.py` serves the screen: `GET /events` streams every `ScreenState` as JSON
+(Server-Sent Events, one message per change, keepalive every 15 s), `/art/<key>`
+serves the cover bytes the state refers to, `/api/lyrics` fetches time-synced
+lyrics from LRCLIB (exact lookup by artist, title, album, duration; else the best
+search hit within 12 s of the duration), `/api/info` builds the info sheet from
+the Discogs release (`DiscogsCollection.release_details`: labels, country, year,
+formats, credits per track, the date it entered the collection), a Wikipedia
+summary and Last.fm counts. Everything cached per track or album; nothing runs on
+the tick thread. The page interpolates the progress between ticks with the
+measured deck speed, so the bar and the lyrics stay on time.
+
+The cover follows the track the session believes is playing, not the last
+identification: a sample at the end of a song identifies as its source (the
+O'Jays inside Drake's Middle of the Ocean, 2026-11-06) and must change neither
+the track nor the cover.

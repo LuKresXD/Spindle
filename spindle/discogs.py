@@ -94,6 +94,7 @@ class Release:
     formats: list = field(default_factory=list)      # ["Vinyl"]
     tracks: list = field(default_factory=list)       # [{"position","title","duration","artist"}]
     loaded: bool = False
+    added: str = ""                                   # date it entered the collection (YYYY-MM-DD)
 
     @property
     def positions(self) -> list[tuple[str, str]]:
@@ -105,7 +106,8 @@ class Release:
 
     def to_dict(self) -> dict:
         return {"id": self.id, "artist": self.artist, "title": self.title, "year": self.year,
-                "formats": self.formats, "tracks": self.tracks, "loaded": self.loaded}
+                "formats": self.formats, "tracks": self.tracks, "loaded": self.loaded,
+                "added": self.added}
 
     @staticmethod
     def from_dict(r: dict) -> Release:
@@ -114,7 +116,8 @@ class Release:
             tracks = [{"position": p, "title": t, "duration": None, "artist": ""}
                       for p, t in r.get("positions", [])]
         return Release(int(r["id"]), r["artist"], r["title"], int(r.get("year") or 0),
-                       list(r.get("formats") or []), tracks, bool(r.get("loaded")))
+                       list(r.get("formats") or []), tracks, bool(r.get("loaded")),
+                       str(r.get("added") or ""))
 
 
 class DiscogsCollection:
@@ -123,6 +126,7 @@ class DiscogsCollection:
         self.token = token
         self.username = username
         self.cache_dir = cache_dir or DEFAULT_CACHE_DIR
+        self._details: dict[int, dict] = {}
         self._http = session or requests.Session()
         self._http.headers.update({"User-Agent": _UA,
                                    "Authorization": f"Discogs token={token}"})
@@ -301,6 +305,7 @@ class DiscogsCollection:
                 rel.artist, rel.title = artists, info.get("title", rel.title)
                 rel.year = int(info.get("year") or rel.year or 0)
                 rel.formats = [f.get("name", "") for f in info.get("formats", [])] or rel.formats
+                rel.added = str(item.get("date_added") or rel.added or "")[:10]
                 out.append(rel)
             pages = data.get("pagination", {}).get("pages", 1)
             if page >= pages:
@@ -346,6 +351,48 @@ class DiscogsCollection:
                 rel.year = int(data.get("year") or 0)
             self._save_cache()
         logger.debug("Discogs: loaded %s — %s (%d tracks)", rel.artist, rel.title, len(tracks))
+
+    def release_details(self, rel: Release) -> dict:
+        """Pressing facts for the display's info sheet, one API call per release,
+        cached in memory: labels, country, year, formats, notes, credits."""
+        with self._lock:
+            cached = self._details.get(rel.id)
+        if cached is not None:
+            return cached
+        data = self._get(f"/releases/{rel.id}")
+        formats = []
+        for f in data.get("formats", []) or []:
+            bits = [f.get("name", "")] + list(f.get("descriptions", []) or [])
+            qty = f.get("qty")
+            prefix = f"{qty} × " if qty and str(qty) != "1" else ""
+            formats.append(prefix + ", ".join(b for b in bits if b))
+        credits = [{"name": a.get("name", ""), "role": a.get("role", ""),
+                    "tracks": a.get("tracks", "")}
+                   for a in data.get("extraartists", []) or []]
+        by_track: dict[str, list] = {}
+        for t in data.get("tracklist", []) or []:
+            pos = t.get("position") or ""
+            extra = [{"name": a.get("name", ""), "role": a.get("role", "")}
+                     for a in t.get("extraartists", []) or []]
+            if pos and extra:
+                by_track[pos] = extra
+        details = {
+            "id": rel.id,
+            "labels": [{"name": lb.get("name", ""), "catno": lb.get("catno", "")}
+                       for lb in data.get("labels", []) or []],
+            "country": data.get("country", "") or "",
+            "year": int(data.get("year") or rel.year or 0),
+            "released": data.get("released", "") or "",
+            "formats": formats,
+            "notes": (data.get("notes") or "").strip(),
+            "credits": credits,
+            "credits_by_track": by_track,
+            "added": rel.added,
+            "url": data.get("uri", "") or "",
+        }
+        with self._lock:
+            self._details[rel.id] = details
+        return details
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         wait = _MIN_GAP - (time.time() - self._last_call)

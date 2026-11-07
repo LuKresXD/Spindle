@@ -45,6 +45,9 @@ Issues = "https://github.com/LuKresXD/spindle/issues"
 [project.scripts]
 spindle = "spindle.cli:main"
 
+[tool.setuptools.package-data]
+spindle = ["web_static/*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
