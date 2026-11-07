@@ -29,7 +29,7 @@
   let info = null;                        // album info (pressing, story, plays)
   let trackFor = "";
   let trackInfo = null;                   // Genius: story, samples, producers
-  const LYRIC_LEAD = 0.6;                 // show a line a touch early rather than late
+  const LYRIC_LEAD = 1.0;                 // show a line a touch early rather than late (Luka: ~1 s late at 0.6)
   let sheetOpen = false;
   let screenOff = false;
 
