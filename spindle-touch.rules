@@ -4,3 +4,8 @@
 # Install: sudo cp spindle-touch.rules /etc/udev/rules.d/98-spindle-touch.rules
 #          sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=input
 ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="wch.cn TouchScreen", ENV{ID_INPUT_MOUSE}=="1", ENV{ID_INPUT_TOUCHSCREEN}!="1", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+
+# The Pi's HDMI CEC inputs (vc4-hdmi-0 / vc4-hdmi-1) are tagged as pointing sticks, so
+# the seat gains pointer capability and cage draws its arrow in the middle of the screen
+# even with nothing but the touch panel attached. Nothing uses CEC here: hide them too.
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="vc4-hdmi-*", ENV{LIBINPUT_IGNORE_DEVICE}="1"
