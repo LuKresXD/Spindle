@@ -1,3 +1,3 @@
 """Spindle — vinyl scrobbler for Raspberry Pi."""
 
-__version__ = "0.3.4"
+__version__ = "0.3.5"

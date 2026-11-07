@@ -171,3 +171,34 @@ def test_server_serves_page_state_art_and_events():
 def test_sse_frame():
     assert sse({"a": 1}) == b'data: {"a": 1}\n\n'
     time.sleep(0)
+
+
+def test_genius_parses_story_samples_and_producers():
+    from spindle.web import Genius
+    http = _Http({
+        "/search/multi": _Resp(200, {"response": {"sections": [
+            {"type": "top_hit", "hits": []},
+            {"type": "song", "hits": [{"result": {
+                "id": 525, "full_title": "Stronger by Kanye West",
+                "primary_artist": {"name": "Kanye West"}}}]}]}}),
+        "/songs/525": _Resp(200, {"response": {"song": {
+            "id": 525, "url": "https://genius.com/Kanye-west-stronger-lyrics",
+            "release_date_for_display": "July 31, 2007",
+            "description": {"dom": {"tag": "root", "children": [
+                {"tag": "p", "children": ["The biggest hit from ",
+                                          {"tag": "em", "children": ["Graduation"]},
+                                          " samples Daft Punk. https://youtu.be/x"]},
+                {"tag": "p", "children": ["Second paragraph."]}]}},
+            "producer_artists": [{"name": "Kanye West"}, {"name": "MIKE DEAN"}],
+            "writer_artists": [{"name": "Kanye West"}],
+            "song_relationships": [
+                {"relationship_type": "samples",
+                 "songs": [{"full_title": "Harder Better Faster Stronger by\u00a0Daft\u00a0Punk"}]},
+                {"relationship_type": "sampled_in", "songs": []}]}}}),
+    })
+    g = Genius(http=http)
+    out = g.get("Kanye West", "Stronger")
+    assert out["story"] == "The biggest hit from Graduation samples Daft Punk.\n\nSecond paragraph."
+    assert out["samples"] == ["Harder Better Faster Stronger by Daft Punk"]
+    assert out["producers"] == ["Kanye West", "MIKE DEAN"] and out["release"] == "July 31, 2007"
+    assert g.get("Kanye West", "Stronger") is out

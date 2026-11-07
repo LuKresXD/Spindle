@@ -73,7 +73,9 @@ class StateHub:
         self._ended: dict | None = None
         self._clock = clock
         self.on_album: Callable[[str, str], None] | None = None   # set by the server
+        self.on_track: Callable[[str, str], None] | None = None
         self._album_seen: tuple[str, str] | None = None
+        self._track_seen: tuple[str, str] | None = None
 
     # publishing (tick thread) ------------------------------------------------
 
@@ -85,6 +87,12 @@ class StateHub:
                 self._album_seen = album_key
                 with contextlib.suppress(Exception):
                     self.on_album(st.artist, st.album)
+        if st.artist and st.title and self.on_track is not None:
+            track_key = (st.artist, st.title)
+            if track_key != self._track_seen:
+                self._track_seen = track_key
+                with contextlib.suppress(Exception):
+                    self.on_track(st.artist, st.title)
         if st.art:
             key = art_key(st.art)
             with self._cond:
@@ -331,6 +339,111 @@ class Info:
         return out
 
 
+# ── Genius: the story behind the track, samples, producers ────────────────────
+
+GENIUS = "https://genius.com/api"
+GENIUS_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Version/17.0 Safari/605.1.15")
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _dom_text(node: Any) -> str:
+    """Flatten Genius's description DOM into text, paragraphs separated by blank lines."""
+    if isinstance(node, str):
+        return node
+    if not isinstance(node, dict):
+        return ""
+    inner = "".join(_dom_text(c) for c in node.get("children", []) or [])
+    tag = node.get("tag")
+    if tag in ("p", "blockquote", "h1", "h2", "h3", "li"):
+        return inner + "\n\n"
+    if tag == "br":
+        return "\n"
+    if tag in ("img", "iframe", "script", "style"):
+        return ""
+    return inner
+
+
+def _artist_in(name: str, haystack: str) -> bool:
+    a = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    h = re.sub(r"[^a-z0-9]+", " ", haystack.lower())
+    return bool(a) and a in h
+
+
+class Genius:
+    """Genius's own site JSON (no API key): search, then the song with its
+    description and relationships. Cached per (artist, title); misses cached too."""
+
+    def __init__(self, http: requests.Session | None = None):
+        self._http = http or requests.Session()
+        self._http.headers["User-Agent"] = GENIUS_UA
+        self._cache: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def get(self, artist: str, title: str) -> dict:
+        key = f"{artist.lower()}|{title.lower()}"
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+        try:
+            result = self._fetch(artist, title)
+        except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+            logger.debug("Genius lookup failed: %s", e)
+            result = {}
+        with self._lock:
+            self._cache[key] = result
+        return result
+
+    def _fetch(self, artist: str, title: str) -> dict:
+        r = self._http.get(f"{GENIUS}/search/multi", params={"q": f"{artist} {title}"},
+                           timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        song_id = None
+        for section in r.json().get("response", {}).get("sections", []):
+            if section.get("type") != "song":
+                continue
+            for hit in section.get("hits", []):
+                res = hit.get("result", {})
+                primary = (res.get("primary_artist") or {}).get("name", "")
+                if _artist_in(artist, primary) or _artist_in(primary, artist) \
+                        or _artist_in(artist, res.get("full_title", "")):
+                    song_id = res.get("id")
+                    break
+            break
+        if not song_id:
+            return {}
+        r = self._http.get(f"{GENIUS}/songs/{song_id}", timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        song = r.json().get("response", {}).get("song", {})
+        text = _dom_text((song.get("description") or {}).get("dom"))
+        text = _URL_RE.sub("", text)
+        paras = [pp.strip() for pp in text.split("\n\n") if pp.strip() and pp.strip() != "?"]
+        story = "\n\n".join(paras[:3])
+        if len(story) > 1200:
+            story = story[:1197].rsplit(" ", 1)[0] + "…"
+        rels = {rel.get("relationship_type"):
+                [x.get("full_title", "") for x in rel.get("songs", [])]
+                for rel in song.get("song_relationships", []) or []}
+        return {
+            "id": song_id,
+            "story": story,
+            "samples": [t.replace("\xa0", " ") for t in rels.get("samples", [])[:4]],
+            "sampled_in": [t.replace("\xa0", " ") for t in rels.get("sampled_in", [])[:3]],
+            "producers": [a.get("name", "") for a in song.get("producer_artists", []) or []],
+            "writers": [a.get("name", "") for a in song.get("writer_artists", []) or []][:6],
+            "release": song.get("release_date_for_display") or "",
+            "url": song.get("url", ""),
+        }
+
+    def prefetch(self, artist: str, title: str) -> None:
+        key = f"{artist.lower()}|{title.lower()}"
+        with self._lock:
+            if key in self._cache:
+                return
+        threading.Thread(target=self.get, args=(artist, title), name="genius-prefetch",
+                         daemon=True).start()
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
 class _Handler(BaseHTTPRequestHandler):
@@ -381,6 +494,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._lyrics()
             elif path == "/api/info":
                 self._info()
+            elif path == "/api/track":
+                self._track()
             elif path == "/healthz":
                 self._json({"ok": True})
             else:
@@ -438,6 +553,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(self.server.lyrics.get(artist, title, q.get("album", ""),
                                           float(dur) if dur else None))
 
+    def _track(self) -> None:
+        q = self._query()
+        artist, title = q.get("artist", ""), q.get("title", "")
+        if not artist or not title:
+            self._json({"error": "artist and title required"}, HTTPStatus.BAD_REQUEST)
+            return
+        self._json(self.server.genius.get(artist, title))
+
     def _info(self) -> None:
         q = self._query()
         artist, album = q.get("artist", ""), q.get("album", "")
@@ -462,7 +585,9 @@ class WebServer(ThreadingHTTPServer):
         self.hub = hub or StateHub()
         self.lyrics = Lyrics()
         self.info = Info(collection, scrobbler, history)
+        self.genius = Genius()
         self.hub.on_album = self.info.prefetch
+        self.hub.on_track = self.genius.prefetch
         self.stopping = False
         self._thread: threading.Thread | None = None
 

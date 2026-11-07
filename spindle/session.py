@@ -696,7 +696,10 @@ class ScrobbleSession:
         al.exhausted = False
         result: list[tuple[TrackInfo, float]] = []
         track = al.tracklist.get_track_at(track_index) or heard_track
-        heard = min(now, self._first_seen(heard_track, now))
+        # the window that first matched this track ended at first_seen and was
+        # window_seconds long: the track had begun by its start
+        heard = max(al.current_track_start,
+                    min(now, self._first_seen(heard_track, now) - self.window_seconds))
 
         if track_index == al.current_index:
             logger.debug("Session: anchor confirms track %d ✓", track_index + 1)

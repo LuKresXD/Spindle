@@ -386,9 +386,19 @@ class DiscogsCollection:
             for_sale = stats.get("num_for_sale")
         except (requests.RequestException, ValueError, TypeError) as e:
             logger.debug("Discogs marketplace stats for %s failed: %s", rel.id, e)
+        typical = None            # Discogs' suggested price for a VG+ copy (sales-history based)
+        try:
+            sugg = self._get(f"/marketplace/price_suggestions/{rel.id}")
+            for cond in ("Very Good Plus (VG+)", "Near Mint (NM or M-)", "Very Good (VG)"):
+                if isinstance(sugg.get(cond), dict) and sugg[cond].get("value") is not None:
+                    typical = float(sugg[cond]["value"])
+                    break
+        except (requests.RequestException, ValueError, TypeError) as e:
+            logger.debug("Discogs price suggestions for %s unavailable: %s", rel.id, e)
         details = {
             "id": rel.id,
             "price_usd": price,
+            "typical_usd": typical,
             "for_sale": for_sale,
             "labels": [{"name": lb.get("name", ""), "catno": lb.get("catno", "")}
                        for lb in data.get("labels", []) or []],

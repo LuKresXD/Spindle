@@ -100,10 +100,15 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .level i { display: block; height: 100%; width: 0; background: #fff; border-radius: 4px; transition: width .4s var(--ease); }
 
 /* info sheet ---------------------------------------------------------------- */
+/* The rounded, translucent shell does not scroll; the plain inner box does, so
+   the compositor scrolls it without re-masking rounded corners every frame. */
 .sheet { position: absolute; left: var(--pad-x); right: var(--pad-x); bottom: 0; height: 760px;
-  border-radius: 44px 44px 0 0; padding: 36px 44px; transform: translateY(104%); transition: transform .5s var(--ease); z-index: 5;
-  overflow-y: auto; touch-action: pan-y; background: rgba(24,14,30,.92); scrollbar-width: none; }
-.sheet::-webkit-scrollbar { display: none; }
+  border-radius: 44px 44px 0 0; transform: translateY(104%); transition: transform .5s var(--ease); z-index: 5;
+  overflow: hidden; background: rgba(24,14,30,.93); border: 1px solid rgba(255,255,255,.14); border-bottom: 0;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 -18px 60px rgba(0,0,0,.35); will-change: transform; }
+.sheet-scroll { height: 100%; overflow-y: auto; touch-action: pan-y; padding: 36px 44px 44px;
+  scrollbar-width: none; contain: content; }
+.sheet-scroll::-webkit-scrollbar { display: none; }
 .sheet.open { transform: translateY(0); }
 .grab { width: 72px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.5); margin: 0 auto 30px; }
 .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
@@ -114,6 +119,8 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .tile p { font-size: 30px; font-weight: 500; line-height: 1.35; }
 .tile p b { font-weight: 700; }
 .tile .sub { font-size: 24px; color: rgba(255,255,255,.65); margin-top: 8px; }
+.tile .dim { color: rgba(255,255,255,.6); font-weight: 500; }
+#home { will-change: opacity; }
 body.sheet-open #home { opacity: .18; transition: opacity .5s var(--ease); }
 body.sheet-open .corner { visibility: hidden; }
 

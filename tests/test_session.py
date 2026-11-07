@@ -239,7 +239,7 @@ def test_forward_fill_is_bounded_by_the_clock(clock, album):
     out = confirmed(s, album, "Track 4", music_start)   # the fingerprint says Track 4
     assert [(t.title, ts) for t, ts in out] == [("Track 1", music_start)]
     assert s.album_state.current_index == 3        # Tracks 2 and 3: no time for them, not filled
-    assert s.album_state.current_track_start == clock.t
+    assert s.album_state.current_track_start == clock.t - 6   # it began by the start of the window
     assert s.album_state.scrobbled == {0}
 
 
@@ -298,7 +298,7 @@ def test_restarting_the_side_scrobbles_it_again(clock, album):
     assert s.album_state.scrobbled == {0, 1, 2}
     assert s.get_current_track().title == "Track 4"
     clock.advance(20)                              # 20 s into Track 4, then the needle goes back
-    replay_start = clock.t
+    replay_start = clock.t - 6                     # heard = the identifying window's start
     assert s.on_identified(resolved_for(album, "Track 1"), music_start) == []  # one ID: a new run
     assert s.get_current_track().title == "Track 4"                            # not acted on yet
     out = s.on_identified(resolved_for(album, "Track 1"), music_start)         # confirmed: acts
@@ -330,7 +330,7 @@ def test_any_order_listening_scrobbles_each_play(clock, album):
     out = confirmed(s, album, "Track 1", music_start)            # the needle went back to Track 1
     assert [(t.title, ts) for t, ts in out] == [("Track 3", music_start)]
     assert s.get_current_track().title == "Track 1"
-    assert s.album_state.current_track_start == back_at
+    assert s.album_state.current_track_start == back_at - 6   # the window that heard it
     scrobbles = list(out)
     for _ in range(3):                                           # 1, 2, 3 run to their ends
         cur = s.get_current_track()

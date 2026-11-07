@@ -26,6 +26,10 @@
   let lyricsFor = "";
   let lyricIndex = -1;
   let infoFor = "";
+  let info = null;                        // album info (pressing, story, plays)
+  let trackFor = "";
+  let trackInfo = null;                   // Genius: story, samples, producers
+  const LYRIC_LEAD = 0.6;                 // show a line a touch early rather than late
   let sheetOpen = false;
   let screenOff = false;
 
@@ -76,6 +80,7 @@
       el.artist.textContent = st.artist || "";
       lyricIndex = -1;
       if (lyricsOn) loadLyrics(st);
+      if (sheetOpen) loadInfo();
     }
     el.albumline.textContent = [st.album, st.year].filter(Boolean).join(" · ");
 
@@ -189,7 +194,7 @@
         }
       }
       if (now - lastSide > 5000) { lastSide = now; renderSide(state, state.tracklist || []); }
-      if (lyricsOn && lyrics && p != null) highlightLyric(p);
+      if (lyricsOn && lyrics && p != null) highlightLyric(p + LYRIC_LEAD);
     }
     requestAnimationFrame(frame);
   }
@@ -253,20 +258,24 @@
     el.body.classList.add("sheet-open");
     el.sheet.classList.remove("hidden");
     requestAnimationFrame(() => el.sheet.classList.add("open"));
-    const key = `${state.artist}|${state.album}`;
-    if (key !== infoFor) {
-      infoFor = key;
-      el.tiles.innerHTML = tile("Pressing", "Loading…") + tile("Credits", "") + tile("The story", "") + tile("Your plays", "");
-      try {
-        const q = new URLSearchParams({ artist: state.artist, album: state.album || "" });
-        const r = await fetch(`/api/info?${q}`);
-        const info = await r.json();
-        if (key !== infoFor) return;
-        renderInfo(info);
-      } catch (e) {
-        el.tiles.innerHTML = tile("Info", "Nothing came back for this record.");
-      }
-    }
+    await loadInfo();
+  }
+
+  async function loadInfo() {
+    const albumKey = `${state.artist}|${state.album}`;
+    const trackKey2 = `${state.artist}|${state.title}`;
+    const needAlbum = albumKey !== infoFor, needTrack = trackKey2 !== trackFor;
+    if (!needAlbum && !needTrack) { renderInfo(); return; }
+    if (needAlbum) { infoFor = albumKey; info = null; }
+    if (needTrack) { trackFor = trackKey2; trackInfo = null; }
+    renderInfo();
+    const jobs = [];
+    if (needAlbum) jobs.push(fetch(`/api/info?${new URLSearchParams({ artist: state.artist, album: state.album || "" })}`)
+      .then((r) => r.json()).then((d) => { if (albumKey === infoFor) info = d; }).catch(() => {}));
+    if (needTrack) jobs.push(fetch(`/api/track?${new URLSearchParams({ artist: state.artist, title: state.title })}`)
+      .then((r) => r.json()).then((d) => { if (trackKey2 === trackFor) trackInfo = d; }).catch(() => {}));
+    await Promise.all(jobs);
+    renderInfo();
   }
 
   function closeSheet() {
@@ -280,36 +289,46 @@
 
   const tile = (h, p, sub, wide) => `<div class="tile${wide ? " wide" : ""}"><h3>${esc(h)}</h3><p>${p}</p>${sub ? `<p class="sub">${sub}</p>` : ""}</div>`;
 
-  function renderInfo(info) {
-    const pr = info.pressing;
-    let pressing = "", pressingSub = "";
+  function renderInfo() {
+    const pr = info && info.pressing;
+    let pressing = info ? "" : "Loading…", pressingSub = "";
     if (pr) {
       const label = pr.labels && pr.labels.length ? pr.labels[0] : null;
       pressing = [label ? `<b>${esc(label.name)}</b>` : "", esc(pr.country), pr.year ? String(pr.year) : ""].filter(Boolean).join(" · ");
       const fmt = (pr.formats || []).join("; ");
       const catno = label && label.catno && !/^none$/i.test(label.catno) ? esc(label.catno) : "";
-      const price = pr.price_usd != null
-        ? `from $${Math.round(pr.price_usd)} on Discogs${pr.for_sale ? ` · ${pr.for_sale} for sale` : ""}` : "";
+      let price = "";
+      if (pr.typical_usd != null) price = `typically $${Math.round(pr.typical_usd)} on Discogs (VG+)`;
+      else if (pr.price_usd != null) price = `from $${Math.round(pr.price_usd)} on Discogs${pr.for_sale ? ` · ${pr.for_sale} for sale` : ""}`;
+      else if (pr.for_sale === null && pr.price_usd === null) price = "not sold on Discogs";
       pressingSub = [esc(fmt), catno, price].filter(Boolean).join(" · ");
-    } else {
+    } else if (info) {
       pressing = "Not in your Discogs collection";
     }
-    const creditLines = [];
+    // credits: Discogs per-track first, Genius producers/writers next, samples last
+    const lines = [];
     if (pr) {
       const cur = state && state.position ? pr.credits_by_track && pr.credits_by_track[state.position] : null;
       const pick = (list) => (list || []).filter((c) => /produc|written|featur|mix|master|record|compos|arrang|vocal/i.test(c.role)).slice(0, 4);
       const picked = pick(cur).length ? pick(cur) : pick(pr.credits);
-      for (const c of picked) creditLines.push(`${esc(c.role)}: <b>${esc(c.name)}</b>`);
+      for (const c of picked) lines.push(`${esc(c.role)}: <b>${esc(c.name)}</b>`);
     }
-    const credits = creditLines.length ? creditLines.join("<br>") : "No credits on this pressing";
-    const story = info.story && info.story.text ? esc(info.story.text) : "Nothing written up for this record";
-    const pl = info.plays || {};
-    let plays = pl.user_plays != null ? `<b>${pl.user_plays}</b> plays of this record on Last.fm` : "No plays counted yet";
+    const g = trackInfo || {};
+    if (!lines.length && g.producers && g.producers.length) lines.push(`Produced by <b>${esc(g.producers.join(", "))}</b>`);
+    if (g.samples && g.samples.length) lines.push(`Samples <b>${esc(g.samples.join("; "))}</b>`);
+    if (g.sampled_in && g.sampled_in.length) lines.push(`<span class="dim">Sampled in ${esc(g.sampled_in.slice(0, 2).join("; "))}</span>`);
+    const credits = lines.length ? lines.join("<br>") : (trackInfo && info ? "No credits found" : "Loading…");
+    const story = g.story ? esc(g.story).replace(/\n\n/g, "<br><br>")
+      : (trackInfo ? "Nothing written up for this track" : "Loading…");
+    const about = info && info.story && info.story.text ? esc(info.story.text) : (info ? "" : "Loading…");
+    const pl = (info && info.plays) || {};
+    let plays = pl.user_plays != null ? `<b>${pl.user_plays}</b> plays of this record on Last.fm` : (info ? "No plays counted yet" : "Loading…");
     const subs = [];
     if (pl.last_played) subs.push(`last played ${new Date(pl.last_played * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`);
     if (pl.listeners) subs.push(`${(pl.listeners / 1e6).toFixed(1)}M listeners worldwide`);
-    el.tiles.innerHTML = tile("Pressing", pressing, pressingSub) + tile("Credits", credits)
-      + tile("Your plays", plays, subs.join(" · ")) + tile("The story", story, "", true);
+    el.tiles.innerHTML = tile("Pressing", pressing, pressingSub) + tile("Credits & samples", credits)
+      + tile("Your plays", plays, subs.join(" · ")) + tile(state ? `The story · ${esc(state.title)}` : "The story", story, "", true)
+      + (about ? tile("About the record", about, "", true) : "");
   }
 
   // ── gestures ─────────────────────────────────────────────────────────────
@@ -327,7 +346,7 @@
     if (Math.abs(dy) > 120 && Math.abs(dx) < 90 && dt < 900) {
       const inSheet = el.sheet.contains(start.target);
       if (dy < 0 && !inSheet) openSheet();
-      else if (dy > 0 && (!inSheet || el.sheet.scrollTop <= 0)) closeSheet();
+      else if (dy > 0 && (!inSheet || document.getElementById("sheetscroll").scrollTop <= 0)) closeSheet();
       return;
     }
     if (Math.abs(dx) < 12 && Math.abs(dy) < 12) tap(start.target);
