@@ -72,15 +72,12 @@
     if (key !== trackKey) {
       trackKey = key;
       el.title.textContent = st.title || "";
-      el.title.classList.toggle("long", (st.title || "").length > 16);
-      el.title.classList.toggle("xlong", (st.title || "").length > 26);
+      fitTitle();
       el.artist.textContent = st.artist || "";
       lyricIndex = -1;
       if (lyricsOn) loadLyrics(st);
     }
-    const bits = [st.album, st.year].filter(Boolean);
-    if (st.owned) bits.push("in your collection");
-    el.albumline.textContent = bits.join(" · ");
+    el.albumline.textContent = [st.album, st.year].filter(Boolean).join(" · ");
 
     if (st.art && st.art !== artKey) {
       artKey = st.art;
@@ -105,6 +102,21 @@
       renderList(st, rows);
     }
     renderSide(st, rows);
+  }
+
+  // Shrink the title until no word has to break (Plasticworld came out as "Plasticworl / d").
+  function fitTitle() {
+    const max = 108, min = 44;
+    let size = max;
+    el.title.style.fontSize = size + "px";
+    const fits = () => { const w = el.title.clientWidth; return [...el.title.childNodes].length === 0 ||
+      Array.from(el.title.textContent.split(/\s+/)).every((word) => measure(word, size) <= w); };
+    while (size > min && !fits()) { size -= 4; el.title.style.fontSize = size + "px"; }
+  }
+  const canvas = document.createElement("canvas").getContext("2d");
+  function measure(text, size) {
+    canvas.font = `700 ${size}px Inter, sans-serif`;
+    return canvas.measureText(text).width * 0.975;             // letter-spacing -0.025em
   }
 
   function renderList(st, rows) {
