@@ -34,6 +34,7 @@ class ScreenState:
     level_db: float = -120.0        # most recent audio level (listening state)
     motion: float | None = None     # spectral motion at the music gate (None = not measured)
     steady_noise: bool = False      # loud but standing still: an empty turntable, not music
+    deck_speed: float | None = None # measured turntable speed, 1.03 = 3 % fast (None = unknown)
 
     artist: str = ""
     title: str = ""

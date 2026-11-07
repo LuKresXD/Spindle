@@ -510,11 +510,23 @@ class Renderer:
                           fill=GREY_ROW_AUX, width=tick_w)
             y += self.row_h
 
+        # "N more" above/below: a small drawn triangle plus the count (the UI fonts
+        # have no arrow glyphs; text arrows rendered as boxes)
         f_hint = self._font("regular", self.size_meta)
-        for hint, hy in ((f"↑ {more_above}", top - self.size_meta - 4), (f"↓ {more_below}", y + 2)):
-            if hint[2:] != "0":
-                tw = draw.textlength(hint, font=f_hint)
-                draw.text((L.text_right - tw, hy), hint, fill=GREY_ROW_AUX, font=f_hint)
+        tri = max(4, round(6 * L.scale))
+        for count, hy, up in ((more_above, top - self.size_meta - 4, True),
+                              (more_below, y + 2, False)):
+            if count <= 0:
+                continue
+            label = str(count)
+            tw = draw.textlength(label, font=f_hint)
+            tx = L.text_right - tw
+            draw.text((tx, hy), label, fill=GREY_ROW_AUX, font=f_hint)
+            cx = tx - tri - round(8 * L.scale)
+            cy = hy + self.size_meta // 2 + 1
+            pts = ([(cx - tri, cy + tri // 2), (cx + tri, cy + tri // 2), (cx, cy - tri // 2)] if up
+                   else [(cx - tri, cy - tri // 2), (cx + tri, cy - tri // 2), (cx, cy + tri // 2)])
+            draw.polygon(pts, fill=GREY_ROW_AUX)
 
     def _footer_static(self, draw: Any, st: ScreenState, y0: int, accent: tuple) -> None:
         """Meta line at the top of the footer: position left, scrobble info right."""

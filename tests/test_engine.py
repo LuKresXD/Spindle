@@ -67,9 +67,13 @@ class Recorder:
 class FakeHistory:
     def __init__(self):
         self.rows = []
+        self.recent = set()                  # titles titles_since() reports
 
     def log(self, t, ts, source="live"):
         self.rows.append((t.title, source))
+
+    def titles_since(self, artist, since):
+        return set(self.recent)
 
 
 class FakeArt:
@@ -334,3 +338,41 @@ def test_music_gate_fails_open_without_a_motion_reading(tmp_path, clock):
         st = player.tick()
         clock.advance(2)
     assert st.phase == Phase.LISTENING and not st.steady_noise
+
+
+def test_ticks_from_recent_history_survive_the_flip(tmp_path, clock):
+    """Side A scrobbled Track 1 earlier tonight; on side B's session the row still shows done."""
+    player, cap, rec = make_player(tmp_path, clock, identify=lambda p: TrackInfo(
+        title="Track 2", artist="Madvillain", album="Madvillainy"))
+    player.history.recent = {"Track 1"}
+    cap.level = -30.0
+    for _ in range(4):
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.PLAYING and st.current_index == 1
+    assert st.tracklist[0].scrobbled and not st.tracklist[2].scrobbled
+    assert player.session.album_state.scrobbled == set()       # the session itself is clean
+
+
+def test_disagreeing_id_skips_the_locked_interval(tmp_path, clock):
+    """Locked on Track 1 by timing; a hit for Track 3 is not confirmed yet, so the
+    next window goes out on the very next tick instead of 8 s later."""
+    hits = {"n": 0}
+
+    def identify(p):
+        hits["n"] += 1
+        return TrackInfo(title="Track 1" if hits["n"] <= 2 else "Track 3", artist="Madvillain",
+                         album="Madvillainy")
+
+    player, cap, rec = make_player(tmp_path, clock, identify=identify)
+    cap.level = -30.0
+    for _ in range(4):                                           # lock on Track 1 (2 IDs)
+        player.tick()
+        clock.advance(2)
+    assert player.session.get_current_track().title == "Track 1"
+    before = cap.windows
+    for _ in range(5):                                           # 10 s: 1 locked-interval window
+        player.tick()
+        clock.advance(2)
+    assert cap.windows - before >= 2                             # ... plus the hurried confirmer
+    assert player.session.get_current_track().title == "Track 3"

@@ -93,6 +93,13 @@ class ScrobbleHistory:
         """Load entries since a given timestamp."""
         return [e for e in self._load_all() if e.timestamp >= since]
 
+    def titles_since(self, artist: str, since: float) -> set[str]:
+        """Lower-cased titles by `artist` scrobbled at or after `since` (the screen
+        keeps a record's ticks across the flip: side A stays done on side B)."""
+        key = artist.lower()
+        return {e.title.lower() for e in self._load_since(since)
+                if e.artist.lower() == key}
+
     @staticmethod
     def _period_start(period: str) -> float:
         """Convert period name to epoch start timestamp."""

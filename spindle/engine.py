@@ -39,7 +39,7 @@ from .history import ScrobbleHistory
 from .notify import Notifier
 from .resolve import ResolveContext, Resolved, Resolver
 from .scrobbler import Scrobbler
-from .session import ScrobbleSession, SessionMode
+from .session import ScrobbleSession, SessionMode, normalize_title
 from .state import Phase, ScreenState, TrackRow
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,10 @@ MUSIC_MOTION_MIN = 0.15
 # while nothing is recognised; a hit turns the run into a session.
 NOISE_IDENTIFY_FIRST = 20.0
 NOISE_IDENTIFY_MAX = 300.0
+# A track scrobbled from this record this recently still shows its tick after the
+# flip (the session itself resets on silence so a second play of a side counts).
+RECENT_PLAY_WINDOW = 6 * 3600.0
+RECENT_PLAY_REFRESH = 30.0
 
 
 # ── Identification worker ────────────────────────────────────────────────────
@@ -227,6 +231,10 @@ class Player:
         self.noise_since: float | None = None      # loud-but-steady input began (not music)
         self._noise_identify_at = 0.0
         self._noise_identify_interval = NOISE_IDENTIFY_FIRST
+        self._id_disagreed = False                 # last ID named a track the clock is not on
+        self._recent_titles: set[str] = set()      # this artist's titles scrobbled recently
+        self._recent_key = ""
+        self._recent_at = 0.0
 
         self.playing = _Playing()
         self._playcount_cache: dict[tuple[str, str], int | None] = {}
@@ -369,6 +377,10 @@ class Player:
                 al_scrobbled = len(al.scrobbled)
             if al_artist and al_scrobbled:
                 self.notifier.side_finished(al_artist, al_album or "", al_scrobbled, al_played)
+            if self.session.deck_speed_samples >= 3:
+                logger.info("Deck speed: %+.1f%% (%d offset pairs)",
+                            (self.session.deck_speed() - 1) * 100,
+                            self.session.deck_speed_samples)
             elif comp_count > 0 or self.session.comp_scrobbled_count > 0:
                 self.notifier.compilation_finished(
                     max(comp_count, self.session.comp_scrobbled_count))
@@ -381,6 +393,8 @@ class Player:
         self._end_noise_run()
         self.playing = _Playing()
         self.last_submit_at = 0.0
+        self._id_disagreed = False
+        self._recent_at = 0.0                      # the side that just ended adds ticks
 
     def _music_tick(self, now: float) -> None:
         self.silent_since = None
@@ -441,7 +455,10 @@ class Player:
         if self.worker.busy:
             return False
         locked = bool(self.session and self.session.is_locked())
-        if locked and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL:
+        # locked: identify slowly, unless the last hit disagreed with the clock (the
+        # record skipped, the needle moved): then the confirming ID should come now
+        if (locked and not self._id_disagreed
+                and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL):
             return False
         if self.capture.buffered_seconds() < self.capture.window_seconds:
             return False
@@ -481,6 +498,9 @@ class Player:
             was_album = s.locked_album_id
             was_mode = s.mode
             out = s.on_identified(resolved, self.music_since or at, at=at)
+            cur = s.get_current_track() if s.is_locked() else None
+            self._id_disagreed = bool(
+                cur is not None and normalize_title(cur.title) != normalize_title(track.title))
             if s.is_locked() and not was_locked:
                 self._finalize_simple(at)             # a simple-mode track gave way to the lock
             for t, ts in out:
@@ -602,17 +622,20 @@ class Player:
             tl = al.tracklist
             st.artist = tl.artist or st.artist
             st.album = tl.album_name or st.album
+            recent = self._recently_scrobbled(tl.artist, now)
             st.tracklist = [
                 TrackRow(title=tr.title, duration=tr.duration, position=tl.position_at(i),
-                         scrobbled=i in al.scrobbled)
+                         scrobbled=i in al.scrobbled or normalize_title(tr.title) in recent)
                 for i, tr in enumerate(tl.tracks)
             ]
             st.current_index = al.current_index
             st.year = tl.year
             cur = tl.get_track_at(al.current_index)
             st.track_duration = float(cur.duration) if cur and cur.duration else None
-            st.track_elapsed = max(0.0, now - al.current_track_start)
-            st.scrobbled = al.current_index in al.scrobbled
+            st.track_elapsed = max(0.0, (now - al.current_track_start) * s.deck_speed())
+            st.scrobbled = st.tracklist[al.current_index].scrobbled if st.tracklist else False
+            if s.deck_speed_samples >= 3:
+                st.deck_speed = s.deck_speed()
             st.session_scrobbles = len(al.scrobbled)
             st.position = tl.position_at(al.current_index)
             st.side = tl.side_at(al.current_index)
@@ -626,6 +649,20 @@ class Player:
 
         self._enrich(st)
         return st
+
+    def _recently_scrobbled(self, artist: str, now: float) -> set[str]:
+        """Normalised titles by `artist` scrobbled within RECENT_PLAY_WINDOW, from
+        the history file (refreshed every RECENT_PLAY_REFRESH seconds)."""
+        key = artist.lower()
+        if key != self._recent_key or now - self._recent_at >= RECENT_PLAY_REFRESH:
+            try:
+                titles = self.history.titles_since(artist, now - RECENT_PLAY_WINDOW)
+            except Exception as e:  # the screen must not depend on the history file
+                logger.debug("History lookup failed: %s", e)
+                titles = set()
+            self._recent_titles = {normalize_title(t) for t in titles}
+            self._recent_key, self._recent_at = key, now
+        return self._recent_titles
 
     def _enrich(self, st: ScreenState) -> None:
         ex = self.extras

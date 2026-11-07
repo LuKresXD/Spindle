@@ -194,6 +194,8 @@ class SpindleBot:
             ear = f"\n🎚 {st.level_db:.1f} dB · {st.phase.value}"
             if st.steady_noise:
                 ear += f" · steady noise, not music (motion {st.motion or 0:.2f})"
+            if st.deck_speed is not None:
+                ear += f" · deck {(st.deck_speed - 1) * 100:+.1f}%"
             if st.position:
                 ear += f" · {st.position}"
             if st.owned:

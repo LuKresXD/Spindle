@@ -72,6 +72,10 @@ ADVANCE_BUFFER_MAX   = 15    # max seconds past duration before auto-advance
 FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when nobody knows (4 min)
 REPLAY_SLACK         = 45    # s past a track's end: a backwards anchor is a replay, not lag
 OFFSET_TOLERANCE     = 5     # s: two offsets of one run must advance with the clock this closely
+SPEED_MIN_INTERVAL   = 20    # s between two offsets before their ratio counts as a speed sample
+SPEED_SAMPLES_MIN    = 3     # samples before the measured deck speed replaces the assumed 1.0
+SPEED_SAMPLES_MAX    = 60    # keep the newest this many (the deck's speed drifts slowly)
+SPEED_RANGE          = (0.90, 1.10)   # a ratio outside this is a bad offset, not a deck
 
 # ── Compilation detection ─────────────────────────────────────────────────────
 MISMATCH_THRESHOLD = 2      # consecutive different-artist IDs → switch to COMPILATION
@@ -145,8 +149,9 @@ class _Run:
     hits:       int = 0
     first_seen: float = 0.0          # window-end time of the run's first identification
     last_seen:  float = 0.0
-    ref:        tuple[float, float] | None = None   # (at, offset) of the first offset-bearing ID
+    ref:        tuple[float, float] | None = None   # (at, offset) of the last consistent ID
     start:      float | None = None  # at - offset - window, once a second offset confirms it
+    speed_ref:  tuple[float, float] | None = None   # (at, offset) the deck speed is measured from
 
 
 @dataclass
@@ -161,6 +166,7 @@ class AlbumState:
     scrobbled:           set   = field(default_factory=set)  # track indices scrobbled
     starts:              dict  = field(default_factory=dict) # index → wall-clock start, this pass
     completed:           set   = field(default_factory=set)  # indices timing ran to the end
+    start_exact:         bool  = False   # current_track_start came from agreeing offsets
     exhausted:           bool  = False   # advanced past the last track
     side_done:           bool  = False   # timing reached the end of the current side
 
@@ -209,6 +215,9 @@ class ScrobbleSession:
 
         # Confirmation gate: (artist_lower, title_lower) → the current run of IDs
         self._confirm: dict[tuple[str, str], _Run] = {}
+        # Deck speed samples (track seconds per wall second), kept across sessions:
+        # the turntable's speed is a property of the deck, not of one record
+        self._speed_samples: list[float] = []
 
     # ── Properties ───────────────────────────────────────────────────────────
 
@@ -279,8 +288,15 @@ class ScrobbleSession:
 
         duration = current.duration or FALLBACK_TRACK_DURATION
         elapsed = self._clock() - al.current_track_start
-        buffer = min(max(duration * VINYL_DRIFT, ADVANCE_BUFFER_MIN), ADVANCE_BUFFER_MAX)
-        if elapsed < duration + buffer:
+        # A deck running 3 % fast ends a 5-minute track 9 s early: predict the end
+        # with the measured speed. The drift buffer only covers what is still
+        # unknown: nothing much once the start came from agreeing offsets.
+        expected = duration / self.deck_speed()
+        if al.start_exact:
+            buffer = float(ADVANCE_BUFFER_MIN)
+        else:
+            buffer = min(max(duration * VINYL_DRIFT, ADVANCE_BUFFER_MIN), ADVANCE_BUFFER_MAX)
+        if elapsed < expected + buffer:
             return []
 
         result: list[tuple[TrackInfo, float]] = []
@@ -347,8 +363,21 @@ class ScrobbleSession:
         current = self._album.tracklist.get_track_at(self._album.current_index)
         if not current or not current.duration:
             return None
-        elapsed = min(self._clock() - self._album.current_track_start, current.duration)
-        return (elapsed, current.duration)
+        elapsed = (self._clock() - self._album.current_track_start) * self.deck_speed()
+        return (min(elapsed, current.duration), current.duration)
+
+    def deck_speed(self) -> float:
+        """Track seconds per wall second, measured from fingerprint offsets:
+        1.03 = the deck runs 3 % fast. 1.0 until enough samples exist."""
+        if len(self._speed_samples) < SPEED_SAMPLES_MIN:
+            return 1.0
+        s = sorted(self._speed_samples)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    @property
+    def deck_speed_samples(self) -> int:
+        return len(self._speed_samples)
 
     def current_track_start(self) -> float | None:
         if self.mode == SessionMode.ALBUM and self._album:
@@ -401,6 +430,14 @@ class ScrobbleSession:
                 if abs(drift) <= OFFSET_TOLERANCE + VINYL_DRIFT * (now - ref_at):
                     run.start = now - offset - self.window_seconds
                     run.ref = (now, offset)          # consistent: measure the next one from here
+                    if run.speed_ref is None:
+                        run.speed_ref = (ref_at, ref_offset)
+                    span = now - run.speed_ref[0]
+                    if span >= SPEED_MIN_INTERVAL:
+                        ratio = (offset - run.speed_ref[1]) / span
+                        if SPEED_RANGE[0] <= ratio <= SPEED_RANGE[1]:
+                            self._speed_samples.append(ratio)
+                            del self._speed_samples[:-SPEED_SAMPLES_MAX]
                 else:
                     run.start = None
                     logger.info("Session: offsets of '%s' disagree with the clock by %.0fs "
@@ -448,8 +485,9 @@ class ScrobbleSession:
     def _mark_scrobbled(self, track: TrackInfo) -> None:
         self._session_scrobbled.add(self._dedup_key(track))
 
-    def _set_current(self, index: int, start: float) -> None:
-        """Make `index` the current track, started at wall-clock `start`.
+    def _set_current(self, index: int, start: float, exact: bool = False) -> None:
+        """Make `index` the current track, started at wall-clock `start`
+        (`exact`: the start came from agreeing fingerprint offsets).
 
         Entering a track whose previous play on this pass is already over
         (its start lies a full duration before the new one) is a new play:
@@ -458,6 +496,7 @@ class ScrobbleSession:
         """
         al = self._album
         assert al is not None
+        al.start_exact = exact
         prev = al.starts.get(index)
         if prev is not None and index in al.scrobbled:
             track = al.tracklist.get_track_at(index)
@@ -647,8 +686,10 @@ class ScrobbleSession:
                 logger.info("Session: track %d started %.0fs %s than the clock thought (offset)",
                             track_index + 1, abs(start - al.current_track_start),
                             "later" if start > al.current_track_start else "earlier")
-                self._set_current(track_index, start)
+                self._set_current(track_index, start, exact=True)
                 al.side_done = False
+            elif start is not None and not al.start_exact:
+                al.start_exact = True                # the clock's guess was right: trust it
             elif al.side_done:
                 # the side "ended" by timing but the same track is still being heard:
                 # the timing model ran fast; keep showing it, the flip will come
@@ -658,11 +699,12 @@ class ScrobbleSession:
             until = start if start is not None else now
             gap, consumed, complete = self._fill_forward(al.current_index, track_index, until)
             result.extend(gap)
+            exact = start is not None
             if start is None:
                 # every gap track fit the clock: the anchored track began when they ran out;
                 # otherwise it began some time before it was first heard
                 start = min(now, al.current_track_start + consumed) if complete else heard
-            self._set_current(track_index, start)
+            self._set_current(track_index, start, exact=exact)
             al.side_done = False
             logger.info("Session: anchor → track %d (filled %d gap tracks)",
                         track_index + 1, len(gap))
@@ -694,7 +736,8 @@ class ScrobbleSession:
             result.extend(self._finalize_album_current(now))
             logger.info("Session: ↩  needle moved back to track %d (from %d)",
                         track_index + 1, al.current_index + 1)
-            self._set_current(track_index, start if start is not None else heard)
+            self._set_current(track_index, start if start is not None else heard,
+                              exact=start is not None)
         elif now - (prev_start + duration) <= REPLAY_SLACK and start is None:
             logger.info("Session: lagging ID of track %d (clock is on %d), re-syncing",
                         track_index + 1, al.current_index + 1)
@@ -712,7 +755,8 @@ class ScrobbleSession:
                 al.completed.discard(i)
             logger.info("Session: ↩  replay from track %d (%d scrobbled tracks eligible again)",
                         track_index + 1, len(replayed))
-            self._set_current(track_index, start if start is not None else heard)
+            self._set_current(track_index, start if start is not None else heard,
+                              exact=start is not None)
         al.side_done = False
         return result
 
@@ -854,7 +898,7 @@ class ScrobbleSession:
         for i, ts in reversed(filled):
             al.starts[i] = ts
             result.extend(self._try_scrobble(i, ts, force=True))
-        self._set_current(anchor_index, anchor_start)
+        self._set_current(anchor_index, anchor_start, exact=True)
         if result:
             logger.info("Session: retroactive backfill — %d tracks before track %d "
                         "(%.0fs of music before it, by offset)", len(result),
