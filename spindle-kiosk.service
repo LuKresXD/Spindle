@@ -18,6 +18,11 @@ StandardError=journal
 Environment=XDG_SESSION_TYPE=wayland
 # the KMS card with the HDMI connector (card0 on this Pi is the render-only v3d node)
 Environment=WLR_DRM_DEVICES=/dev/dri/card1
+# an invisible cursor theme: the compositor draws a cursor even for a touch-only seat
+# (python3 tools/make_blank_cursor.py /home/luka/.icons/blank)
+Environment=XCURSOR_PATH=/home/luka/.icons
+Environment=XCURSOR_THEME=blank
+Environment=XCURSOR_SIZE=16
 # wait for the web server, then show it full screen, no chrome, touch only
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/healthz >/dev/null && exit 0; sleep 1; done; exit 1'
 ExecStart=/usr/bin/cage -d -- /usr/bin/chromium \

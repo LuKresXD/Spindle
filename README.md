@@ -301,6 +301,8 @@ Install the kiosk once (Raspberry Pi OS, console boot, user `luka`):
 sudo apt install cage chromium
 sudo cp spindle-kiosk.service /etc/systemd/system/
 sudo systemctl daemon-reload
+python3 tools/make_blank_cursor.py ~/.icons/blank   # the compositor's cursor, hidden
+sudo cp spindle-touch.rules /etc/udev/rules.d/98-spindle-touch.rules
 sudo systemctl enable --now spindle-kiosk
 ```
 
