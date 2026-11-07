@@ -287,9 +287,10 @@
       const label = pr.labels && pr.labels.length ? pr.labels[0] : null;
       pressing = [label ? `<b>${esc(label.name)}</b>` : "", esc(pr.country), pr.year ? String(pr.year) : ""].filter(Boolean).join(" · ");
       const fmt = (pr.formats || []).join("; ");
-      const since = pr.added ? `in your collection since ${fmtDate(pr.added)}` : "";
       const catno = label && label.catno && !/^none$/i.test(label.catno) ? esc(label.catno) : "";
-      pressingSub = [esc(fmt), catno, since].filter(Boolean).join(" · ");
+      const price = pr.price_usd != null
+        ? `from $${Math.round(pr.price_usd)} on Discogs${pr.for_sale ? ` · ${pr.for_sale} for sale` : ""}` : "";
+      pressingSub = [esc(fmt), catno, price].filter(Boolean).join(" · ");
     } else {
       pressing = "Not in your Discogs collection";
     }

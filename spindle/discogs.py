@@ -376,8 +376,20 @@ class DiscogsCollection:
                      for a in t.get("extraartists", []) or []]
             if pos and extra:
                 by_track[pos] = extra
+        price = None
+        for_sale = None
+        try:
+            stats = self._get(f"/marketplace/stats/{rel.id}", params={"curr_abbr": "USD"})
+            lowest = stats.get("lowest_price") or {}
+            if lowest.get("value") is not None:
+                price = float(lowest["value"])
+            for_sale = stats.get("num_for_sale")
+        except (requests.RequestException, ValueError, TypeError) as e:
+            logger.debug("Discogs marketplace stats for %s failed: %s", rel.id, e)
         details = {
             "id": rel.id,
+            "price_usd": price,
+            "for_sale": for_sale,
             "labels": [{"name": lb.get("name", ""), "catno": lb.get("catno", "")}
                        for lb in data.get("labels", []) or []],
             "country": data.get("country", "") or "",

@@ -30,6 +30,7 @@ import time
 import urllib.parse
 from collections import OrderedDict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -71,11 +72,19 @@ class StateHub:
         self._art: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
         self._ended: dict | None = None
         self._clock = clock
+        self.on_album: Callable[[str, str], None] | None = None   # set by the server
+        self._album_seen: tuple[str, str] | None = None
 
     # publishing (tick thread) ------------------------------------------------
 
     def publish(self, st: ScreenState) -> None:
         payload = state_payload(st, self._clock())
+        if st.artist and st.album and self.on_album is not None:
+            album_key = (st.artist, st.album)
+            if album_key != self._album_seen:
+                self._album_seen = album_key
+                with contextlib.suppress(Exception):
+                    self.on_album(st.artist, st.album)
         if st.art:
             key = art_key(st.art)
             with self._cond:
@@ -226,6 +235,7 @@ class Info:
         self._http = http or requests.Session()
         self._http.headers["User-Agent"] = USER_AGENT
         self._cache: dict[str, dict] = {}
+        self._warming: set[str] = set()
         self._lock = threading.Lock()
 
     def get(self, artist: str, album: str) -> dict:
@@ -233,14 +243,35 @@ class Info:
         with self._lock:
             if key in self._cache:
                 return self._cache[key]
-        result = {
-            "pressing": self._pressing(artist, album),
-            "story": self._story(artist, album),
-            "plays": self._plays(artist, album),
-        }
+        # the three sources are independent network calls: run them side by side
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="info") as pool:
+            futs = {
+                "pressing": pool.submit(self._pressing, artist, album),
+                "story": pool.submit(self._story, artist, album),
+                "plays": pool.submit(self._plays, artist, album),
+            }
+            result = {k: f.result() for k, f in futs.items()}
         with self._lock:
             self._cache[key] = result
         return result
+
+    def prefetch(self, artist: str, album: str) -> None:
+        """Warm the cache off-thread so the sheet opens at once (called when the
+        album on screen changes)."""
+        key = f"{artist.lower()}|{album.lower()}"
+        with self._lock:
+            if key in self._cache or key in self._warming:
+                return
+            self._warming.add(key)
+
+        def run() -> None:
+            try:
+                self.get(artist, album)
+            finally:
+                with self._lock:
+                    self._warming.discard(key)
+
+        threading.Thread(target=run, name="info-prefetch", daemon=True).start()
 
     def _pressing(self, artist: str, album: str) -> dict | None:
         if self.collection is None:
@@ -431,6 +462,7 @@ class WebServer(ThreadingHTTPServer):
         self.hub = hub or StateHub()
         self.lyrics = Lyrics()
         self.info = Info(collection, scrobbler, history)
+        self.hub.on_album = self.info.prefetch
         self.stopping = False
         self._thread: threading.Thread | None = None
 

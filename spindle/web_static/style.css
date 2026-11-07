@@ -6,7 +6,7 @@
 
 :root {
   --pad-x: 84px; --pad-y: 72px;
-  --glass-fill: rgba(255,255,255,.10);
+  --glass-fill: rgba(255,255,255,.12);
   --glass-rim: rgba(255,255,255,.22);
   --text-dim: rgba(255,255,255,.62);
   --ease: cubic-bezier(.2,.8,.2,1);
@@ -102,23 +102,24 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 /* info sheet ---------------------------------------------------------------- */
 .sheet { position: absolute; left: var(--pad-x); right: var(--pad-x); bottom: 0; height: 760px;
   border-radius: 44px 44px 0 0; padding: 36px 44px; transform: translateY(104%); transition: transform .5s var(--ease); z-index: 5;
-  overflow-y: auto; touch-action: pan-y; background: rgba(20,10,24,.55); }
+  overflow-y: auto; touch-action: pan-y; background: rgba(24,14,30,.92); scrollbar-width: none; }
+.sheet::-webkit-scrollbar { display: none; }
 .sheet.open { transform: translateY(0); }
 .grab { width: 72px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.5); margin: 0 auto 30px; }
 .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
 .tile.wide { grid-column: 1 / -1; }
-.tile { border-radius: 28px; padding: 28px 30px; background: rgba(255,255,255,.07);
+.tile { border-radius: 28px; padding: 28px 30px; background: rgba(255,255,255,.09);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.28), inset 0 0 0 1px rgba(255,255,255,.05); min-height: 170px; }
 .tile h3 { font-size: 22px; font-weight: 600; letter-spacing: .06em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 16px; }
 .tile p { font-size: 30px; font-weight: 500; line-height: 1.35; }
 .tile p b { font-weight: 700; }
 .tile .sub { font-size: 24px; color: rgba(255,255,255,.65); margin-top: 8px; }
-body.sheet-open #home { opacity: .35; transition: opacity .5s var(--ease); }
+body.sheet-open #home { opacity: .18; transition: opacity .5s var(--ease); }
 body.sheet-open .corner { visibility: hidden; }
 
 /* end of side --------------------------------------------------------------- */
 .ended { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6; }
-.ended .card { width: 900px; padding: 56px 64px; text-align: center; animation: pop .5s var(--ease); background: rgba(20,10,24,.6); }
+.ended .card { width: 900px; padding: 56px 64px; text-align: center; animation: pop .5s var(--ease); background: rgba(24,14,30,.9); }
 .ended .title { font-size: 72px; margin-top: 14px; }
 .ended .artist { font-size: 34px; margin-top: 18px; }
 .kicker { font-size: 26px; letter-spacing: .08em; }
