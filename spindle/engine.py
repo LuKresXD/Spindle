@@ -56,8 +56,9 @@ HOT_INPUT_DB = -6.0          # RMS this high means the capture is clipping
 # Loud is not enough to be music: an empty turntable (motor, preamp, mains) can
 # sit above the threshold for as long as it spins, with a spectrum that never
 # moves. Music scores well above this on `capture.motion()`; the measured
-# empty-turntable noise scored 0.05-0.07 and the steadiest music 0.29.
-MUSIC_MOTION_MIN = 0.15
+# empty-turntable noise scored 0.05-0.07, the steadiest music 0.29, and a dense
+# drum-and-bass side (Pendulum) started at 0.15: the gate sits well under that.
+MUSIC_MOTION_MIN = 0.11
 # A record that really is this steady (a drone, a test tone) would never pass
 # the gate, so a steady input still gets a lookup now and then, backing off
 # while nothing is recognised; a hit turns the run into a session.

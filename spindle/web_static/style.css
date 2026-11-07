@@ -69,7 +69,8 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .meta { font-weight: 500; color: var(--text-dim); }
 .progress { margin-top: 62px; }
 .track { position: relative; height: 7px; border-radius: 4px; background: rgba(255,255,255,.26); overflow: hidden; }
-.track i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px; background: #fff; }
+.track i { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; border-radius: 4px; background: #fff;
+  transform: scaleX(0); transform-origin: left center; will-change: transform; }
 .times { display: flex; justify-content: space-between; margin-top: 18px; font-size: 24px; }
 
 .list { padding: 18px; display: flex; flex-direction: column; gap: 6px; }

@@ -158,18 +158,24 @@
   }
 
   // ── progress + lyrics clock ──────────────────────────────────────────────
-  let lastSide = 0;
+  // The bar moves by transform (composited) ten times a second; the clock text
+  // changes once a second; lyrics are checked every frame (cheap: an index compare).
+  let lastSide = 0, lastBar = 0, lastSec = -1;
   function frame() {
     if (state && state.phase === "playing") {
       const p = position();
-      if (p != null && state.track_duration) {
-        el.fill.style.width = (p / state.track_duration * 100).toFixed(2) + "%";
-        el.elapsed.textContent = mmss(p);
-        el.remaining.textContent = "-" + mmss(state.track_duration - p);
-      } else if (p != null) {
-        el.elapsed.textContent = mmss(p); el.remaining.textContent = ""; el.fill.style.width = "0%";
-      }
       const now = performance.now();
+      if (p != null && now - lastBar > 100) {
+        lastBar = now;
+        const frac = state.track_duration ? Math.min(1, p / state.track_duration) : 0;
+        el.fill.style.transform = `scaleX(${frac.toFixed(4)})`;
+        const sec = Math.floor(p);
+        if (sec !== lastSec) {
+          lastSec = sec;
+          el.elapsed.textContent = mmss(p);
+          el.remaining.textContent = state.track_duration ? "-" + mmss(state.track_duration - p) : "";
+        }
+      }
       if (now - lastSide > 5000) { lastSide = now; renderSide(state, state.tracklist || []); }
       if (lyricsOn && lyrics && p != null) highlightLyric(p);
     }
