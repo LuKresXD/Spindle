@@ -6,7 +6,7 @@
 
 :root {
   --pad-x: 84px; --pad-y: 72px;
-  --glass-fill: rgba(255,255,255,.075);
+  --glass-fill: rgba(255,255,255,.10);
   --glass-rim: rgba(255,255,255,.22);
   --text-dim: rgba(255,255,255,.62);
   --ease: cubic-bezier(.2,.8,.2,1);
@@ -30,18 +30,17 @@ button { font: inherit; color: inherit; border: 0; background: none; cursor: non
 body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 
 /* glass --------------------------------------------------------------------- */
+/* The backdrop is already a blurred cover, so a translucent fill reads as glass
+   without backdrop-filter (which re-blurs the screen every frame on the Pi). */
 .glass { position: relative; background: var(--glass-fill);
-  backdrop-filter: blur(26px) saturate(1.25); -webkit-backdrop-filter: blur(26px) saturate(1.25);
   border-radius: 36px; border: 1px solid var(--glass-rim);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.42), inset 0 -1px 0 rgba(255,255,255,.06),
               inset 0 0 0 1.5px rgba(255,255,255,.07), 0 18px 60px rgba(0,0,0,.28); overflow: hidden; }
 .glass::before { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
   background: radial-gradient(120% 55% at 10% 0%, rgba(255,255,255,.16), transparent 55%),
               linear-gradient(160deg, rgba(255,255,255,.06), transparent 45%, rgba(255,255,255,.04) 100%); }
-.glass::after { content: ""; position: absolute; inset: -40% -60%; pointer-events: none;
-  background: linear-gradient(115deg, transparent 42%, rgba(255,255,255,.10) 50%, transparent 58%);
-  transform: translateX(-60%); animation: sheen 14s var(--ease) infinite; }
-@keyframes sheen { 0%, 70% { transform: translateX(-60%); } 100% { transform: translateX(60%); } }
+.glass::after { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  background: linear-gradient(115deg, transparent 55%, rgba(255,255,255,.05) 70%, transparent 85%); }
 
 .pill { display: inline-flex; align-items: center; gap: 12px; padding: 14px 24px; border-radius: 999px;
   font-weight: 600; font-size: 24px; transition: background .25s var(--ease), transform .2s var(--ease); }
@@ -49,8 +48,7 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .pill:active { transform: scale(.96); }
 .pill.big { font-size: 30px; padding: 20px 34px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: #fff; box-shadow: 0 0 12px #fff; }
-.dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
-@keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+.dot.pulse { opacity: .8; }
 
 /* home ---------------------------------------------------------------------- */
 .stage { position: absolute; inset: 0; padding: var(--pad-y) var(--pad-x);
@@ -90,9 +88,9 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
   -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 12%, #000 78%, transparent 100%);
   mask-image: linear-gradient(180deg, transparent 0, #000 12%, #000 78%, transparent 100%); }
 .lyriclines { transition: transform .55s var(--ease); padding-top: 300px; }
-.lyric { font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; font-size: 48px; color: rgba(255,255,255,.38);
-  margin: 0 0 30px; transition: color .4s var(--ease), font-size .4s var(--ease); }
-.lyric.cur { color: #fff; font-size: 66px; }
+.lyric { font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; font-size: 52px; color: rgba(255,255,255,.38);
+  margin: 0 0 30px; transform-origin: left center; transition: color .4s var(--ease), transform .4s var(--ease); }
+.lyric.cur { color: #fff; transform: scale(1.22); }
 .lyric.empty { font-weight: 500; color: var(--text-dim); font-size: 30px; }
 
 .corner { position: absolute; right: var(--pad-x); bottom: 64px; display: flex; gap: 14px; }
@@ -104,27 +102,29 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 
 /* info sheet ---------------------------------------------------------------- */
 .sheet { position: absolute; left: var(--pad-x); right: var(--pad-x); bottom: 0; height: 760px;
-  border-radius: 44px 44px 0 0; padding: 36px 44px; transform: translateY(104%); transition: transform .5s var(--ease); z-index: 5; }
+  border-radius: 44px 44px 0 0; padding: 36px 44px; transform: translateY(104%); transition: transform .5s var(--ease); z-index: 5;
+  overflow-y: auto; touch-action: pan-y; background: rgba(20,10,24,.55); }
 .sheet.open { transform: translateY(0); }
 .grab { width: 72px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.5); margin: 0 auto 30px; }
 .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+.tile.wide { grid-column: 1 / -1; }
 .tile { border-radius: 28px; padding: 28px 30px; background: rgba(255,255,255,.07);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.28), inset 0 0 0 1px rgba(255,255,255,.05); min-height: 170px; }
 .tile h3 { font-size: 22px; font-weight: 600; letter-spacing: .06em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 16px; }
 .tile p { font-size: 30px; font-weight: 500; line-height: 1.35; }
 .tile p b { font-weight: 700; }
 .tile .sub { font-size: 24px; color: rgba(255,255,255,.65); margin-top: 8px; }
-body.sheet-open #home { filter: brightness(.55) blur(2px); transition: filter .5s var(--ease); }
+body.sheet-open #home { opacity: .35; transition: opacity .5s var(--ease); }
 body.sheet-open .corner { visibility: hidden; }
 
 /* end of side --------------------------------------------------------------- */
 .ended { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6; }
-.ended .card { width: 900px; padding: 56px 64px; text-align: center; animation: pop .5s var(--ease); }
+.ended .card { width: 900px; padding: 56px 64px; text-align: center; animation: pop .5s var(--ease); background: rgba(20,10,24,.6); }
 .ended .title { font-size: 72px; margin-top: 14px; }
 .ended .artist { font-size: 34px; margin-top: 18px; }
 .kicker { font-size: 26px; letter-spacing: .08em; }
 @keyframes pop { from { transform: scale(.94); opacity: 0; } to { transform: none; opacity: 1; } }
-body.ended-open #home { filter: brightness(.5) blur(3px); }
+body.ended-open #home { opacity: .3; }
 
 /* screen off (swipe right) ---------------------------------------------------- */
 .off { position: absolute; inset: 0; background: #000; z-index: 10; }

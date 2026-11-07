@@ -26,6 +26,7 @@ ExecStart=/usr/bin/cage -d -- /usr/bin/chromium \
   --disable-pinch --touch-events=enabled --autoplay-policy=no-user-gesture-required \
   --ozone-platform=wayland --force-device-scale-factor=1 --enable-gpu-rasterization \
   --ignore-gpu-blocklist --user-data-dir=/home/luka/.config/spindle-kiosk \
+  --remote-debugging-port=9222 --remote-allow-origins=http://127.0.0.1:9222 \
   http://127.0.0.1:8787/
 Restart=always
 RestartSec=3

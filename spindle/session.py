@@ -78,7 +78,8 @@ SPEED_SAMPLES_MAX    = 60    # keep the newest this many (the deck's speed drift
 SPEED_RANGE          = (0.90, 1.10)   # a ratio outside this is a bad offset, not a deck
 
 # ── Compilation detection ─────────────────────────────────────────────────────
-MISMATCH_THRESHOLD = 2      # consecutive different-artist IDs → switch to COMPILATION
+MISMATCH_THRESHOLD = 3      # different-artist IDs (spread over MISMATCH_MIN_SECONDS) → COMPILATION
+MISMATCH_MIN_SECONDS = 60   # a fingerprint confusion lasts a few windows; a mix lasts minutes
 CONFIRM_THRESHOLD  = 2      # times a track must be identified before acting on it
 CONFIRM_RUN_GAP    = 120    # s without hearing a track: its next ID starts a new run
 
@@ -206,6 +207,8 @@ class ScrobbleSession:
 
         self._album: AlbumState | None = None
         self._mismatch_count: int = 0
+        self._mismatch_since: float | None = None
+        self._abandoned: AlbumState | None = None     # the album a compilation switch left
         self._comp_count: int = 0
         self._comp_current: TrackInfo | None = None
         self._comp_start: float = 0.0
@@ -257,6 +260,9 @@ class ScrobbleSession:
             return []
 
         if self.mode == SessionMode.COMPILATION:
+            back = self._return_to_album(resolved, now)
+            if back is not None:
+                return back
             return self._handle_compilation_id(track, now)
 
         if not resolved.has_album:
@@ -395,6 +401,8 @@ class ScrobbleSession:
         self.mode = None
         self._album = None
         self._mismatch_count = 0
+        self._mismatch_since = None
+        self._abandoned = None
         self._comp_count = 0
         self._comp_current = None
         self._comp_start = 0.0
@@ -555,28 +563,43 @@ class ScrobbleSession:
         track_index = self._find_in_current_album(resolved)
         if track_index is not None:
             self._mismatch_count = 0
+            self._mismatch_since = None
             return self._apply_anchor(track_index, now, resolved.track)
 
-        # Not on the locked album. Same artist: catalogue confusion, ignore.
-        # Different artist: maybe a compilation.
-        if same_artist(resolved.track.artist, al.tracklist.artist):
-            logger.info("Session: '%s' is not on '%s' (same artist) — ignoring",
-                        resolved.track.title, al.tracklist.album_name)
+        # Not on the locked album. Same artist, or a title that names the locked
+        # artist (their remix of someone else's track): catalogue confusion, ignore.
+        # Different artist: maybe a compilation, but only once it has persisted.
+        if same_artist(resolved.track.artist, al.tracklist.artist) or \
+                _artist_key(al.tracklist.artist) in _artist_key(resolved.track.title):
+            logger.info("Session: '%s — %s' is not on '%s' (same artist) — ignoring",
+                        resolved.track.artist, resolved.track.title, al.tracklist.album_name)
             return []
 
+        if al.tracklist.owned:
+            # a record from the collection is this record: a stranger's name on it
+            # is a fingerprint confusion (Slam heard as the Prodigy remix, 2026-11-06)
+            logger.info("Session: '%s — %s' while locked on owned '%s' — ignoring",
+                        resolved.track.artist, resolved.track.title, al.tracklist.album_name)
+            return []
+
+        if self._mismatch_since is None:
+            self._mismatch_since = now
         self._mismatch_count += 1
-        logger.info("Session: mismatch %d/%d — '%s — %s' while locked on '%s'",
-                    self._mismatch_count, MISMATCH_THRESHOLD,
+        spread = now - self._mismatch_since
+        logger.info("Session: mismatch %d/%d over %.0fs — '%s — %s' while locked on '%s'",
+                    self._mismatch_count, MISMATCH_THRESHOLD, spread,
                     resolved.track.artist, resolved.track.title, al.tracklist.artist)
-        if self._mismatch_count < MISMATCH_THRESHOLD:
+        if self._mismatch_count < MISMATCH_THRESHOLD or spread < MISMATCH_MIN_SECONDS:
             return []
 
         logger.info("Session: 🎛  switching to COMPILATION mode (different artists on '%s')",
                     al.tracklist.album_name)
         result = self._finalize_album_current(now)
         self.mode = SessionMode.COMPILATION
+        self._abandoned = al
         self._album = None
         self._mismatch_count = 0
+        self._mismatch_since = None
         result.extend(self._handle_compilation_id(resolved.track, now))
         return result
 
@@ -951,6 +974,30 @@ class ScrobbleSession:
         return result, consumed, True
 
     # ── Compilation mode ──────────────────────────────────────────────────────
+
+    def _return_to_album(self, resolved: Resolved,
+                         now: float) -> list[tuple[TrackInfo, float]] | None:
+        """Compilation mode was entered from an album; the album's own track is
+        heard again: the switch was a confusion, go back where we were."""
+        al = self._abandoned
+        if al is None or not resolved.has_album or resolved.album_id != al.album_id:
+            return None
+        idx = al.tracklist.find_track_index(resolved.track.title)
+        if idx is None:
+            return None
+        result = self._finalize_comp(now)
+        self.mode = SessionMode.ALBUM
+        self._album = al
+        self._abandoned = None
+        start = self._offset_start(al.tracklist.get_track_at(idx) or resolved.track, now,
+                                   floor=al.current_track_start)
+        heard = min(now, self._first_seen(resolved.track, now))
+        self._set_current(idx, start if start is not None else heard, exact=start is not None)
+        al.exhausted = False
+        al.side_done = False
+        logger.info("Session: 🔒 back on %s / %s at track %d (the compilation switch was a "
+                    "confusion)", al.tracklist.artist, al.tracklist.album_name, idx + 1)
+        return result
 
     def _handle_compilation_id(self, track: TrackInfo, now: float) -> list[tuple[TrackInfo, float]]:
         """A new confirmed track in a mix: finish the previous one, start this one."""

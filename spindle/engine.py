@@ -459,12 +459,14 @@ class Player:
         Returns True when a job was submitted."""
         if self.worker.busy:
             return False
-        locked = bool(self.session and self.session.is_locked())
-        # locked: identify slowly, unless the last hit disagreed with the clock (the
-        # record skipped, the needle moved): then the confirming ID should come now
-        if (locked and not self._id_disagreed
-                and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL):
+        settled = bool(self.session and (self.session.is_locked()
+                                         or self.session.mode == SessionMode.COMPILATION))
+        # settled (album or mix): identify slowly; one hurried window right after a hit
+        # that disagreed with the clock (the record skipped, the needle moved)
+        if settled and not self._id_disagreed \
+                and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL:
             return False
+        self._id_disagreed = False
         if self.capture.buffered_seconds() < self.capture.window_seconds:
             return False
         wav = self.capture.window_wav()
@@ -500,9 +502,10 @@ class Player:
             was_album = s.locked_album_id
             was_mode = s.mode
             out = s.on_identified(resolved, self.music_since or at, at=at)
-            cur = s.get_current_track() if s.is_locked() else None
-            self._id_disagreed = bool(
-                cur is not None and normalize_title(cur.title) != normalize_title(track.title))
+            al = s.album_state if s.is_locked() else None
+            if al is not None:
+                idx = al.tracklist.find_track_index(track.title)
+                self._id_disagreed = idx is not None and idx != al.current_index
             if s.is_locked() and not was_locked:
                 self._finalize_simple(at)             # a simple-mode track gave way to the lock
             for t, ts in out:

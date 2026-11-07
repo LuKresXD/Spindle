@@ -129,7 +129,7 @@ def test_info_assembles_pressing_story_and_plays():
     out = info.get("Kanye West", "Graduation")
     assert out["pressing"]["country"] == "Europe" and out["pressing"]["added"] == "2026-11-06"
     assert out["story"]["text"].startswith("Graduation is the third")
-    assert "Fourth" not in out["story"]["text"]
+    assert out["story"]["text"].endswith("Fourth sentence.")           # the whole summary
     assert out["plays"]["user_plays"] == 158
 
 

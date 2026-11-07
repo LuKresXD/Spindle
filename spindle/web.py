@@ -272,10 +272,7 @@ class Info:
             extract = (page.get("extract") or "").strip()
             if not extract:
                 return None
-            sentences = re.split(r"(?<=[.!?])\s+", extract)
-            text = " ".join(sentences[:3])
-            if len(text) > 420:
-                text = text[:417].rsplit(" ", 1)[0] + "…"
+            text = extract if len(extract) <= 1400 else extract[:1397].rsplit(" ", 1)[0] + "…"
             return {"text": text, "title": page.get("title", title),
                     "url": page.get("content_urls", {}).get("desktop", {}).get("page", "")}
         except (requests.RequestException, ValueError, KeyError) as e:

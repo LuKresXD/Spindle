@@ -79,7 +79,7 @@
       if (lyricsOn) loadLyrics(st);
     }
     const bits = [st.album, st.year].filter(Boolean);
-    if (st.owned) bits.push("your pressing");
+    if (st.owned) bits.push("in your collection");
     el.albumline.textContent = bits.join(" · ");
 
     if (st.art && st.art !== artKey) {
@@ -260,7 +260,7 @@
     setTimeout(() => { if (!sheetOpen) el.sheet.classList.add("hidden"); }, 520);
   }
 
-  const tile = (h, p, sub) => `<div class="tile"><h3>${esc(h)}</h3><p>${p}</p>${sub ? `<p class="sub">${sub}</p>` : ""}</div>`;
+  const tile = (h, p, sub, wide) => `<div class="tile${wide ? " wide" : ""}"><h3>${esc(h)}</h3><p>${p}</p>${sub ? `<p class="sub">${sub}</p>` : ""}</div>`;
 
   function renderInfo(info) {
     const pr = info.pressing;
@@ -290,7 +290,7 @@
     if (pl.last_played) subs.push(`last played ${new Date(pl.last_played * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`);
     if (pl.listeners) subs.push(`${(pl.listeners / 1e6).toFixed(1)}M listeners worldwide`);
     el.tiles.innerHTML = tile("Pressing", pressing, pressingSub) + tile("Credits", credits)
-      + tile("The story", story) + tile("Your plays", plays, subs.join(" · "));
+      + tile("Your plays", plays, subs.join(" · ")) + tile("The story", story, "", true);
   }
 
   // ── gestures ─────────────────────────────────────────────────────────────
@@ -306,7 +306,9 @@
       return;                         // swipe left: reserved (Claw mode)
     }
     if (Math.abs(dy) > 120 && Math.abs(dx) < 90 && dt < 900) {
-      if (dy < 0) openSheet(); else closeSheet();
+      const inSheet = el.sheet.contains(start.target);
+      if (dy < 0 && !inSheet) openSheet();
+      else if (dy > 0 && (!inSheet || el.sheet.scrollTop <= 0)) closeSheet();
       return;
     }
     if (Math.abs(dx) < 12 && Math.abs(dy) < 12) tap(start.target);

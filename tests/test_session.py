@@ -161,6 +161,9 @@ def test_different_artists_switch_to_compilation_with_timing(clock, album):
     clock.advance(10)
     for _ in range(CONFIRM_THRESHOLD):
         out = s.on_identified(resolved_for(b, "Beta"), music_start)
+    assert out == [] and s.mode == SessionMode.ALBUM  # two within 10 s: still a confusion
+    clock.advance(55)                              # the strangers persist for over a minute
+    out = s.on_identified(resolved_for(b, "Beta"), music_start)
     assert s.mode == SessionMode.COMPILATION
     # the album track that had played enough was finalised on the switch
     assert [t.title for t, _ in out] == ["Track 1"]
@@ -463,3 +466,55 @@ def test_deck_speed_is_measured_from_offsets_and_drives_the_advance(clock, album
     assert s.check_advance() == []
     clock.t = start + 234 / 1.03 + 4                              # + 4 s: advanced
     assert [t.title for t, _ in s.check_advance()] == ["Track 6"]
+
+
+def test_owned_album_never_switches_to_compilation(clock):
+    """A stranger's name while locked on a record from the collection is a
+    fingerprint confusion (Slam heard as the Prodigy remix): ignored, forever."""
+    owned = make_album([115, 72, 109], owned=True, positions=["A1", "A2", "A3"])
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, owned, "Track 1", music_start)
+    prodigy = make_album([200], artist="The Prodigy", album="Jilted", album_id="p1",
+                         titles=["Voodoo People"])
+    for _ in range(8):
+        clock.advance(20)
+        s.on_identified(resolved_for(prodigy, "Voodoo People"), music_start)
+    assert s.mode == SessionMode.ALBUM and s.get_current_track().title in ("Track 1", "Track 2")
+
+
+def test_remix_naming_the_locked_artist_is_ignored(clock, album):
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    other = make_album([200], artist="The Prodigy", album="Single", album_id="p2",
+                       titles=["Voodoo People (Madvillain Remix)"])
+    for _ in range(4):
+        clock.advance(30)
+        s.on_identified(resolved_for(other, "Voodoo People (Madvillain Remix)"), music_start)
+    assert s.mode == SessionMode.ALBUM
+
+
+def test_compilation_switch_returns_to_the_album_when_its_track_is_heard(clock, album):
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    clock.advance(115 + 5 - 4)
+    s.check_advance()                                            # Track 1 scrobbled, on Track 2
+    a = make_album([200], artist="Someone Else", album="Mix A", album_id="x1", titles=["Alpha"])
+    for _ in range(3):
+        clock.advance(35)
+        for _ in range(CONFIRM_THRESHOLD):
+            s.on_identified(resolved_for(a, "Alpha"), music_start)
+    assert s.mode == SessionMode.COMPILATION                     # 3 over 70 s: switched
+    clock.advance(10)
+    back_at = clock.t
+    out = confirmed(s, album, "Track 3", music_start)            # the album is back
+    assert s.mode == SessionMode.ALBUM and s.is_locked()
+    assert s.get_current_track().title == "Track 3"
+    assert s.album_state.scrobbled == {0, 1}                     # what played before survives
+    assert s.album_state.current_track_start == back_at
+    assert out == []                                             # Alpha "played" 10 s: no scrobble
