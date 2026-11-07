@@ -37,6 +37,7 @@
   const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const serverNow = () => Date.now() / 1000 - clockOffset;
+  const fmtCount = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n);
   const sideOf = (pos) => (pos && /^[A-Za-z]/.test(pos)) ? pos[0].toUpperCase() : "";
   const fmtDate = (iso) => {
     if (!iso) return "";
@@ -325,7 +326,7 @@
     let plays = pl.user_plays != null ? `<b>${pl.user_plays}</b> plays of this record on Last.fm` : (info ? "No plays counted yet" : "Loading…");
     const subs = [];
     if (pl.last_played) subs.push(`last played ${new Date(pl.last_played * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`);
-    if (pl.listeners) subs.push(`${(pl.listeners / 1e6).toFixed(1)}M listeners worldwide`);
+    if (pl.listeners) subs.push(`${fmtCount(pl.listeners)} listeners on Last.fm`);
     el.tiles.innerHTML = tile("Pressing", pressing, pressingSub) + tile("Credits & samples", credits)
       + tile("Your plays", plays, subs.join(" · ")) + tile(state ? `The story · ${esc(state.title)}` : "The story", story, "", true)
       + (about ? tile("About the record", about, "", true) : "");
