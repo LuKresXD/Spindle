@@ -152,19 +152,20 @@ window.Motion = (() => {
     const R = chord / (2 * Math.sin((CURVE / 2) * Math.PI / 180));
     const edge = 95;
     const proxy = { o: hit - 9, f: 0 };          // o: the ring's position; f: the fade-in
-    // One quick setter per tile: a gsap.set per tile per frame built fifteen tween objects a
-    // frame, a third of the Pi's budget and a major GC mid-roll.
-    const set = imgs.map((img) => gsap.quickSetter(img, "css"));
+    let landed = false;
+    // The tiles are written straight to style, one string a tile a frame: a gsap.set per tile
+    // per frame built fifteen tween objects a frame, a third of the Pi's budget and a major GC
+    // mid-roll. The hit tile is handed back to GSAP (one set) before the hand-over.
     const place = () => {
       imgs.forEach((img, i) => {
+        if (landed && i === hit) return;
         const a = gsap.utils.clamp(-edge, edge, (i - proxy.o) * CURVE);
         const rad = a * Math.PI / 180;
         const dist = Math.abs(i - proxy.o);
-        set[i]({ x: Math.sin(rad) * R, z: -R * (1 - Math.cos(rad)), rotationY: -a,
-          opacity: proxy.f * gsap.utils.clamp(0, 1, 1.1 - dist * 0.33), scale: 1 - Math.min(0.18, dist * 0.04) });
+        img.style.transform = `translate(-50%, -50%) translate3d(${(Math.sin(rad) * R).toFixed(2)}px, 0px, ${(-R * (1 - Math.cos(rad))).toFixed(2)}px) rotateY(${(-a).toFixed(3)}deg) scale(${(1 - Math.min(0.18, dist * 0.04)).toFixed(4)})`;
+        img.style.opacity = (proxy.f * gsap.utils.clamp(0, 1, 1.1 - dist * 0.33)).toFixed(3);
       });
     };
-    gsap.set(imgs, { xPercent: -50, yPercent: -50, transformOrigin: "50% 50%" });
     place();
     // The tiles are placed first and fade in one by one over the first frames (never the
     // group: an opacity on the 3D parent costs an extra render pass every frame), so the
@@ -176,8 +177,12 @@ window.Motion = (() => {
       onStart: () => gsap.set(imgs, { visibility: "inherit" }) }, 0);   // the stylesheet hides a tile until it is placed
     tl.to(proxy, { o: hit, duration: D(1.9), ease: "power3.out", onUpdate: place }, 0.12);
     requestAnimationFrame(() => requestAnimationFrame(() => tl.play()));
-    tl.to(imgs.filter((_, i) => i !== hit), { autoAlpha: 0, duration: D(0.3), ease: MICRO, overwrite: "auto" }, ">-0.3");
-    if (onLand) tl.call(onLand, null, ">-0.02");
+    tl.to(imgs.filter((_, i) => i !== hit), { autoAlpha: 0, duration: D(0.3), ease: MICRO }, ">-0.3");
+    tl.call(() => {
+      landed = true;
+      if (imgs[hit]) gsap.set(imgs[hit], { xPercent: -50, yPercent: -50, x: 0, y: 0, z: 0, rotationY: 0, scale: 1, opacity: 1 });
+      if (onLand) onLand();
+    }, null, ">-0.02");
     return tl;
   }
   // The hit cover flies from its place on the wheel into the card's cover slot, then the
