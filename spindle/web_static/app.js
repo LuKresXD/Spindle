@@ -62,7 +62,8 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const serverNow = () => Date.now() / 1000 - clockOffset;
   const fmtCount = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n);
-  const sideOf = (pos) => (pos && /^[A-Za-z]/.test(pos)) ? pos[0].toUpperCase() : "";
+  // "A1" and "1A" (the Madvillainy pressing) both mean side A: the first letter in the position
+  const sideOf = (pos) => { const m = /[A-Za-z]/.exec(pos || ""); return m ? m[0].toUpperCase() : ""; };
   // "Maria I'm Drunk (feat. Justin Bieber & Young Thug)" → bare title + the feature credit,
   // shown on its own smaller line instead of stacking the title seven lines high.
   const FEAT_RE = /\s*[\(\[]\s*(?:feat|ft|featuring|with|w\/)\.?\s*([^\)\]]*)[\)\]]\s*$/i;
