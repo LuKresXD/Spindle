@@ -142,7 +142,7 @@
     clearTimeout(offTimer);
     el.pageOff.classList.toggle("arrived", pageIndex === OFF);
     if (pageIndex === OFF) offTimer = setTimeout(() => el.pageOff.classList.remove("arrived"), 2200);
-    if (pageIndex !== SPINDLE) hideIdle();
+    if (pageIndex === SPINDLE) showIdle(); else hideIdle();
   }
   function showDots(ms) {
     clearTimeout(dotsTimer);
@@ -519,12 +519,11 @@
   const IDLE_CONTROLS_MS = 12000;
   let idleOpen = false, idleTimer = 0;
   function showIdle() {
-    if (!state || state.phase !== "idle" || pageIndex !== SPINDLE) return;
+    if (!state || state.phase !== "idle" || pickOpen || shelfOpen || recentOpen) return;
     idleOpen = true;
     el.idle.classList.remove("hidden");
     requestAnimationFrame(() => el.idle.classList.add("shown"));
     armIdleTimer();
-    loadCollection().then((col) => sample(col.filter((r) => r.cover), 12).forEach((r) => { new Image().src = r.cover; }));
   }
   function armIdleTimer() { clearTimeout(idleTimer); idleTimer = setTimeout(hideIdle, IDLE_CONTROLS_MS); }
   function hideIdle() {
@@ -537,15 +536,45 @@
 
   // ── the shelf data ───────────────────────────────────────────────────────
   let collection = null;                  // [{id, artist, title, year, released, formats, added, cover}]
+  let collectionLoad = null;
   async function loadCollection() {
     if (collection) return collection;
-    try {
-      const r = await fetch("/api/collection");
-      const d = await r.json();
-      collection = d.releases || [];
-    } catch (e) { collection = []; }
-    return collection;
+    if (!collectionLoad) {
+      collectionLoad = fetch("/api/collection").then((r) => r.json())
+        .then((d) => { collection = d.releases || []; return collection; })
+        .catch(() => { collection = []; return collection; })
+        .finally(() => { collectionLoad = null; });
+    }
+    return collectionLoad;
   }
+  // Every cover is fetched and decoded once, a few at a time, as soon as the page is up,
+  // and the Image objects are kept so the browser cannot drop them: the wheel and the
+  // shelf then open with the pictures already there instead of loading them on the spot.
+  const covers = new Map();               // cover url → Image (decoded)
+  let preloading = false;
+  async function preloadCovers() {
+    if (preloading) return;
+    preloading = true;
+    try {
+      const col = await loadCollection();
+      const urls = col.map((r) => r.cover).filter((u) => u && !covers.has(u));
+      const lane = async () => {
+        while (urls.length) {
+          const u = urls.shift();
+          const img = new Image();
+          img.decoding = "async";
+          img.src = u;
+          covers.set(u, img);
+          try { await img.decode(); } catch (e) { covers.delete(u); }
+        }
+      };
+      await Promise.all([lane(), lane(), lane()]);
+    } finally { preloading = false; }
+  }
+  const ready = (urls, ms) => Promise.race([
+    Promise.all(urls.map((u) => { const img = covers.get(u) || Object.assign(new Image(), { src: u }); return img.decode().catch(() => {}); })),
+    new Promise((res) => setTimeout(res, ms)),
+  ]);
 
   // ── the pick ─────────────────────────────────────────────────────────────
   const WHEEL_TILE = 300 + 36;            // a cover plus the gap
@@ -569,6 +598,8 @@
     const tiles = [...sample(others, 9), card, ...sample(others, 2)];
     const hit = tiles.length - 3;
     el.wheelstrip.innerHTML = tiles.map((r) => `<img src="${esc(r.cover || "")}" alt="">`).join("");
+    await ready(tiles.map((r) => r.cover).filter(Boolean), 700);
+    if (serial !== pickSerial || !pickOpen) return;
     const centre = W() / 2 - 150;
     el.wheelstrip.style.transition = "none";
     el.wheelstrip.style.transform = `translateX(${centre}px)`;
@@ -681,6 +712,7 @@
       down.drag = true;
       el.pages.forEach((p) => p.classList.remove("anim"));
       showDots(0);
+      if (pageIndex !== SPINDLE) showIdle();
     }
     layoutPages(dx, false);
   }, { passive: true });
@@ -691,7 +723,7 @@
     if (start.drag) {
       const speed = Math.abs(dx) / Math.max(1, dt);                       // px per ms
       if (Math.abs(dx) > W() * 0.22 || speed > 0.6) showPage((pageIndex + (dx < 0 ? 1 : 2)) % 3, dx < 0 ? 1 : -1);
-      else { layoutPages(0, true); showDots(1200); }
+      else { layoutPages(0, true); showDots(1200); if (pageIndex !== SPINDLE) hideIdle(); }
       return;
     }
     if (Math.abs(dy) > 100 && Math.abs(dx) < 160 && dt < 1500) {
@@ -703,7 +735,7 @@
     if (Math.abs(dx) < 14 && Math.abs(dy) < 14) tap(start);
   }, { passive: true });
   document.addEventListener("pointercancel", () => {
-    if (down && down.drag) { layoutPages(0, true); showDots(1200); }
+    if (down && down.drag) { layoutPages(0, true); showDots(1200); if (pageIndex !== SPINDLE) hideIdle(); }
     down = null;
   });
   // The scroller owns vertical pans (touch-action: pan-y), so a pull-down on an open
@@ -778,6 +810,7 @@
         if (reconnected) { reconnected = false; infoFor = ""; trackFor = ""; info = null; trackInfo = null; collection = null; }
         apply(JSON.parse(e.data));
         if (sheetOpen && !info) loadInfo();
+        if (!collection && !collectionLoad) preloadCovers();
       } catch (err) { console.error(err); }
     };
     es.onerror = () => { es.close(); reconnected = true; setTimeout(connect, 2000); };

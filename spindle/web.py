@@ -769,7 +769,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": "no cover"}, HTTPStatus.NOT_FOUND)
             return
         ctype = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
-        self._send(HTTPStatus.OK, data, ctype, "max-age=86400")
+        self._send(HTTPStatus.OK, data, ctype, "max-age=604800")
 
     def _collection_random(self) -> None:
         raw = self._query().get("exclude", "")
