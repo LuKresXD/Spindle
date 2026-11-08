@@ -242,14 +242,15 @@ class _Shelf:
 
 
 class _Entry:
-    def __init__(self, artist, album, ts):
-        self.artist, self.album, self.timestamp = artist, album, ts
+    def __init__(self, artist, album, ts, title="Track"):
+        self.artist, self.album, self.timestamp, self.title = artist, album, ts, title
 
 
 class _History:
     def recent(self, count=10, artist=None):
-        return [_Entry("Kanye West", "Graduation", 300), _Entry("Kanye West", "Graduation", 240),
-                _Entry("Pendulum", "Hold Your Colour", 100), _Entry("X", "", 50)]
+        return [_Entry("Kanye West", "Graduation", 300, "Champion"),
+                _Entry("Kanye West", "Graduation", 240, "Good Morning"),
+                _Entry("Pendulum", "Hold Your Colour", 100, "Slam"), _Entry("X", "", 50)]
 
 
 def test_shelf_lists_draws_and_serves_cards(tmp_path):
@@ -342,3 +343,35 @@ def test_cover_variants_are_smaller_and_served(tmp_path):
         assert urllib.request.urlopen(f"{base}/art/{key}.jpg").read() == full
     finally:
         srv.stop()
+
+
+def test_shelf_rows_carry_prices_and_recent_says_how_much_was_played(tmp_path):
+    from spindle.web import Shelf
+    coll = _Shelf()
+    coll.rels[0].typical_usd, coll.rels[0].price_usd, coll.rels[0].for_sale = 61.0, 42.5, 7
+    coll.rels[1].price_usd = 30.0
+    coll.rels[1].tracks = [{"position": "A1", "title": "Good Morning"},
+                           {"position": "A2", "title": "Champion"},
+                           {"position": "B1", "title": "I Wonder"}]
+
+    class _Hist:
+        def recent(self, count=10, artist=None):
+            return [_Entry2("Kanye West", "Graduation", "Champion", 300),
+                    _Entry2("Kanye West", "Graduation", "Good Morning", 240),
+                    _Entry2("Pendulum", "Hold Your Colour", "Slam", 100)]
+    shelf = Shelf(coll, _Hist(), None, http=_Http({}), art_dir=tmp_path)
+    rows = {r["id"]: r for r in shelf.releases()["releases"]}
+    assert rows[1]["price"] == 61.0 and rows[1]["price_kind"] == "median"
+    assert rows[1]["for_sale"] == 7
+    assert rows[2]["price"] == 30.0 and rows[2]["price_kind"] == "lowest"
+    assert rows[3]["price"] is None and rows[3]["price_kind"] is None
+    recent = shelf.recent_albums()
+    grad = recent[0]
+    assert grad["tracks"] == 2 and grad["total"] == 3
+    assert grad["whole"] is False and grad["sides"] == ["A"]
+    assert recent[1]["total"] is None and recent[1]["sides"] == []
+
+
+class _Entry2:
+    def __init__(self, artist, album, title, ts):
+        self.artist, self.album, self.title, self.timestamp = artist, album, title, ts

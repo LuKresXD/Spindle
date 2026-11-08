@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 API = "https://api.discogs.com"
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "spindle" / "discogs"
 COLLECTION_TTL = 24 * 3600
+PRICE_TTL = 24 * 3600      # how old a record's marketplace price may get before it is asked again
 _UA = "spindle/0.2 +https://github.com/LuKresXD/Spindle"
 _MIN_GAP = 1.1          # seconds between API calls (stay well under 60/min)
 _RETRY_IN = 600         # seconds before retrying a failed collection refresh
@@ -99,6 +100,10 @@ class Release:
     cover: str = ""                                   # the cover image URL Discogs lists for it
     master_id: int = 0                                # its master release, 0 = none
     released: int | None = None    # ORIGINAL release year: None = not asked yet, 0 = unknown
+    price_usd: float | None = None     # the lowest copy for sale on Discogs, USD
+    typical_usd: float | None = None   # Discogs' suggested price for a VG+ copy (sales history)
+    for_sale: int | None = None        # copies for sale
+    priced_at: float = 0.0             # when the prices were last asked (0 = never)
 
     @property
     def positions(self) -> list[tuple[str, str]]:
@@ -112,7 +117,9 @@ class Release:
         return {"id": self.id, "artist": self.artist, "title": self.title, "year": self.year,
                 "formats": self.formats, "tracks": self.tracks, "loaded": self.loaded,
                 "added": self.added, "cover": self.cover, "master_id": self.master_id,
-                "released": self.released}
+                "released": self.released, "price_usd": self.price_usd,
+                "typical_usd": self.typical_usd, "for_sale": self.for_sale,
+                "priced_at": self.priced_at}
 
     @staticmethod
     def from_dict(r: dict) -> Release:
@@ -121,11 +128,15 @@ class Release:
             tracks = [{"position": p, "title": t, "duration": None, "artist": ""}
                       for p, t in r.get("positions", [])]
         released = r.get("released")
+        num = lambda v: None if v is None else float(v)  # noqa: E731
         return Release(int(r["id"]), r["artist"], r["title"], int(r.get("year") or 0),
                        list(r.get("formats") or []), tracks, bool(r.get("loaded")),
                        str(r.get("added") or ""), str(r.get("cover") or ""),
                        int(r.get("master_id") or 0),
-                       None if released is None else int(released))
+                       None if released is None else int(released),
+                       num(r.get("price_usd")), num(r.get("typical_usd")),
+                       None if r.get("for_sale") is None else int(r["for_sale"]),
+                       float(r.get("priced_at") or 0))
 
 
 class DiscogsCollection:
@@ -191,6 +202,7 @@ class DiscogsCollection:
                 self._refresh_if_stale()
                 self._prefetch_tracklists()
                 self._prefetch_masters()
+                self._prefetch_prices()
             except Exception as e:  # the thread must survive anything
                 logger.warning("Discogs background: %s", e)
             self._wake.wait(timeout=300)
@@ -203,6 +215,7 @@ class DiscogsCollection:
         self._refresh_if_stale()
         self._prefetch_tracklists()
         self._prefetch_masters()
+        self._prefetch_prices()
 
     # ── queries (memory only, never block on the network) ────────────────────
 
@@ -419,6 +432,55 @@ class DiscogsCollection:
                 rel.released = year or rel.year or 0
                 self._save_cache()
 
+    def _prefetch_prices(self) -> None:
+        """Every record's marketplace price, asked once a day (two calls each), kept in the
+        cache so the shelf can sort by price without a network call."""
+        while not self._stop.is_set():
+            now = time.time()
+            with self._lock:
+                pending = [r for r in self._releases if r.loaded and now - r.priced_at > PRICE_TTL]
+            if not pending:
+                return
+            rel = pending[0]
+            try:
+                price, typical, for_sale = self._fetch_prices(rel.id)
+            except requests.RequestException as e:
+                self.last_error = str(e)
+                logger.warning("Discogs: prices for %s failed: %s", rel.title, e)
+                return
+            with self._lock:
+                rel.price_usd, rel.typical_usd, rel.for_sale = price, typical, for_sale
+                rel.priced_at = now
+                cached = self._details.get(rel.id)
+                if cached is not None:
+                    cached.update({"price_usd": price, "typical_usd": typical,
+                                   "for_sale": for_sale})
+                self._save_cache()
+
+    def _fetch_prices(self, rid: int) -> tuple[float | None, float | None, int | None]:
+        """The lowest copy for sale and Discogs' VG+ suggestion, in USD. A 404 on the stats
+        (nothing ever sold) is not a failure; a network error is raised to the caller."""
+        price = None
+        for_sale = None
+        try:
+            stats = self._get(f"/marketplace/stats/{rid}", params={"curr_abbr": "USD"})
+            lowest = stats.get("lowest_price") or {}
+            if lowest.get("value") is not None:
+                price = float(lowest["value"])
+            for_sale = stats.get("num_for_sale")
+        except requests.HTTPError as e:
+            logger.debug("Discogs marketplace stats for %s: %s", rid, e)
+        typical = None            # Discogs' suggested price for a VG+ copy (sales-history based)
+        try:
+            sugg = self._get(f"/marketplace/price_suggestions/{rid}")
+            for cond in ("Very Good Plus (VG+)", "Near Mint (NM or M-)", "Very Good (VG)"):
+                if isinstance(sugg.get(cond), dict) and sugg[cond].get("value") is not None:
+                    typical = float(sugg[cond]["value"])
+                    break
+        except (requests.HTTPError, ValueError, TypeError) as e:
+            logger.debug("Discogs price suggestions for %s unavailable: %s", rid, e)
+        return price, typical, for_sale
+
     def release_details(self, rel: Release) -> dict:
         """Pressing facts for the display's info sheet, one API call per release,
         cached in memory: labels, country, year, formats, notes, credits."""
@@ -443,25 +505,17 @@ class DiscogsCollection:
                      for a in t.get("extraartists", []) or []]
             if pos and extra:
                 by_track[pos] = extra
-        price = None
-        for_sale = None
-        try:
-            stats = self._get(f"/marketplace/stats/{rel.id}", params={"curr_abbr": "USD"})
-            lowest = stats.get("lowest_price") or {}
-            if lowest.get("value") is not None:
-                price = float(lowest["value"])
-            for_sale = stats.get("num_for_sale")
-        except (requests.RequestException, ValueError, TypeError) as e:
-            logger.debug("Discogs marketplace stats for %s failed: %s", rel.id, e)
-        typical = None            # Discogs' suggested price for a VG+ copy (sales-history based)
-        try:
-            sugg = self._get(f"/marketplace/price_suggestions/{rel.id}")
-            for cond in ("Very Good Plus (VG+)", "Near Mint (NM or M-)", "Very Good (VG)"):
-                if isinstance(sugg.get(cond), dict) and sugg[cond].get("value") is not None:
-                    typical = float(sugg[cond]["value"])
-                    break
-        except (requests.RequestException, ValueError, TypeError) as e:
-            logger.debug("Discogs price suggestions for %s unavailable: %s", rel.id, e)
+        if rel.priced_at and time.time() - rel.priced_at < PRICE_TTL:
+            price, typical, for_sale = rel.price_usd, rel.typical_usd, rel.for_sale
+        else:
+            try:
+                price, typical, for_sale = self._fetch_prices(rel.id)
+                with self._lock:
+                    rel.price_usd, rel.typical_usd, rel.for_sale = price, typical, for_sale
+                    rel.priced_at = time.time()
+            except requests.RequestException as e:
+                logger.debug("Discogs prices for %s failed: %s", rel.id, e)
+                price, typical, for_sale = rel.price_usd, rel.typical_usd, rel.for_sale
         details = {
             "id": rel.id,
             "price_usd": price,

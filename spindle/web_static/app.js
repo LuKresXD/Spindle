@@ -758,16 +758,19 @@
     const by = (f) => (a, b) => f(a).localeCompare(f(b), "en", { sensitivity: "base" });
     if (shelfSort === "title") out.sort(by((r) => r.title));
     else if (shelfSort === "artist") out.sort((a, b) => by((r) => r.artist)(a, b) || (a.released || a.year || 0) - (b.released || b.year || 0));
+    else if (shelfSort === "price") out.sort((a, b) => (b.price ?? -1) - (a.price ?? -1) || by((r) => r.title)(a, b));
     return out;
   };
+  const priceTag = (r) => (r.price != null ? `$${Math.round(r.price)}` : "");
+  const tile = (r) => `<div class="shelfitem" data-id="${r.id}"><img src="${esc(tileUrl(r.cover))}" alt="${esc(r.title)}"><span class="price">${priceTag(r)}</span></div>`;
   async function openShelf() {
     hideIdle();
     shelfOpen = true;
     show(el.shelf);
     const col = await loadCollection();
     el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
-    el.shelfgrid.innerHTML = sorted(col).map((r) => `<img src="${esc(tileUrl(r.cover))}" data-id="${r.id}" alt="${esc(r.title)}">`).join("")
-      || `<div class="empty">Nothing on the shelf yet</div>`;
+    el.shelfgrid.innerHTML = sorted(col).map(tile).join("") || `<div class="empty">Nothing on the shelf yet</div>`;
+    el.shelfgrid.classList.toggle("priced", shelfSort === "price");
     el.shelfgrid.scrollTop = 0;
     M.arrive(el.shelf.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
     M.waveIn(el.shelfgrid.children);
@@ -779,18 +782,24 @@
     shelfSort = sort;
     [...el.shelfSort.children].forEach((b) => b.classList.toggle("on", b.dataset.sort === shelfSort));
     sortTray.to(el.shelfSort.querySelector(`[data-sort="${shelfSort}"]`));
-    const byId = new Map([...el.shelfgrid.querySelectorAll("img[data-id]")].map((n) => [n.dataset.id, n]));
+    const byId = new Map([...el.shelfgrid.querySelectorAll(".shelfitem[data-id]")].map((n) => [n.dataset.id, n]));
     const order = sorted(collection).map((r) => byId.get(String(r.id))).filter(Boolean);
     el.shelfgrid.scrollTop = 0;
+    el.shelfgrid.classList.toggle("priced", shelfSort === "price");
     M.flipGrid(el.shelfgrid, () => order.forEach((n) => el.shelfgrid.appendChild(n)));
   }
   function closeShelf() { shelfOpen = false; M.leave(el.shelf, { duration: 0.3, onComplete: () => { if (!shelfOpen) hide(el.shelf); } }); }
 
   async function openCard(id, fromShelf) {
-    try {
-      const card = await (await fetch(`/api/collection/${id}`)).json();
-      if (card && !card.error) { if (fromShelf) closeShelf(); closeRecent(); land(card, fromShelf); }
-    } catch (e) { /* the shelf stays */ }
+    // the row is in memory: open at once, the pressing and the plays follow
+    const row = (collection || []).find((r) => r.id === id);
+    const cardP = fetch(`/api/collection/${id}`).then((r) => r.json()).catch(() => null);
+    const first = row || await cardP;
+    if (!first || first.error) return;
+    if (fromShelf) closeShelf();
+    closeRecent();
+    land(first, fromShelf);
+    cardP.then((full) => { if (full && !full.error && pickCard && pickCard.id === full.id) fillCard(full); });
   }
 
   // ── recently played ──────────────────────────────────────────────────────
@@ -808,7 +817,8 @@
     el.recentlist.innerHTML = rows.map((r) => {
       const rel = r.release;
       const art = rel && rel.cover ? `<img src="${esc(tileUrl(rel.cover))}" alt="">` : `<div class="ph"></div>`;
-      const n = `${r.tracks} track${r.tracks === 1 ? "" : "s"}`;
+      const n = r.whole ? "Whole record" : (r.sides && r.sides.length) ? `Side${r.sides.length > 1 ? "s" : ""} ${r.sides.join(" and ")}`
+        : `${r.tracks} track${r.tracks === 1 ? "" : "s"}`;
       return `<div class="rrow ${rel ? "" : "off"}" ${rel ? `data-id="${rel.id}"` : ""}>${art}<div><div class="rt">${esc(r.album)}</div><div class="ra">${esc(r.artist)}</div></div><div class="rw">${esc(fmtDay(r.last_played))}<br>${n}</div></div>`;
     }).join("");
     M.arrive(el.recentlist.children, { x: -26, y: 0, stagger: 0.06, duration: 0.8 });

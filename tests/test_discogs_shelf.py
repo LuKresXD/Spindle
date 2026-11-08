@@ -69,3 +69,18 @@ def test_shelf_queries():
     assert c.release_by_id(2) is b and c.release_by_id(9) is None
     assert c.random_release({1}) is b                        # vinyl only, never the excluded one
     assert c.random_release({1, 2}) in (a, b)                 # nothing left: anything on vinyl
+
+
+def test_prices_are_asked_once_a_day_and_kept():
+    rel = Release(1, "Massive Attack", "Mezzanine", 2023, ["Vinyl"], [], True)
+    routes = {"/marketplace/stats/1": {"lowest_price": {"value": 42.5}, "num_for_sale": 7},
+              "/marketplace/price_suggestions/1": {"Very Good Plus (VG+)": {"value": 61.0}}}
+    c = _collection([rel], routes)
+    c._details = {}
+    c._prefetch_prices()
+    assert (rel.price_usd, rel.typical_usd, rel.for_sale) == (42.5, 61.0, 7) and rel.priced_at > 0
+    assert c.calls == ["/marketplace/stats/1", "/marketplace/price_suggestions/1"]
+    c._prefetch_prices()
+    assert len(c.calls) == 2                                           # fresh: not asked again
+    back = Release.from_dict(rel.to_dict())
+    assert back.typical_usd == 61.0 and back.for_sale == 7 and back.priced_at == rel.priced_at

@@ -51,6 +51,7 @@ import requests
 from .config import WebConfig
 from .discogs import clean_artist
 from .state import ScreenState
+from .tracklist import side_of, titles_match
 
 logger = logging.getLogger(__name__)
 
@@ -519,7 +520,7 @@ def derive_cover(data: bytes, variant: str) -> bytes:
     try:
         im = Image.open(io.BytesIO(data)).convert("RGB")
         size = COVER_VARIANTS[variant]
-        im.thumbnail((size, size), Image.LANCZOS)
+        im.thumbnail((size, size), Image.Resampling.LANCZOS)
         if variant == "blur":
             im = im.filter(ImageFilter.GaussianBlur(1.2))
             im = ImageEnhance.Color(im).enhance(BLUR_SATURATION)
@@ -563,10 +564,16 @@ class Shelf:
         return {"count": len(rows), "releases": rows}
 
     def _row(self, rel: Any) -> dict:
+        typical, lowest = getattr(rel, "typical_usd", None), getattr(rel, "price_usd", None)
+        price = typical if typical is not None else lowest
+        kind = None if price is None else ("median" if typical is not None else "lowest")
         return {"id": rel.id, "artist": clean_artist(rel.artist), "title": rel.title,
                 "year": rel.year or None, "released": rel.released or None,
                 "formats": list(rel.formats or []), "added": rel.added,
-                "cover": f"/art/collection/{rel.id}.jpg" if rel.cover else None}
+                "cover": f"/art/collection/{rel.id}.jpg" if rel.cover else None,
+                "price": price,
+                "price_kind": kind,
+                "for_sale": getattr(rel, "for_sale", None)}
 
     # one record ------------------------------------------------------------
 
@@ -700,28 +707,49 @@ class Shelf:
             logger.debug("History for the shelf failed: %s", e)
             return []
         out: list[dict] = []
-        seen: set[str] = set()
+        by_key: dict[str, dict] = {}
         for entry in entries:                          # newest first
             album = (entry.album or "").strip()
             if not album:
                 continue
             key = f"{entry.artist.lower()}|{album.lower()}"
-            if key in seen:
-                out[[o["key"] for o in out].index(key)]["tracks"] += 1
+            if key in by_key:
+                by_key[key]["titles"].add(entry.title.lower())
                 continue
-            seen.add(key)
+            if len(out) >= limit:
+                continue
             rel = None
             if self.collection is not None:
                 with contextlib.suppress(Exception):
                     rel = self.collection.find_release(entry.artist, album)
-            out.append({"key": key, "artist": clean_artist(entry.artist), "album": album,
-                        "last_played": entry.timestamp, "tracks": 1,
-                        "release": self._row(rel) if rel is not None else None})
-            if len(out) >= limit:
-                break
+            item = {"key": key, "artist": clean_artist(entry.artist), "album": album,
+                    "last_played": entry.timestamp, "titles": {entry.title.lower()}, "rel": rel}
+            by_key[key] = item
+            out.append(item)
         for o in out:
+            rel = o.pop("rel")
+            titles = o.pop("titles")
+            o["tracks"] = len(titles)
+            o["release"] = self._row(rel) if rel is not None else None
+            o.update(self._played_shape(rel, titles))
             o.pop("key")
         return out
+
+    @staticmethod
+    def _played_shape(rel: Any, titles: set[str]) -> dict:
+        """How much of the record the played titles cover: the whole record, whole sides,
+        or just a count. Matching is the tracklist's own loose title match."""
+        tracks = list(getattr(rel, "tracks", None) or []) if rel is not None else []
+        if not tracks:
+            return {"total": None, "whole": False, "sides": []}
+        by_side: dict[str, list[bool]] = {}
+        hit = 0
+        for t in tracks:
+            played = any(titles_match(t.get("title", ""), x) for x in titles)
+            hit += played
+            by_side.setdefault(side_of(t.get("position", "")) or "?", []).append(played)
+        sides = [s for s, flags in by_side.items() if s != "?" and flags and all(flags)]
+        return {"total": len(tracks), "whole": hit >= len(tracks), "sides": sorted(sides)}
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 

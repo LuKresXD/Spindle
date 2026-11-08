@@ -12,7 +12,7 @@ window.Motion = (() => {
   // ── tap feedback ──────────────────────────────────────────────────────────
   // A press squashes the control a little; the release springs it back with an
   // elastic settle. Delegated: anything matching PRESSABLE gets it.
-  const PRESSABLE = ".pill, .quiet button, .shelfgrid img, .rrow[data-id], .wheel3d img";
+  const PRESSABLE = ".pill, .quiet button, .shelfitem, .rrow[data-id], .wheel3d img";
   let pressed = null;
   function press(el) {
     pressed = el;
