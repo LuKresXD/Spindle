@@ -39,6 +39,23 @@
   let screenOff = false;
   let endedDismissed = null;              // `at` of an end-of-side card Luka tapped away
   let lastPhase = "";
+  // The engine confirms a track change a few seconds after it happens (a tick, then a
+  // fingerprint). When the start is pinned and the deck speed measured, the clock knows
+  // the end to a second: flip the page to the next track on the clock and let the engine
+  // catch up. If it disagrees for 10 s, fall back to what it says.
+  let serverState = null, flip = null;    // flip = { index, at (server seconds) }
+  const nextRowOf = (st) => {
+    const rows = st.tracklist || [], i = st.current_index;
+    if (i < 0 || i + 1 >= rows.length) return null;
+    return sideOf(rows[i].position) === sideOf(rows[i + 1].position) ? rows[i + 1] : null;   // never across a side
+  };
+  function viewOf(st) {
+    if (!flip) return st;
+    if (st.current_index >= flip.index || serverNow() - flip.at > 10) { flip = null; return st; }
+    const nxt = st.tracklist[flip.index];
+    return { ...st, title: nxt.title, position: nxt.position, current_index: flip.index, track_elapsed: 0,
+             track_duration: nxt.duration, updated_at: flip.at, scrobbled: !!nxt.scrobbled, start_exact: false };
+  }
 
   // ── helpers ──────────────────────────────────────────────────────────────
   const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
@@ -60,18 +77,21 @@
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   };
 
-  function position() {
+  function rawPosition() {
     if (!state || state.track_elapsed == null) return null;
-    const speed = state.deck_speed || 1;
-    let p = state.track_elapsed + Math.max(0, serverNow() - state.updated_at) * speed;
-    if (state.track_duration) p = Math.min(p, state.track_duration);
-    return p;
+    return state.track_elapsed + Math.max(0, serverNow() - state.updated_at) * (state.deck_speed || 1);
+  }
+  function position() {
+    const p = rawPosition();
+    return p == null ? null : (state.track_duration ? Math.min(p, state.track_duration) : p);
   }
 
   // ── phases ───────────────────────────────────────────────────────────────
   function apply(st) {
-    state = st;
+    serverState = st;
     clockOffset = Date.now() / 1000 - st.server_time;
+    st = viewOf(st);
+    state = st;
     // a tapped-away end card stays away; a new record coming on wakes a dark screen
     const ended = st.ended && st.ended.at !== endedDismissed ? st.ended : null;
     if (screenOff && st.phase === "playing" && lastPhase !== "playing") wake();
@@ -104,6 +124,7 @@
       lyricIndex = -1;
       loadLyrics(st);      // into the hidden panels too, so Lyrics and Info open instantly
       loadInfo();
+      warmNextLyrics(st);
     }
     el.albumline.textContent = [st.album, st.year].filter(Boolean).join(" · ");
 
@@ -225,11 +246,26 @@
       }
       if (now - lastSide > 5000) { lastSide = now; renderSide(state, state.tracklist || []); }
       if (lyricsOn && lyrics && p != null) highlightLyric(p + lyricLead());
+      if (!flip && state.start_exact && state.deck_speed && state.track_duration && serverState) {
+        const raw = rawPosition();
+        if (raw != null && raw >= state.track_duration + 0.4 && nextRowOf(state)) {
+          flip = { index: state.current_index + 1, at: serverNow() };
+          apply(serverState);
+        }
+      }
     }
     requestAnimationFrame(frame);
   }
 
   // ── lyrics ───────────────────────────────────────────────────────────────
+  function warmNextLyrics(st) {
+    const nxt = nextRowOf(st);
+    if (!nxt) return;
+    const q = new URLSearchParams({ artist: st.artist, title: nxt.title, album: st.album || "" });
+    if (nxt.duration) q.set("duration", String(Math.round(nxt.duration)));
+    fetch(`/api/lyrics?${q}`).catch(() => {});       // server-side cache only; rendered when it plays
+  }
+
   async function loadLyrics(st) {
     const key = `${st.artist}|${st.title}|${st.track_duration || ""}`;
     if (key === lyricsFor && lyrics) { renderLyrics(); return; }

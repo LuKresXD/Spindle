@@ -449,7 +449,8 @@ def test_offsets_tolerate_turntable_speed_drift(clock, album):
 
 def test_deck_speed_is_measured_from_offsets_and_drives_the_advance(clock, album):
     """IDs whose offsets gain 3 % on the clock: the deck runs fast, Track 6 (234 s)
-    ends after 227 s of wall time, and timing advances 3 s after that, not 15."""
+    ends after 227 s of wall time, and with the start pinned and the speed measured
+    timing advances half a second after that, not 15."""
     s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
     music_start = clock.t
     at, off = music_start + 10, 4.0
@@ -462,9 +463,9 @@ def test_deck_speed_is_measured_from_offsets_and_drives_the_advance(clock, album
     assert abs(s.deck_speed() - 1.03) < 0.002
     assert s.album_state.start_exact
     start = s.album_state.current_track_start
-    clock.t = start + 234 / 1.03 + 2                              # expected end + 2 s: not yet
+    clock.t = start + 234 / 1.03 + 0.3                            # expected end + 0.3 s: not yet
     assert s.check_advance() == []
-    clock.t = start + 234 / 1.03 + 4                              # + 4 s: advanced
+    clock.t = start + 234 / 1.03 + 0.8                            # + 0.8 s: advanced
     assert [t.title for t, _ in s.check_advance()] == ["Track 6"]
 
 

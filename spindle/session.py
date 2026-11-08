@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 VINYL_DRIFT          = 0.03  # ±3 % speed tolerance (wow/flutter/motor drift)
 NEEDLE_TOLERANCE     = 15    # seconds of needle-drop imprecision
 ADVANCE_BUFFER_MIN   = 3     # min seconds past duration before auto-advance
+ADVANCE_BUFFER_EXACT = 0.5   # ... once the start is pinned AND the deck speed is measured
 ADVANCE_BUFFER_MAX   = 15    # max seconds past duration before auto-advance
 FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when nobody knows (4 min)
 REPLAY_SLACK         = 45    # s past a track's end: a backwards anchor is a replay, not lag
@@ -301,7 +302,9 @@ class ScrobbleSession:
         # with the measured speed. The drift buffer only covers what is still
         # unknown: nothing much once the start came from agreeing offsets.
         expected = duration / self.deck_speed()
-        if al.start_exact:
+        if al.start_exact and len(self._speed_samples) >= SPEED_SAMPLES_MIN:
+            buffer = ADVANCE_BUFFER_EXACT           # the end is known to a second: switch on it
+        elif al.start_exact:
             buffer = float(ADVANCE_BUFFER_MIN)
         else:
             buffer = min(max(duration * VINYL_DRIFT, ADVANCE_BUFFER_MIN), ADVANCE_BUFFER_MAX)
