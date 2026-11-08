@@ -192,36 +192,20 @@ window.Motion = (() => {
   }
 
   // ── the shelf: a sort change is a Flip, not a re-render ───────────────────
-  // A sort of equal cells: measure, reorder, measure, and glide every tile that is on screen
-  // before or after from where it was to where it is. Two layouts in all; the Flip plugin's
-  // own pass forced one per tile on the Pi and froze the shelf for most of a second.
-  function flipGrid(grid, reorder) {
-    const items = Array.from(grid.children);
-    const box = grid.getBoundingClientRect();
-    const near = (r) => r.bottom > box.top - 60 && r.top < box.bottom + 60;
-    const before = items.map((el) => el.getBoundingClientRect());
-    gsap.killTweensOf(items);
-    gsap.set(items, { clearProps: "transform" });
-    reorder();
-    const moving = [], from = [];
-    items.forEach((el, i) => {
-      const a = before[i], b = el.getBoundingClientRect();
-      const dx = a.left - b.left, dy = a.top - b.top;
-      if ((Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) || !(near(a) || near(b))) return;
-      moving.push(el); from.push({ dx, dy });
-    });
-    if (!moving.length) return null;
-    gsap.set(moving, { x: (i) => from[i].dx, y: (i) => from[i].dy });
-    return gsap.to(moving, { x: 0, y: 0, duration: D(0.65), ease: "power4.inOut", stagger: 0.003, clearProps: "transform" });
+  // A sort of equal cells: each tile glides from where it was to where it is. The caller knows
+  // both (the grid's geometry is arithmetic), so nothing is measured and nothing is laid out;
+  // the transforms stay, they are the order.
+  function glide(items, from, to) {
+    if (!items.length) return null;
+    return gsap.fromTo(items, { x: (i) => from[i].x, y: (i) => from[i].y },
+      { x: (i) => to[i].x, y: (i) => to[i].y, duration: D(0.65), ease: "power4.inOut", stagger: 0.003 });
   }
-  // Covers wave in from the top left.
-  function waveIn(items, { cap = 35 } = {}) {
+  // Covers wave in from the top left (yPercent, so a sort's x/y offsets are left alone).
+  function waveIn(items) {
     const list = gsap.utils.toArray(items);
     if (!list.length) return null;
-    const first = list.slice(0, cap), rest = list.slice(cap);
-    gsap.set(rest, { autoAlpha: 1 });
-    return gsap.fromTo(first, { y: 30, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: D(0.8), ease: SETTLE,
-      stagger: { each: 0.018, from: "start" }, clearProps: "transform" });
+    return gsap.fromTo(list, { yPercent: 14, autoAlpha: 0 }, { yPercent: 0, autoAlpha: 1, duration: D(0.8), ease: SETTLE,
+      stagger: { each: 0.018, from: "start" } });
   }
 
   // ── numbers roll like an odometer: each digit a column of 0-9 behind a mask ────────
@@ -297,5 +281,5 @@ window.Motion = (() => {
   }
 
   return { D, reduced, revealLines, revealWords, arrive, leave, fade, tray, rowGlide, handOver, odometer, countUp, weight, parallaxHead,
-           pageLayout, pageCommit, pageCancel, pageRest, wheel, flipGrid, waveIn, boot, gsap };
+           pageLayout, pageCommit, pageCancel, pageRest, wheel, glide, waveIn, boot, gsap };
 })();

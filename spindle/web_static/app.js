@@ -189,6 +189,7 @@
       if (pageIndex !== SPINDLE) showPage(SPINDLE, pageIndex === OFF ? 1 : -1);
     }
     lastPhase = st.phase;
+    if (st.phase !== "idle") unprepareShelf();
     el.body.className = `phase-${st.phase}` + (sheetOpen ? " sheet-open" : "") + (ended ? " ended-open" : "");
     el.home.classList.toggle("hidden", !playing && !ended);
     requestAnimationFrame(() => el.home.classList.toggle("shown", playing || !!ended));
@@ -612,6 +613,7 @@
     show(el.idle);
     M.arrive([el.idle.querySelector(".kicker"), el.btnPick, el.idle.querySelector(".quiet")], { y: 24, stagger: 0.09 });
     armIdleTimer();
+    scheduleShelfPrep(1200);
   }
   function armIdleTimer() { clearTimeout(idleTimer); idleTimer = setTimeout(hideIdle, IDLE_CONTROLS_MS); }
   function hideIdle() {
@@ -644,7 +646,7 @@
     preloading = true;
     try {
       const col = await loadCollection();
-      if (!shelfOpen) buildGrid(col);        // the shelf is laid out while nobody is looking
+      if (!shelfOpen) { buildGrid(col); scheduleShelfPrep(3000); }   // see prepareShelf
       const urls = col.flatMap((r) => (r.cover ? [r.cover, tileUrl(r.cover), blurUrl(r.cover)] : [])).filter((u) => !covers.has(u));
       const lane = async () => {
         while (urls.length) {
@@ -787,16 +789,63 @@
     return out;
   };
   const priceTag = (r) => (r.price != null ? `$${Math.round(r.price)}` : "");
-  const tile = (r, i) => `<div class="shelfitem" data-id="${r.id}"><img src="${esc(tileUrl(r.cover))}" alt="${esc(r.title)}"${i >= 28 ? ' loading="lazy"' : ""} decoding="async"><span class="price">${priceTag(r)}</span></div>`;
-  // The grid stays built between openings (the Pi paid for the 87 tiles every time);
-  // it is rebuilt only when the collection, its prices or the order changed.
-  let shelfKey = "";
-  const gridKey = (col) => `${shelfSort}|${col.map((r) => `${r.id}:${r.price ?? ""}`).join(",")}`;
+  const tile = (r) => `<div class="shelfitem" data-id="${r.id}"><img src="${esc(tileUrl(r.cover))}" alt="${esc(r.title)}" decoding="async"><span class="price">${priceTag(r)}</span></div>`;
+  // ── the shelf grid ───────────────────────────────────────────────────────
+  // DOM order is the collection's own (newest first) and is built once; a sort is a permutation
+  // laid over it with transforms, so the tiles' layers move and nothing is laid out or painted
+  // again. The geometry mirrors style.css: 216 px cells, 40 px row gap, seven columns spread
+  // edge to edge.
+  const CELL = 216, ROW = 256, COLS = 7;
+  let shelfKey = "", placedSort = "recent";
+  const gridKey = (col) => col.map((r) => `${r.id}:${r.price ?? ""}`).join(",");
   function buildGrid(col) {
     const key = gridKey(col);
     if (key === shelfKey) return;
-    shelfKey = key;
-    el.shelfgrid.innerHTML = sorted(col).map(tile).join("") || `<div class="empty">Nothing on the shelf yet</div>`;
+    shelfKey = key; placedSort = "recent";
+    el.shelfgrid.innerHTML = col.map(tile).join("") || `<div class="empty">Nothing on the shelf yet</div>`;
+  }
+  const slotPos = (i, step) => ({ x: (i % COLS) * step, y: Math.floor(i / COLS) * ROW });
+  const slotRow = (n) => Math.floor((+n.dataset.slot || 0) / COLS);
+  const rowsOnScreen = () => Math.ceil(el.shelfgrid.clientHeight / ROW) + 1;
+  // Every tile to its slot under the current sort; the ones on screen before or after glide.
+  function placeShelf(animate) {
+    if (!collection || !collection.length) return null;
+    const kids = [...el.shelfgrid.children];
+    const step = (el.shelfgrid.clientWidth - CELL) / (COLS - 1);
+    const rows = rowsOnScreen(), topRow = Math.floor(el.shelfgrid.scrollTop / ROW), scrolled = el.shelfgrid.scrollTop;
+    const slotOf = new Map(sorted(collection).map((r, v) => [String(r.id), v]));
+    const seen = (slot, first) => { const row = Math.floor(slot / COLS); return row >= first && row < first + rows; };
+    const moving = [], from = [], to = [];
+    M.gsap.killTweensOf(kids, "x,y");
+    kids.forEach((n, d) => {
+      const v = slotOf.get(n.dataset.id);
+      if (v == null) return;
+      const was = n.dataset.slot === undefined ? d : +n.dataset.slot;
+      n.dataset.slot = v;
+      const p = slotPos(v, step), q = slotPos(d, step), w = slotPos(was, step);
+      const target = { x: p.x - q.x, y: p.y - q.y };
+      if (animate && (seen(was, topRow) || seen(v, 0))) { moving.push(n); from.push({ x: w.x - q.x, y: w.y - q.y - scrolled }); to.push(target); }
+      else M.gsap.set(n, target);
+    });
+    el.shelfgrid.scrollTop = 0;
+    placedSort = shelfSort;
+    return M.glide(moving, from, to);
+  }
+  const visualOrder = () => [...el.shelfgrid.children].sort((a, b) => (+a.dataset.slot || 0) - (+b.dataset.slot || 0));
+  // The shelf is laid out and layered while nobody is looking (a quiet moment after the idle
+  // controls arrive), so the tap that opens it pays for nothing but the wave.
+  let prepTimer = 0;
+  function scheduleShelfPrep(ms) { clearTimeout(prepTimer); prepTimer = setTimeout(prepareShelf, ms); }
+  function prepareShelf() {
+    if (shelfOpen || pickOpen || !collection || !state || state.phase !== "idle" || !el.shelf.classList.contains("hidden")) return;
+    buildGrid(collection);
+    el.shelf.classList.remove("hidden");
+    M.gsap.set(el.shelf, { autoAlpha: 0 });
+  }
+  function unprepareShelf() {
+    if (shelfOpen || el.shelf.classList.contains("hidden")) return;
+    hide(el.shelf);
+    M.gsap.set(el.shelf, { clearProps: "opacity,visibility" });
   }
   async function openShelf() {
     hideIdle();
@@ -805,10 +854,11 @@
     const col = await loadCollection();
     el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
     buildGrid(col);
+    if (placedSort !== shelfSort) placeShelf(false);
     el.shelfgrid.classList.toggle("priced", shelfSort === "price");
     el.shelfgrid.scrollTop = 0;
     M.arrive(el.shelf.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
-    M.waveIn(el.shelfgrid.children, { cap: 21 });
+    M.waveIn(visualOrder().slice(0, 21));
     [...el.shelfSort.children].forEach((b) => b.classList.toggle("on", b.dataset.sort === shelfSort));
     sortTray.place(el.shelfSort.querySelector(`[data-sort="${shelfSort}"]`));
   }
@@ -817,22 +867,23 @@
     shelfSort = sort;
     [...el.shelfSort.children].forEach((b) => b.classList.toggle("on", b.dataset.sort === shelfSort));
     sortTray.to(el.shelfSort.querySelector(`[data-sort="${shelfSort}"]`));
-    const byId = new Map([...el.shelfgrid.querySelectorAll(".shelfitem[data-id]")].map((n) => [n.dataset.id, n]));
-    const order = sorted(collection).map((r) => byId.get(String(r.id))).filter(Boolean);
     const priced = shelfSort === "price";
     if (!priced) el.shelfgrid.classList.remove("priced");             // the tags fall away as the tiles set off
-    const tl = M.flipGrid(el.shelfgrid, () => { order.forEach((n) => el.shelfgrid.appendChild(n)); el.shelfgrid.scrollTop = 0; });
-    shelfKey = gridKey(collection);
+    const tl = placeShelf(true);
     const tagsIn = () => {                                            // ...and come back once everything has landed
       if (!priced || shelfSort !== "price") return;
       el.shelfgrid.classList.add("priced");
-      const box = el.shelfgrid.getBoundingClientRect();
-      const pills = [...el.shelfgrid.querySelectorAll(".shelfitem .price")].filter((n) => { const r = n.parentElement.getBoundingClientRect(); return r.top < box.bottom && n.textContent; });
+      const rows = rowsOnScreen();
+      const pills = [...el.shelfgrid.children].filter((n) => slotRow(n) < rows).map((n) => n.querySelector(".price")).filter((x) => x && x.textContent);
       M.gsap.fromTo(pills, { autoAlpha: 0 }, { autoAlpha: 1, duration: M.D(0.35), stagger: 0.012, clearProps: "opacity,visibility" });
     };
     if (tl) tl.eventCallback("onComplete", tagsIn); else tagsIn();
   }
-  function closeShelf() { shelfOpen = false; M.leave(el.shelf, { duration: 0.3, onComplete: () => { if (!shelfOpen) hide(el.shelf); } }); }
+  // Closed, the shelf stays laid out (faded to nothing) while the platter is idle; see prepareShelf.
+  function closeShelf() {
+    shelfOpen = false;
+    M.leave(el.shelf, { duration: 0.3, onComplete: () => { if (!shelfOpen && (!state || state.phase !== "idle")) unprepareShelf(); } });
+  }
 
   async function openCard(id, fromShelf) {
     // the row is in memory: open at once, the pressing and the plays follow

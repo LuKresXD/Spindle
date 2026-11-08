@@ -19,6 +19,9 @@ fade. Staggers between 0.03 and 0.08 s. Anything that reveals text does it throu
 
 Only `transform` and `opacity` animate. No `backdrop-filter`, no layout properties, no
 filters: the Raspberry Pi composites transforms for free and pays for everything else.
+"For free" needs the element to be its own layer, and this Chromium does not make one for a
+script-driven transform (a trace of the kiosk showed the shelf re-rastering the whole page
+on every frame of its wave): anything the motion layer moves declares `will-change`.
 `prefers-reduced-motion` turns every tween into a cut.
 
 ## Where it goes
@@ -38,8 +41,9 @@ filters: the Raspberry Pi composites transforms for free and pays for everything
 - **The pick.** The covers sit on a curve in depth (a spatial carousel); the roll is one `big`
   tween through the ring that slows into the hit, which comes forward as the card builds:
   cover, masked title and artist, meta, buttons, hint, each a beat apart.
-- **The shelf.** Covers wave in from the top left. A sort change is a Flip: every cover travels
-  to its new place instead of the grid re-rendering.
+- **The shelf.** Covers wave in from the top left. A sort glides every cover on screen to its
+  new place; the grid itself is never re-laid out (the order is a set of transforms over tiles
+  built once, each its own layer).
 - **Recently played.** Rows slide in from the left, a beat apart.
 - **Info.** The sheet slides with `house`; the masthead and sections stagger in.
 - **End of side.** "Flip for Side B" arrives word by word through masks.
