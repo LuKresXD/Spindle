@@ -43,6 +43,9 @@ Discogs tracklist alone. The design is written up in [`docs/ENGINE.md`](docs/ENG
   <img src="docs/screens/lyrics.jpg" alt="Time-synced lyrics" width="440">
   <img src="docs/screens/info.jpg" alt="The liner notes page: story, credits, samples, your history" width="440">
 </p>
+<p align="center">
+  <img src="docs/screens/flip.gif" alt="A track ends; the page flips to the next one on the clock" width="720">
+</p>
 
 Since v0.3 the screen is a web page Spindle serves itself, shown full screen by Chromium under
 the `cage` Wayland compositor on a 13.3-inch 1080p OLED with touch. Everything sits on the
@@ -59,6 +62,11 @@ blurred cover; idle is pure black, so the panel is off until the needle drops.
   Everything is prefetched on each track change, so it opens at once.
 - **End of side**: "Side A · finished / Flip for Side B / 5 tracks scrobbled". A tap turns the
   screen off; a new record wakes it.
+
+<p align="center">
+  <img src="docs/screens/end-of-side.jpg" alt="End of side" width="720">
+</p>
+
 - **Gestures**: swipe down, tap the top band or pull past the top to close Info; swipe right for
   a dark screen; tap to wake.
 
