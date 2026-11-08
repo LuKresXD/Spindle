@@ -37,6 +37,8 @@
   let trackInfo = null;                   // Genius: story, samples, producers
   let sheetOpen = false;
   let screenOff = false;
+  let endedDismissed = null;              // `at` of an end-of-side card Luka tapped away
+  let lastPhase = "";
 
   // ── helpers ──────────────────────────────────────────────────────────────
   const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
@@ -70,14 +72,18 @@
   function apply(st) {
     state = st;
     clockOffset = Date.now() / 1000 - st.server_time;
-    el.body.className = `phase-${st.phase}` + (sheetOpen ? " sheet-open" : "") + (st.ended ? " ended-open" : "");
+    // a tapped-away end card stays away; a new record coming on wakes a dark screen
+    const ended = st.ended && st.ended.at !== endedDismissed ? st.ended : null;
+    if (screenOff && st.phase === "playing" && lastPhase !== "playing") wake();
+    lastPhase = st.phase;
+    el.body.className = `phase-${st.phase}` + (sheetOpen ? " sheet-open" : "") + (ended ? " ended-open" : "");
     const playing = st.phase === "playing";
-    el.home.classList.toggle("hidden", !playing && !st.ended);
-    requestAnimationFrame(() => el.home.classList.toggle("shown", playing || !!st.ended));
+    el.home.classList.toggle("hidden", !playing && !ended);
+    requestAnimationFrame(() => el.home.classList.toggle("shown", playing || !!ended));
     el.listening.classList.toggle("hidden", st.phase !== "listening");
     if (playing) renderHome(st);
-    renderEnded(st);
-    if (!playing && !st.ended) {
+    renderEnded(ended);
+    if (!playing && !ended) {
       closeSheet();
       // idle and listening are black: the last record's blurred cover must not linger
       // (the end-of-side card keeps it; once that goes, so does the backdrop)
@@ -181,8 +187,7 @@
     el.sidetext.textContent = parts.join(" · ") || "Now playing";
   }
 
-  function renderEnded(st) {
-    const e = st.ended;
+  function renderEnded(e) {
     el.ended.classList.toggle("hidden", !e);
     if (!e) return;
     const n = `${e.scrobbled} track${e.scrobbled === 1 ? "" : "s"} scrobbled`;
@@ -430,6 +435,13 @@
 
   function tap(start) {
     const target = start.target;
+    if (state && state.ended && state.ended.at !== endedDismissed) {
+      // "Flip for Side B" / "That's the record" tapped: he is not playing the rest, go dark
+      endedDismissed = state.ended.at;
+      apply(state);
+      sleep();
+      return;
+    }
     if (sheetOpen) { if (!el.sheet.contains(target) || closeZone(target) || start.y < 140) closeSheet(); return; }
     if (el.btnLyrics.contains(target) || el.title.contains(target) || el.artist.contains(target)) { toggleLyrics(); return; }
     if (el.btnInfo.contains(target)) { openSheet(); return; }
