@@ -1,8 +1,9 @@
 <p align="center">
-  <img src="docs/logo.png" alt="Spindle" width="110">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+    <img src="docs/logo-light.png" alt="Spindle" width="380">
+  </picture>
 </p>
-
-<h1 align="center">Spindle</h1>
 
 <p align="center">
   <strong>A vinyl scrobbler and now-playing display, on a Raspberry Pi beside the turntable.</strong><br>
