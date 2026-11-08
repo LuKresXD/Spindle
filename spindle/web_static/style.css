@@ -218,7 +218,8 @@ body.ended-open #home { opacity: 0; }
 /* the covers sit on a curve in depth; the motion layer places each one */
 .wheel3d { position: absolute; inset: 0; perspective: 1600px; transform-style: preserve-3d; }
 .wheel3d img { position: absolute; left: 50%; top: 50%; width: 300px; height: 300px; object-fit: cover; border-radius: 18px;
-  background: rgba(255,255,255,.06); box-shadow: 0 30px 80px rgba(0,0,0,.6); backface-visibility: hidden; will-change: transform; }
+  background: rgba(255,255,255,.06); box-shadow: 0 14px 36px rgba(0,0,0,.5); backface-visibility: hidden; will-change: transform; }
+/* (a tight shadow: a wide one triples each tile's texture, and the Pi is fill-rate bound) */
 .landed { position: absolute; inset: 0; padding: var(--pad-y) var(--pad-x); display: grid; grid-template-columns: 560px 1fr;
   gap: 96px; align-items: center; }
 .pickart { width: 560px; height: 560px; object-fit: cover; border-radius: 32px; background: rgba(255,255,255,.06);

@@ -157,7 +157,7 @@ window.Motion = (() => {
         const dist = Math.abs(i - proxy.o);
         // autoAlpha: a tile that is out of sight is also out of the compositor's hands
         gsap.set(img, { x: Math.sin(rad) * R, z: -R * (1 - Math.cos(rad)), rotationY: -a,
-          autoAlpha: proxy.f * gsap.utils.clamp(0, 1, 1.15 - dist * 0.26), scale: 1 - Math.min(0.18, dist * 0.04) });
+          autoAlpha: proxy.f * gsap.utils.clamp(0, 1, 1.1 - dist * 0.33), scale: 1 - Math.min(0.18, dist * 0.04) });
       });
     };
     gsap.set(imgs, { xPercent: -50, yPercent: -50, transformOrigin: "50% 50%" });
