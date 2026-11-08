@@ -343,7 +343,9 @@ class ScrobbleSession:
             return False
         if track.duration:
             return elapsed >= min(track.duration * self.min_play_fraction, 240)
-        return True
+        # nobody knows the length: assume a 4-minute song, not a 30-second one (a junk
+        # fingerprint hit scrobbled after 32 s of a side on 2026-11-08)
+        return elapsed >= min(FALLBACK_TRACK_DURATION * self.min_play_fraction, 240)
 
     def on_silence(self) -> list[tuple[TrackInfo, float]]:
         """End the session: scrobble what played long enough, reset everything."""

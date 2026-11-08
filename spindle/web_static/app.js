@@ -202,9 +202,11 @@
     if (!playing && !ended) {
       closeSheet();
       if (st.phase !== "idle") hideIdle();
-      // idle and listening are black: the last record's blurred cover must not linger
-      // (the end-of-side card keeps it; once that goes, so does the backdrop; a pick owns it)
-      if (artKey && !pickOpen) { artKey = ""; el.art.removeAttribute("src"); setBackdrop(""); }
+      // idle and listening are black: no blurred cover may linger, whoever put it there
+      // (the end-of-side card keeps it; once that goes, so does the backdrop; an open pick owns
+      // it; a pick that music interrupted does not, 2026-11-08). setBackdrop("") is a no-op
+      // when the backdrop is already clear, so this is free every tick.
+      if (!pickOpen) { if (artKey) { artKey = ""; el.art.removeAttribute("src"); } setBackdrop(""); }
     }
   }
 

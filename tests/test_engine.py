@@ -366,3 +366,73 @@ def test_disagreeing_id_skips_the_locked_interval(tmp_path, clock):
         clock.advance(2)
     assert cap.windows - before >= 2                             # ... plus the hurried confirmer
     assert player.session.get_current_track().title == "Track 3"
+
+
+def test_hit_nobody_knows_is_held_off_the_screen_and_lastfm(tmp_path):
+    """Shazam's catalogue carries user uploads that fingerprint like the record on the
+    platter. A hit that neither Spotify nor the collection knows stays off the screen and
+    Last.fm until it has been the only answer for a while (a 40 s side of it is nothing),
+    and the engine stops asking every two seconds while it waits."""
+    clock = FakeClock()
+    calls = {"n": 0}
+    def identify(path):
+        calls["n"] += 1
+        return TrackInfo(title="Zion Williamson/ Air Max Mix", artist="Stanvibes")
+    player, cap, rec = make_player(tmp_path, clock, identify)     # session, catalogues know nothing
+    cap.level = -20
+    for _ in range(20):                                           # 40 s of the same nobody
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.LISTENING and not st.title
+    assert not rec.now_playing and not rec.scrobbles
+    assert calls["n"] <= 6                                        # ~every 8 s, not every tick
+    cap.level = -70                                               # needle lifted
+    for _ in range(8):
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.IDLE and not rec.scrobbles and not rec.now_playing
+
+
+def test_hit_nobody_knows_that_persists_is_a_real_record(tmp_path):
+    """The same unknown answer for long enough is an obscure record: it shows, and it
+    scrobbles from when it was first heard, not from when the hold ended."""
+    clock = FakeClock()
+    def identify(path):
+        return TrackInfo(title="White Label", artist="Nobody")
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -20
+    for _ in range(50):                                           # 100 s
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.PLAYING and st.title == "White Label" and rec.now_playing
+    assert st.track_elapsed is not None and st.track_elapsed > 90   # counted from the first hearing
+    for _ in range(15):                                           # 130 s in all
+        player.tick()
+        clock.advance(2)
+    cap.level = -70
+    for _ in range(8):
+        player.tick()
+        clock.advance(2)
+    assert [s[0] for s in rec.scrobbles] == ["White Label"]      # unknown length: two minutes count
+    assert rec.scrobbles[0][1] is not None and rec.scrobbles[0][1] <= 1_700_000_000.0 + 6
+
+
+def test_known_album_is_not_held_and_clears_a_hold(tmp_path):
+    clock = FakeClock()
+    first = {"on": True}
+    def identify(path):
+        if first["on"]:
+            return TrackInfo(title="Air Max Mix", artist="Stanvibes")
+        return TrackInfo(title="Track 2", artist="Madvillain", album="Madvillainy", duration=72)
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -20
+    for _ in range(5):
+        player.tick()
+        clock.advance(2)
+    assert player.phase == Phase.LISTENING                       # the nobody is held
+    first["on"] = False
+    for _ in range(8):
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.PLAYING and st.title == "Track 2" and st.album == "Madvillainy"
+    assert player.session.is_locked() and player._held is None

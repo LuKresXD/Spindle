@@ -50,6 +50,7 @@ IdentifyFn = Callable[[Path], TrackInfo | None]
 # fingerprints only serve as anchors, so there is no need to hit AcoustID
 # (and Shazam on every miss) every 2 s.
 LOCKED_IDENTIFY_INTERVAL = 8.0
+UNRESOLVED_HOLD_S = 90.0      # a hit nobody knows must be the only answer this long before it shows
 HOT_INPUT_DB = -6.0          # RMS this high means the capture is clipping
 
 # Loud is not enough to be music: an empty turntable (motor, preamp, mains) can
@@ -231,6 +232,7 @@ class Player:
         self._noise_identify_at = 0.0
         self._noise_identify_interval = NOISE_IDENTIFY_FIRST
         self._id_disagreed = False                 # last ID named a track the clock is not on
+        self._held: tuple[str, float] | None = None   # (key, first seen) of a hit nobody knows
         self._recent_titles: set[str] = set()      # this artist's titles scrobbled recently
         self._recent_key = ""
         self._recent_at = 0.0
@@ -388,6 +390,7 @@ class Player:
         self.playing = _Playing()
         self.last_submit_at = 0.0
         self._id_disagreed = False
+        self._held = None
         self._recent_at = 0.0                      # the side that just ended adds ticks
 
     def _music_tick(self, now: float) -> None:
@@ -442,9 +445,13 @@ class Player:
             return False
         settled = bool(self.session and (self.session.is_locked()
                                          or self.session.mode == SessionMode.COMPILATION))
-        # settled (album or mix): identify slowly; one hurried window right after a hit
-        # that disagreed with the clock (the record skipped, the needle moved)
-        if settled and not self._id_disagreed \
+        # settled (album or mix), or a hit nobody knows (held or accepted): identify slowly
+        # (the same answer twenty times in forty seconds got Shazam to time out, 2026-11-08).
+        # A known album still waiting for its confirming ID keeps the fast cadence. One
+        # hurried window right after a hit that disagreed with the clock (the record
+        # skipped, the needle moved).
+        slow = settled or self._held is not None
+        if slow and not self._id_disagreed \
                 and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL:
             return False
         self._id_disagreed = False
@@ -474,9 +481,33 @@ class Player:
             return
         self._apply_identification(res.resolved, res.at, res.art)
 
+    def _hold_unresolved(self, resolved: Resolved, at: float) -> bool:
+        """True while a hit that neither Spotify nor the collection knows is kept off the
+        screen and Last.fm. Shazam's catalogue carries user uploads (mashups, "Air Max
+        mixes") that fingerprint like the record on the platter; one of them was on the
+        screen and scrobbled within a minute of the needle drop (2026-11-08). Such a hit
+        has to be the only answer for UNRESOLVED_HOLD_S first; a hit the catalogues know,
+        or any track of an established mix, passes at once."""
+        s = self.session
+        in_mix = bool(s and s.mode == SessionMode.COMPILATION)
+        if resolved.has_album or resolved.reason != "none" or in_mix or self.dry_run:
+            self._held = None
+            return False
+        key = _key(resolved.track)
+        if self._held is None or self._held[0] != key:
+            self._held = (key, at)
+            logger.info("Holding %s - %s: not on Spotify or in the collection; shown after "
+                        "%.0fs of the same answer", resolved.track.artist, resolved.track.title,
+                        UNRESOLVED_HOLD_S)
+        return at - self._held[1] < UNRESOLVED_HOLD_S
+
     def _apply_identification(self, resolved: Resolved, at: float, art: Art | None) -> None:
         track = resolved.track
         s = self.session
+
+        if self._hold_unresolved(resolved, at):
+            return
+        held_since = self._held[1] if self._held is not None else None
 
         if s and resolved.has_album and not self.dry_run:
             was_locked = s.is_locked()
@@ -512,7 +543,7 @@ class Player:
             self._set_playing(cur, s.current_track_start() or at, scrobbled=True)
             self._now_playing(cur)
         else:
-            self._simple_mode(track, at)
+            self._simple_mode(track, at, since=held_since)
         self._take_art(art, track)
 
     def _take_art(self, art: Art | None, identified: TrackInfo) -> None:
@@ -531,13 +562,14 @@ class Player:
                     and cur.album.lower() == identified.album.lower()):
             self.playing.art = art
 
-    def _simple_mode(self, track: TrackInfo, now: float) -> None:
-        """No album known: scrobble by elapsed time alone."""
+    def _simple_mode(self, track: TrackInfo, now: float, since: float | None = None) -> None:
+        """No album known: scrobble by elapsed time alone. `since` is when the track was
+        first heard when that is earlier than now (a hit held back until it persisted)."""
         p = self.playing
         cur = p.track
         if cur is None or not p.simple or _key(track) != _key(cur):
             self._finalize_simple(now)
-            self._set_playing(track, now, scrobbled=False, simple=True)
+            self._set_playing(track, now if since is None else since, scrobbled=False, simple=True)
             logger.info("Now playing: %s - %s", track.artist, track.title)
             self._now_playing(track)
         else:

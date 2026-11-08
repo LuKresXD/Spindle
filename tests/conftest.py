@@ -49,7 +49,7 @@ class FakeResolver:
         for al in self.albums:
             if al.find_track_index(track.title) is not None:
                 return resolved_for(al, track.title)
-        return Resolved(track=track)
+        return Resolved(track=track, reason="none")       # as the real Resolver reports it
 
 
 @pytest.fixture

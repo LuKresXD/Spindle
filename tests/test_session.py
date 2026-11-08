@@ -29,6 +29,9 @@ def test_played_enough_follows_lastfm_rule(clock, album):
     assert s.played_enough(short, 36)
     long_long = TrackInfo(title="x", artist="a", duration=1200)
     assert s.played_enough(long_long, 240)         # 4 minutes caps the half rule
+    unknown = TrackInfo(title="y", artist="a")     # nobody knows the length: assume 4 minutes
+    assert not s.played_enough(unknown, 60)
+    assert s.played_enough(unknown, 120)
 
 
 def test_lock_then_timing_advance_scrobbles_in_order(clock, album):
