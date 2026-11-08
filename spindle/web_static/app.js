@@ -659,7 +659,6 @@
     pickOpen = true;
     show(el.pick);
     el.pickArt.src = card.cover || "";
-    setBackdrop(card.cover || "");
     el.pickKicker.textContent = fromShelf ? "On the shelf" : "From the shelf";
     el.pickTitle.textContent = card.title || "";
     el.pickArtist.textContent = card.artist || "";
@@ -675,13 +674,16 @@
     el.btnPickDone.textContent = fromShelf ? "Back to the shelf" : "Done";
     show(el.landed);
     fitTitle(el.pickTitle, 108, 48);
+    // the blurred backdrop (a 64 px blur of a full screen) is the one expensive paint of the
+    // build, so it blooms after the cover has landed rather than under the hand-over
     if (fromTile) {
       // the hit cover on the wheel becomes the card's cover: one move, the kicker fades under it
       M.fade(el.wheelKicker, 0, { duration: 0.3 });
-      M.handOver(fromTile, el.pickArt, { onDone: () => { if (pickOpen) hide(el.wheel); } });
+      M.handOver(fromTile, el.pickArt, { onDone: () => { if (pickOpen) { hide(el.wheel); setBackdrop(card.cover || ""); } } });
     } else {
       hide(el.wheel);
       M.arrive(el.pickArt, { y: 30, scale: 0.94, duration: 1.1 });
+      setTimeout(() => { if (pickOpen) setBackdrop(card.cover || ""); }, 500);
     }
     M.arrive(el.pickKicker, { y: 12, duration: 0.8, delay: 0.05 });
     M.revealLines(el.pickTitle, { delay: 0.12 });
