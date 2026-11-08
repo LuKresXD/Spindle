@@ -102,29 +102,54 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .level { display: inline-block; width: 160px; height: 8px; border-radius: 4px; background: rgba(255,255,255,.22); margin-left: 10px; overflow: hidden; }
 .level i { display: block; height: 100%; width: 0; background: #fff; border-radius: 4px; transition: width .4s var(--ease); }
 
-/* info sheet ---------------------------------------------------------------- */
-/* The rounded, translucent shell does not scroll; the plain inner box does, so
-   the compositor scrolls it without re-masking rounded corners every frame. */
-.sheet { position: absolute; left: var(--pad-x); right: var(--pad-x); bottom: 0; height: 760px;
-  border-radius: 44px 44px 0 0; transform: translateY(104%); transition: transform .5s var(--ease); z-index: 5;
-  overflow: hidden; background: rgba(24,14,30,.93); border: 1px solid rgba(255,255,255,.14); border-bottom: 0;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 -18px 60px rgba(0,0,0,.35); will-change: transform; }
-.sheet-scroll { height: 100%; overflow-y: auto; touch-action: pan-y; padding: 36px 44px 44px;
+/* info sheet: a full-height liner-notes page that slides up over home ---------- */
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; height: 1004px;
+  border-radius: 48px 48px 0 0; transform: translateY(104%); transition: transform .55s var(--ease); z-index: 5;
+  overflow: hidden; background: rgba(18,11,22,.95); border-top: 1px solid rgba(255,255,255,.12);
+  box-shadow: 0 -26px 80px rgba(0,0,0,.45); will-change: transform; }
+.sheet-scroll { height: 100%; overflow-y: auto; touch-action: pan-y; padding: 30px 120px 72px;
   scrollbar-width: none; contain: content; }
 .sheet-scroll::-webkit-scrollbar { display: none; }
 .sheet.open { transform: translateY(0); }
-.grab { width: 72px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.5); margin: 0 auto 30px; }
-.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
-.tile.wide { grid-column: 1 / -1; }
-.tile { border-radius: 28px; padding: 28px 30px; background: rgba(255,255,255,.09);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), inset 0 0 0 1px rgba(255,255,255,.05); min-height: 170px; }
-.tile h3 { font-size: 22px; font-weight: 600; letter-spacing: .06em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 16px; }
-.tile p { font-size: 30px; font-weight: 500; line-height: 1.35; }
-.tile p b { font-weight: 700; }
-.tile .sub { font-size: 24px; color: rgba(255,255,255,.65); margin-top: 8px; }
-.tile .dim { color: rgba(255,255,255,.6); font-weight: 500; }
+.grab { width: 76px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.4); margin: 0 auto 34px; }
+
+/* masthead */
+.mast { display: flex; align-items: flex-end; gap: 44px; padding-bottom: 38px; margin-bottom: 44px;
+  border-bottom: 1px solid rgba(255,255,255,.13); }
+.mast .mcover { width: 196px; height: 196px; border-radius: 20px; object-fit: cover; flex: none;
+  box-shadow: 0 24px 64px rgba(0,0,0,.5), inset 0 0 0 1px rgba(255,255,255,.14); }
+.mast .mkick { text-transform: uppercase; letter-spacing: .16em; font-weight: 700; font-size: 21px;
+  color: rgba(255,255,255,.5); margin-bottom: 14px; }
+.mast h1 { font-size: 74px; font-weight: 800; letter-spacing: -0.03em; line-height: .98; }
+.mast .msub { font-size: 29px; color: rgba(255,255,255,.62); margin-top: 16px; font-weight: 500; }
+.mast .mprice { margin-left: auto; text-align: right; align-self: flex-end; flex: none; }
+.mast .mprice .n { font-size: 50px; font-weight: 800; letter-spacing: -0.02em; }
+.mast .mprice .s { font-size: 21px; color: rgba(255,255,255,.52); margin-top: 6px; }
+
+/* two editorial columns */
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 110px; align-content: start; }
+.sec { margin-bottom: 50px; }
+.sec h2 { font-size: 22px; letter-spacing: .14em; text-transform: uppercase; color: rgba(255,255,255,.44);
+  font-weight: 700; margin-bottom: 20px; }
+.story { font-size: 33px; line-height: 1.42; font-weight: 500; letter-spacing: -0.01em; }
+.story.sm { font-size: 27px; color: rgba(255,255,255,.88); }
+.cred { font-size: 29px; line-height: 1.72; font-weight: 500; }
+.cred .lab { color: rgba(255,255,255,.5); }
+.samples { display: grid; grid-template-columns: 1fr 1fr; gap: 24px 48px; }
+.chip { display: flex; align-items: center; gap: 15px; }
+.chip img, .chip .ph { width: 78px; height: 78px; border-radius: 13px; flex: none; object-fit: cover;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); background: rgba(255,255,255,.06); }
+.chip .ph { display: flex; align-items: center; justify-content: center; font-size: 28px;
+  color: rgba(255,255,255,.5); font-weight: 800; }
+.chip .st { font-size: 26px; font-weight: 600; line-height: 1.14; }
+.chip .sb { font-size: 21px; color: rgba(255,255,255,.55); margin-top: 3px; }
+.hist { font-size: 37px; font-weight: 500; line-height: 1.5; }
+.hist b { font-weight: 800; }
+.hist .row2 { font-size: 30px; margin-top: 10px; }
+.hist .sub { font-size: 22px; color: rgba(255,255,255,.52); margin-top: 10px; }
+.imuted { color: rgba(255,255,255,.5); font-weight: 500; }
 #home { will-change: opacity; }
-body.sheet-open #home { opacity: .18; transition: opacity .5s var(--ease); }
+body.sheet-open #home { opacity: .14; transition: opacity .5s var(--ease); }
 body.sheet-open .corner { visibility: hidden; }
 
 /* end of side --------------------------------------------------------------- */

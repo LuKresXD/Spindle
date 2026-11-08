@@ -318,6 +318,27 @@ class Info:
             logger.debug("Story lookup failed: %s", e)
             return None
 
+    def track_plays(self, artist: str, title: str) -> dict:
+        """This user's play count and the world listener count for one track,
+        cached per track. The title must be exactly as scrobbled (feat. and all)."""
+        key = f"track|{artist.lower()}|{title.lower()}"
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+        out: dict[str, Any] = {"plays": None, "listeners": None}
+        net = getattr(self.scrobbler, "network", None) if self.scrobbler is not None else None
+        if net is not None and artist and title:
+            try:
+                tr = net.get_track(artist, title)
+                pc = tr.get_userplaycount()
+                out["plays"] = int(pc) if pc is not None else None
+                out["listeners"] = int(tr.get_listener_count())
+            except Exception as e:
+                logger.debug("Track plays lookup failed: %s", e)
+        with self._lock:
+            self._cache[key] = out
+        return out
+
     def _plays(self, artist: str, album: str) -> dict:
         out: dict[str, Any] = {"user_plays": None, "listeners": None, "last_played": None}
         if self.scrobbler is not None:
@@ -345,6 +366,9 @@ GENIUS = "https://genius.com/api"
 GENIUS_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 "
              "(KHTML, like Gecko) Version/17.0 Safari/605.1.15")
 _URL_RE = re.compile(r"https?://\S+")
+# Genius hosts fan translations ("… Türkçe Çeviriler", "… Traducciones") whose
+# full_title still names the real artist — never let one win the song match.
+_TRANSLATION_RE = re.compile(r"genius|[çc]eviri|traduc|translation|перевод", re.I)
 
 
 def _dom_text(node: Any) -> str:
@@ -405,8 +429,9 @@ class Genius:
             for hit in section.get("hits", []):
                 res = hit.get("result", {})
                 primary = (res.get("primary_artist") or {}).get("name", "")
-                if _artist_in(artist, primary) or _artist_in(primary, artist) \
-                        or _artist_in(artist, res.get("full_title", "")):
+                if _TRANSLATION_RE.search(primary):     # a translation channel, not the artist
+                    continue
+                if _artist_in(artist, primary) or _artist_in(primary, artist):
                     song_id = res.get("id")
                     break
             break
@@ -421,14 +446,23 @@ class Genius:
         story = "\n\n".join(paras[:3])
         if len(story) > 1200:
             story = story[:1197].rsplit(" ", 1)[0] + "…"
-        rels = {rel.get("relationship_type"):
-                [x.get("full_title", "") for x in rel.get("songs", [])]
-                for rel in song.get("song_relationships", []) or []}
+        def _songs(kind: str, n: int) -> list[dict]:
+            for rel in song.get("song_relationships", []) or []:
+                if rel.get("relationship_type") == kind:
+                    out = []
+                    for x in rel.get("songs", [])[:n]:
+                        out.append({
+                            "title": (x.get("title") or "").replace("\xa0", " "),
+                            "artist": ((x.get("primary_artist") or {}).get("name") or "").replace("\xa0", " "),
+                            "art": x.get("song_art_image_thumbnail_url") or "",
+                        })
+                    return out
+            return []
         return {
             "id": song_id,
             "story": story,
-            "samples": [t.replace("\xa0", " ") for t in rels.get("samples", [])[:4]],
-            "sampled_in": [t.replace("\xa0", " ") for t in rels.get("sampled_in", [])[:3]],
+            "samples": _songs("samples", 4),
+            "sampled_in": _songs("sampled_in", 3),
             "producers": [a.get("name", "") for a in song.get("producer_artists", []) or []],
             "writers": [a.get("name", "") for a in song.get("writer_artists", []) or []][:6],
             "release": song.get("release_date_for_display") or "",
@@ -559,7 +593,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not artist or not title:
             self._json({"error": "artist and title required"}, HTTPStatus.BAD_REQUEST)
             return
-        self._json(self.server.genius.get(artist, title))
+        data = dict(self.server.genius.get(artist, title))
+        data["plays"] = self.server.info.track_plays(artist, title)
+        self._json(data)
 
     def _info(self) -> None:
         q = self._query()

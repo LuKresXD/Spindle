@@ -300,48 +300,86 @@
     setTimeout(() => { if (!sheetOpen) el.sheet.classList.add("hidden"); }, 520);
   }
 
-  const tile = (h, p, sub, wide) => `<div class="tile${wide ? " wide" : ""}"><h3>${esc(h)}</h3><p>${p}</p>${sub ? `<p class="sub">${sub}</p>` : ""}</div>`;
+  const sec = (h, body) => `<div class="sec"><h2>${esc(h)}</h2>${body}</div>`;
+
+  function fmtShort(formats) {
+    return (formats || []).join(", ")
+      .replace(/Vinyl, LP, Album/gi, "LP").replace(/Vinyl, LP/gi, "LP").replace(/, Album/gi, "");
+  }
+
+  function creditLines(pr, g) {
+    const out = [];
+    const byTrack = (pr && state && state.position && pr.credits_by_track) ? pr.credits_by_track[state.position] : null;
+    const src = (byTrack && byTrack.length) ? byTrack : (pr ? pr.credits : null);
+    const names = (re) => { const seen = []; (src || []).forEach((c) => { if (re.test(c.role) && c.name && !seen.includes(c.name)) seen.push(c.name); }); return seen; };
+    if (src) {
+      const prod = names(/produc/i).slice(0, 4);
+      const feat = names(/featur/i);
+      const mix = names(/^mixed by$/i);
+      const wrote = names(/written/i).slice(0, 6);
+      if (prod.length) out.push(`<span class="lab">Produced by</span> <b>${esc(prod.join(", "))}</b>`);
+      const row2 = [];
+      if (feat.length) row2.push(`<span class="lab">Featuring</span> <b>${esc(feat.join(", "))}</b>`);
+      if (mix.length) row2.push(`<span class="lab">Mixed by</span> <b>${esc(mix[0])}</b>`);
+      if (row2.length) out.push(row2.join(" &nbsp;·&nbsp; "));
+      if (wrote.length) out.push(`<span class="lab">Written by</span> ${esc(wrote.join(", "))}`);
+    }
+    if (!out.length && g.producers && g.producers.length)
+      out.push(`<span class="lab">Produced by</span> <b>${esc(g.producers.join(", "))}</b>`);
+    if (!out.length) return (trackInfo && info) ? "No credits listed" : "Loading…";
+    return out.join("<br>");
+  }
+
+  function sampleChip(sm) {
+    const art = sm.art
+      ? `<img src="${esc(sm.art)}" onerror="this.outerHTML='<div class=\\'ph\\'>${esc((sm.artist || sm.title || "?")[0] || "?")}</div>'">`
+      : `<div class="ph">${esc((sm.artist || sm.title || "?")[0] || "?")}</div>`;
+    return `<div class="chip">${art}<div><div class="st">${esc(sm.title || "")}</div><div class="sb">${esc(sm.artist || "")}</div></div></div>`;
+  }
 
   function renderInfo() {
-    const pr = info && info.pressing;
-    let pressing = info ? "" : "Loading…", pressingSub = "";
-    if (pr) {
-      const label = pr.labels && pr.labels.length ? pr.labels[0] : null;
-      pressing = [label ? `<b>${esc(label.name)}</b>` : "", esc(pr.country), pr.year ? String(pr.year) : ""].filter(Boolean).join(" · ");
-      const fmt = (pr.formats || []).join("; ");
-      const catno = label && label.catno && !/^none$/i.test(label.catno) ? esc(label.catno) : "";
-      let price = "";
-      if (pr.typical_usd != null) price = `typically $${Math.round(pr.typical_usd)} on Discogs (VG+)`;
-      else if (pr.price_usd != null) price = `from $${Math.round(pr.price_usd)} on Discogs${pr.for_sale ? ` · ${pr.for_sale} for sale` : ""}`;
-      else if (pr.for_sale === null && pr.price_usd === null) price = "not sold on Discogs";
-      pressingSub = [esc(fmt), catno, price].filter(Boolean).join(" · ");
-    } else if (info) {
-      pressing = "Not in your Discogs collection";
-    }
-    // credits: Discogs per-track first, Genius producers/writers next, samples last
-    const lines = [];
-    if (pr) {
-      const cur = state && state.position ? pr.credits_by_track && pr.credits_by_track[state.position] : null;
-      const pick = (list) => (list || []).filter((c) => /produc|written|featur|mix|master|record|compos|arrang|vocal/i.test(c.role)).slice(0, 4);
-      const picked = pick(cur).length ? pick(cur) : pick(pr.credits);
-      for (const c of picked) lines.push(`${esc(c.role)}: <b>${esc(c.name)}</b>`);
-    }
-    const g = trackInfo || {};
-    if (!lines.length && g.producers && g.producers.length) lines.push(`Produced by <b>${esc(g.producers.join(", "))}</b>`);
-    if (g.samples && g.samples.length) lines.push(`Samples <b>${esc(g.samples.join("; "))}</b>`);
-    if (g.sampled_in && g.sampled_in.length) lines.push(`<span class="dim">Sampled in ${esc(g.sampled_in.slice(0, 2).join("; "))}</span>`);
-    const credits = lines.length ? lines.join("<br>") : (trackInfo && info ? "No credits found" : "Loading…");
-    const story = g.story ? esc(g.story).replace(/\n\n/g, "<br><br>")
-      : (trackInfo ? "Nothing written up for this track" : "Loading…");
-    const about = info && info.story && info.story.text ? esc(info.story.text) : (info ? "" : "Loading…");
-    const pl = (info && info.plays) || {};
-    let plays = pl.user_plays != null ? `<b>${pl.user_plays}</b> plays of this record on Last.fm` : (info ? "No plays counted yet" : "Loading…");
+    const pr = info && info.pressing, g = trackInfo || {}, loading = !info;
+    const art = (state && state.art) ? `/art/${state.art}.jpg` : "";
+    const kick = (state && state.position) ? `The record · ${esc(state.position)}` : "The record";
+    const label = (pr && pr.labels && pr.labels.length) ? pr.labels[0] : null;
+    const press = pr
+      ? [esc((state && state.artist) || ""), label ? esc(label.name) : "", esc(pr.country),
+         pr.year ? String(pr.year) : "", esc(fmtShort(pr.formats))].filter(Boolean).join(" · ")
+      : (loading ? "Loading…" : esc((state && state.artist) || ""));
+    let priceN = "", priceS = "";
+    if (pr && pr.typical_usd != null) { priceN = `$${Math.round(pr.typical_usd)}`; priceS = "median · VG+ on Discogs"; }
+    else if (pr && pr.price_usd != null) { priceN = `$${Math.round(pr.price_usd)}`; priceS = `lowest · ${pr.for_sale || 0} for sale`; }
+    const priceHtml = priceN ? `<div class="mprice"><div class="n">${priceN}</div><div class="s">${priceS}</div></div>` : "";
+    const mast = `<div class="mast">${art ? `<img class="mcover" src="${art}">` : ""}` +
+      `<div><div class="mkick">${kick}</div><h1>${esc((state && state.album) || "")}</h1><div class="msub">${press}</div></div>${priceHtml}</div>`;
+
+    const isTrans = g.url && /[çc]eviri|traduc|translation|перевод/i.test(g.url);
+    const story = (g.story && !isTrans) ? esc(g.story).replace(/\n\n/g, "<br><br>")
+      : (trackInfo ? "Nothing written up for this one" : "Loading…");
+    const credits = creditLines(pr, g);
+    const samples = (g.samples && g.samples.length) ? g.samples.map(sampleChip).join("") : "";
+
+    const pl = (info && info.plays) || {}, tp = g.plays || {};
+    const trackLine = tp.plays != null ? `<b>${tp.plays}</b> ${tp.plays === 1 ? "play" : "plays"} of this track` : "";
+    const albumLine = pl.user_plays != null ? `<b>${pl.user_plays}</b> plays of the record` : (info ? "first spin counted" : "Loading…");
+    let hist = `<div class="hist">${trackLine || (albumLine + " on Last.fm")}`;
+    if (trackLine) hist += `<div class="row2 imuted">${albumLine} on Last.fm</div>`;
     const subs = [];
     if (pl.last_played) subs.push(`last played ${new Date(pl.last_played * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`);
-    if (pl.listeners) subs.push(`${fmtCount(pl.listeners)} listeners on Last.fm`);
-    el.tiles.innerHTML = tile("Pressing", pressing, pressingSub) + tile("Credits & samples", credits)
-      + tile("Your plays", plays, subs.join(" · ")) + tile(state ? `The story · ${esc(state.title)}` : "The story", story, "", true)
-      + (about ? tile("About the record", about, "", true) : "");
+    if (tp.listeners || pl.listeners) subs.push(`${fmtCount(tp.listeners || pl.listeners)} listeners`);
+    if (subs.length) hist += `<div class="sub">${subs.join(" · ")}</div>`;
+    hist += "</div>";
+
+    const about = (info && info.story && info.story.text) ? esc(info.story.text) : "";
+    const trackName = state ? esc(state.title) : "";
+    el.tiles.innerHTML = mast + `<div class="cols"><div class="col">` +
+      sec(`On this track · ${state ? state.title : ""}`, `<div class="story">${story}</div>`) +
+      sec("Credits", `<div class="cred">${credits}</div>`) +
+      `</div><div class="col">` +
+      (samples ? sec("Samples", `<div class="samples">${samples}</div>`) : "") +
+      sec("Your history", hist) +
+      (about ? sec("About the album", `<div class="story sm">${about}</div>`) : "") +
+      `</div></div>`;
   }
 
   // ── gestures ─────────────────────────────────────────────────────────────
