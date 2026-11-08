@@ -815,7 +815,7 @@
     const rows = rowsOnScreen(), topRow = Math.floor(el.shelfgrid.scrollTop / ROW), scrolled = el.shelfgrid.scrollTop;
     const slotOf = new Map(sorted(collection).map((r, v) => [String(r.id), v]));
     const seen = (slot, first) => { const row = Math.floor(slot / COLS); return row >= first && row < first + rows; };
-    const moving = [], from = [], to = [];
+    const moving = [], from = [], to = [], still = [], at = [];
     M.gsap.killTweensOf(kids, "x,y");
     kids.forEach((n, d) => {
       const v = slotOf.get(n.dataset.id);
@@ -825,32 +825,37 @@
       const p = slotPos(v, step), q = slotPos(d, step), w = slotPos(was, step);
       const target = { x: p.x - q.x, y: p.y - q.y };
       if (animate && (seen(was, topRow) || seen(v, 0))) { moving.push(n); from.push({ x: w.x - q.x, y: w.y - q.y - scrolled }); to.push(target); }
-      else M.gsap.set(n, target);
+      else { still.push(n); at.push(target); }
     });
+    if (still.length) M.gsap.set(still, { x: (i) => at[i].x, y: (i) => at[i].y });   // one call, not one per tile
     el.shelfgrid.scrollTop = 0;
     placedSort = shelfSort;
     return M.glide(moving, from, to);
   }
   const visualOrder = () => [...el.shelfgrid.children].sort((a, b) => (+a.dataset.slot || 0) - (+b.dataset.slot || 0));
-  // The shelf is laid out and layered while nobody is looking (a quiet moment after the idle
-  // controls arrive), so the tap that opens it pays for nothing but the wave.
+  // The shelf is laid out, layered and painted while nobody is looking (a quiet moment after
+  // the idle controls arrive): opacity 0 and no pointer events, but visible to the renderer,
+  // so the tap that opens it pays for nothing but the wave.
   let prepTimer = 0;
   function scheduleShelfPrep(ms) { clearTimeout(prepTimer); prepTimer = setTimeout(prepareShelf, ms); }
   function prepareShelf() {
     if (shelfOpen || pickOpen || !collection || !state || state.phase !== "idle" || !el.shelf.classList.contains("hidden")) return;
     buildGrid(collection);
     el.shelf.classList.remove("hidden");
-    M.gsap.set(el.shelf, { autoAlpha: 0 });
+    el.shelf.classList.add("prepared");
+    M.gsap.set(el.shelf, { opacity: 0 });
   }
   function unprepareShelf() {
     if (shelfOpen || el.shelf.classList.contains("hidden")) return;
     hide(el.shelf);
+    el.shelf.classList.remove("prepared");
     M.gsap.set(el.shelf, { clearProps: "opacity,visibility" });
   }
   async function openShelf() {
     hideIdle();
     shelfOpen = true;
     show(el.shelf);
+    el.shelf.classList.remove("prepared");
     const col = await loadCollection();
     el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
     buildGrid(col);
@@ -879,10 +884,11 @@
     };
     if (tl) tl.eventCallback("onComplete", tagsIn); else tagsIn();
   }
-  // Closed, the shelf stays laid out (faded to nothing) while the platter is idle; see prepareShelf.
+  // Closed, the shelf fades to nothing and stays laid out while the platter is idle; see prepareShelf.
   function closeShelf() {
     shelfOpen = false;
-    M.leave(el.shelf, { duration: 0.3, onComplete: () => { if (!shelfOpen && (!state || state.phase !== "idle")) unprepareShelf(); } });
+    el.shelf.classList.add("prepared");
+    M.fade(el.shelf, 0, { duration: 0.3, keep: true }).then(() => { if (!shelfOpen && (!state || state.phase !== "idle")) unprepareShelf(); });
   }
 
   async function openCard(id, fromShelf) {

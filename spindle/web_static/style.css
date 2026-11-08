@@ -256,6 +256,7 @@ body.ended-open #home { opacity: 0; }
 
 /* the shelf and the recent list ------------------------------------------------ */
 .shelf, .recent { position: absolute; inset: 0; padding: var(--pad-y) var(--pad-x) 0; display: flex; flex-direction: column; }
+.shelf.prepared { pointer-events: none; }   /* laid out and painted at opacity 0, waiting; see prepareShelf in app.js */
 .shelfhead { display: flex; align-items: center; gap: 24px; margin-bottom: 36px; }
 .shelftitle { font-size: 44px; font-weight: 700; letter-spacing: -.02em; flex: 1; }
 .tray { display: inline-flex; align-items: center; gap: 4px; padding: 6px; border-radius: 999px; overflow: visible; }

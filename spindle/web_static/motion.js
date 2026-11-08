@@ -60,9 +60,11 @@ window.Motion = (() => {
     gsap.killTweensOf(list);
     return gsap.to(list, { autoAlpha: 0, duration: D(duration), ease: MICRO, onComplete });
   }
-  function fade(el, to, { duration = 0.5, ease = MICRO, delay = 0 } = {}) {
+  // keep: opacity only, so the element stays painted (the shelf fades to nothing but is kept
+  // laid out and rastered for its next opening)
+  function fade(el, to, { duration = 0.5, ease = MICRO, delay = 0, keep = false } = {}) {
     gsap.killTweensOf(el);
-    return gsap.to(el, { autoAlpha: to, duration: D(duration), ease, delay });
+    return gsap.to(el, { [keep ? "opacity" : "autoAlpha"]: to, duration: D(duration), ease, delay });
   }
 
   // ── trays: one lighter pill that flies between the buttons ────────────────
