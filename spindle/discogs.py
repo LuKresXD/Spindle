@@ -397,18 +397,20 @@ class DiscogsCollection:
         logger.debug("Discogs: loaded %s — %s (%d tracks)", rel.artist, rel.title, len(tracks))
 
     def _prefetch_masters(self) -> None:
-        """The original release year lives on the master: one call per record that has
-        one and has not been asked yet, rate limited like everything else."""
+        """The original release year lives on the master: one call per record whose
+        master is known and has not been asked yet, rate limited like everything else.
+        A record with no master id stays unanswered until a collection refresh says
+        whether it has one (then it is its own original) - never guessed from the
+        pressing year."""
         while not self._stop.is_set():
             with self._lock:
-                pending = [r for r in self._releases if r.loaded and r.released is None]
+                pending = [r for r in self._releases
+                           if r.loaded and r.master_id and r.released is None]
             if not pending:
                 return
             rel = pending[0]
-            year = 0
             try:
-                if rel.master_id:
-                    year = int(self._get(f"/masters/{rel.master_id}").get("year") or 0)
+                year = int(self._get(f"/masters/{rel.master_id}").get("year") or 0)
             except requests.RequestException as e:
                 self.last_error = str(e)
                 logger.warning("Discogs: master for %s failed: %s", rel.title, e)
