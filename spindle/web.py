@@ -13,6 +13,11 @@ the rest on demand.
   GET /api/lyrics  time-synced lyrics from LRCLIB (artist, title, album, duration)
   GET /api/info    the info sheet: pressing (Discogs), credits, story (Wikipedia),
                    plays (Last.fm + the local history)
+  GET /api/collection          the shelf: every record, newest first
+  GET /api/collection/random   one record drawn at random (?exclude=id,id), as a card
+  GET /api/collection/<id>     one record as a card: pressing, plays, last spin
+  GET /api/history/albums      the records played most recently (?limit=12)
+  GET /art/collection/<id>.jpg a record's cover, cached on disk
 
 Everything that goes to the network is cached per track or per album and
 runs on the request thread, never on the tick.
@@ -40,6 +45,7 @@ from typing import Any
 import requests
 
 from .config import WebConfig
+from .discogs import clean_artist
 from .state import ScreenState
 
 logger = logging.getLogger(__name__)
@@ -339,6 +345,10 @@ class Info:
             self._cache[key] = out
         return out
 
+    def plays(self, artist: str, album: str) -> dict:
+        """Luka's plays of an album (Last.fm) and the last time it was on (the history)."""
+        return self._plays(artist, album)
+
     def _plays(self, artist: str, album: str) -> dict:
         out: dict[str, Any] = {"user_plays": None, "listeners": None, "last_played": None}
         if self.scrobbler is not None:
@@ -483,6 +493,178 @@ class Genius:
                          daemon=True).start()
 
 
+
+# ── the shelf: the collection for the idle screen ─────────────────────────────
+
+COLLECTION_ART_DIR = Path.home() / ".cache" / "spindle" / "art" / "collection"
+COVER_WARM_GAP = 0.6             # seconds between cover downloads when warming the cache
+
+
+class Shelf:
+    """The record collection as the idle screen sees it: the list, a random draw,
+    one record's card, the covers (cached on disk) and the recently played records."""
+
+    def __init__(self, collection: Any = None, history: Any = None, info: Info | None = None,
+                 http: requests.Session | None = None, art_dir: Path | None = None):
+        self.collection = collection
+        self.history = history
+        self.info = info
+        self._http = http or requests.Session()
+        self._http.headers["User-Agent"] = USER_AGENT
+        self.art_dir = art_dir or COLLECTION_ART_DIR
+        self._lock = threading.Lock()
+        self._warming = False
+        try:
+            self.art_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("Collection art dir unavailable (%s)", e)
+
+    # the list ----------------------------------------------------------------
+
+    def releases(self) -> dict:
+        if self.collection is None:
+            return {"count": 0, "releases": []}
+        rows = [self._row(r) for r in self.collection.all_releases()]
+        return {"count": len(rows), "releases": rows}
+
+    def _row(self, rel: Any) -> dict:
+        return {"id": rel.id, "artist": clean_artist(rel.artist), "title": rel.title,
+                "year": rel.year or None, "released": rel.released or None,
+                "formats": list(rel.formats or []), "added": rel.added,
+                "cover": f"/art/collection/{rel.id}.jpg" if rel.cover else None}
+
+    # one record ------------------------------------------------------------
+
+    def random(self, exclude: set[int] | None = None) -> dict | None:
+        if self.collection is None:
+            return None
+        rel = self.collection.random_release(exclude)
+        return self.card(rel) if rel is not None else None
+
+    def one(self, rid: int) -> dict | None:
+        if self.collection is None:
+            return None
+        rel = self.collection.release_by_id(rid)
+        return self.card(rel) if rel is not None else None
+
+    def card(self, rel: Any) -> dict:
+        """The row plus what the pick screen says about it: the pressing and the plays.
+        Two network calls (Discogs, Last.fm), run side by side; either may come back empty."""
+        card = self._row(rel)
+        artist = card["artist"]
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="shelf") as pool:
+            pressing = pool.submit(self._pressing, rel)
+            plays = pool.submit(self._plays, artist, rel.title)
+            card["pressing"] = pressing.result()
+            card["plays"] = plays.result()
+        return card
+
+    def _pressing(self, rel: Any) -> dict | None:
+        try:
+            return self.collection.release_details(rel)
+        except Exception as e:                        # the card shows less
+            logger.debug("Pressing for the card failed: %s", e)
+            return None
+
+    def _plays(self, artist: str, album: str) -> dict | None:
+        if self.info is None:
+            return None
+        try:
+            return self.info.plays(artist, album)
+        except Exception as e:
+            logger.debug("Plays for the card failed: %s", e)
+            return None
+
+    # covers ----------------------------------------------------------------
+
+    def cover(self, rid: int) -> bytes | None:
+        """The cover bytes for a record: the disk cache, else one download."""
+        blob = self.art_dir / f"{rid}.img"
+        with contextlib.suppress(OSError):
+            if blob.is_file():
+                return blob.read_bytes()
+        if self.collection is None:
+            return None
+        rel = self.collection.release_by_id(rid)
+        if rel is None or not rel.cover:
+            return None
+        try:
+            r = self._http.get(rel.cover, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            logger.debug("Cover download failed for %s: %s", rid, e)
+            return None
+        data = r.content
+        if not data or not (data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"):
+            return None
+        with contextlib.suppress(OSError):
+            tmp = blob.with_suffix(".tmp")
+            tmp.write_bytes(data)
+            tmp.replace(blob)
+        return data
+
+    def warm_covers(self) -> None:
+        """Download every missing cover once, slowly, off the request threads, so the
+        shelf and the wheel open with the pictures already there."""
+        with self._lock:
+            if self._warming:
+                return
+            self._warming = True
+
+        def run() -> None:
+            try:
+                for _ in range(120):                  # wait for the collection, up to a minute
+                    if self.collection is None or getattr(self.collection, "ready", False):
+                        break
+                    time.sleep(0.5)
+                if self.collection is None:
+                    return
+                for rel in self.collection.all_releases():
+                    if rel.cover and not (self.art_dir / f"{rel.id}.img").is_file():
+                        self.cover(rel.id)
+                        time.sleep(COVER_WARM_GAP)
+            finally:
+                with self._lock:
+                    self._warming = False
+
+        threading.Thread(target=run, name="cover-warm", daemon=True).start()
+
+    # recently played -------------------------------------------------------
+
+    def recent_albums(self, limit: int = 12) -> list[dict]:
+        """The records played most recently: the scrobble history walked newest first,
+        one entry per album, each with the record on the shelf it matches (if any)."""
+        if self.history is None:
+            return []
+        try:
+            entries = self.history.recent(count=600)
+        except Exception as e:
+            logger.debug("History for the shelf failed: %s", e)
+            return []
+        out: list[dict] = []
+        seen: set[str] = set()
+        for entry in entries:                          # newest first
+            album = (entry.album or "").strip()
+            if not album:
+                continue
+            key = f"{entry.artist.lower()}|{album.lower()}"
+            if key in seen:
+                out[[o["key"] for o in out].index(key)]["tracks"] += 1
+                continue
+            seen.add(key)
+            rel = None
+            if self.collection is not None:
+                with contextlib.suppress(Exception):
+                    rel = self.collection.find_release(entry.artist, album)
+            out.append({"key": key, "artist": clean_artist(entry.artist), "album": album,
+                        "last_played": entry.timestamp, "tracks": 1,
+                        "release": self._row(rel) if rel is not None else None})
+            if len(out) >= limit:
+                break
+        for o in out:
+            o.pop("key")
+        return out
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 
 class _Handler(BaseHTTPRequestHandler):
@@ -527,8 +709,19 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.server.hub.snapshot()[1])
             elif path == "/events":
                 self._events()
+            elif path.startswith("/art/collection/"):
+                self._collection_art(path[len("/art/collection/"):])
             elif path.startswith("/art/"):
                 self._art(path[len("/art/"):])
+            elif path == "/api/collection":
+                self._json(self.server.shelf.releases())
+            elif path == "/api/collection/random":
+                self._collection_random()
+            elif path.startswith("/api/collection/"):
+                self._collection_one(path[len("/api/collection/"):])
+            elif path == "/api/history/albums":
+                limit = int(self._query().get("limit", "12") or 12)
+                self._json(self.server.shelf.recent_albums(max(1, min(limit, 50))))
             elif path == "/api/lyrics":
                 self._lyrics()
             elif path == "/api/info":
@@ -563,6 +756,35 @@ class _Handler(BaseHTTPRequestHandler):
         data, _source = hit
         ctype = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
         self._send(HTTPStatus.OK, data, ctype, "max-age=31536000, immutable")
+
+    def _collection_art(self, name: str) -> None:
+        try:
+            rid = int(name.split(".")[0])
+        except ValueError:
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        data = self.server.shelf.cover(rid)
+        if data is None:
+            self._json({"error": "no cover"}, HTTPStatus.NOT_FOUND)
+            return
+        ctype = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+        self._send(HTTPStatus.OK, data, ctype, "max-age=86400")
+
+    def _collection_random(self) -> None:
+        raw = self._query().get("exclude", "")
+        exclude = {int(x) for x in raw.split(",") if x.strip().isdigit()}
+        card = self.server.shelf.random(exclude)
+        if card is None:
+            self._json({"error": "the shelf is empty"}, HTTPStatus.NOT_FOUND)
+            return
+        self._json(card)
+
+    def _collection_one(self, name: str) -> None:
+        card = self.server.shelf.one(int(name)) if name.isdigit() else None
+        if card is None:
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        self._json(card)
 
     def _events(self) -> None:
         self.send_response(HTTPStatus.OK)
@@ -626,6 +848,7 @@ class WebServer(ThreadingHTTPServer):
         self.hub = hub or StateHub()
         self.lyrics = Lyrics()
         self.info = Info(collection, scrobbler, history)
+        self.shelf = Shelf(collection, history, self.info)
         self.genius = Genius()
         self.hub.on_album = self.info.prefetch
         self.hub.on_track = self._prefetch_track
@@ -648,6 +871,7 @@ class WebServer(ThreadingHTTPServer):
     def start(self) -> None:
         self._thread = threading.Thread(target=self.serve_forever, name="web", daemon=True)
         self._thread.start()
+        self.shelf.warm_covers()
 
     def stop(self) -> None:
         self.stopping = True

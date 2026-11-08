@@ -1,7 +1,11 @@
 /* Spindle touch display client.
    One EventSource carries the engine's ScreenState; the page interpolates the
-   progress between ticks, fetches lyrics and the info sheet on demand, and
-   turns swipes and taps into the few things the screen can do. */
+   progress between ticks, fetches lyrics and the info sheet on demand, and turns
+   swipes and taps into the few things the screen can do.
+
+   The screen is three pages in a ring, swiped left and right: Off (black on
+   purpose), Spindle (the record: playing, or black with the shelf controls a tap
+   reveals) and Claw (a placeholder for now). A needle drop always brings Spindle. */
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
@@ -11,11 +15,20 @@
     feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
     lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"),
     listening: $("listening"), sheet: $("sheet"), tiles: $("tiles"),
-    ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"),
-    endedSub: $("ended-sub"), off: $("off"),
+    ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"), endedSub: $("ended-sub"),
+    pages: [$("page-off"), $("page-spindle"), $("page-claw")], pageOff: $("page-off"), dots: $("dots"),
+    idle: $("idle"), btnPick: $("btn-pick"), btnShelf: $("btn-shelf"), btnRecent: $("btn-recent"),
+    pick: $("pick"), wheel: $("wheel"), wheelKicker: $("wheel-kicker"), wheelstrip: $("wheelstrip"),
+    landed: $("landed"), pickArt: $("pick-art"), pickKicker: $("pick-kicker"), pickTitle: $("pick-title"),
+    pickArtist: $("pick-artist"), pickMeta: $("pick-meta"), pickPlays: $("pick-plays"),
+    btnAnother: $("btn-another"), btnPickDone: $("btn-pick-done"), pickHint: $("pick-hint"),
+    shelf: $("shelf"), shelfCount: $("shelf-count"), shelfSort: $("shelf-sort"), btnShelfClose: $("btn-shelf-close"),
+    shelfgrid: $("shelfgrid"), recent: $("recent"), btnRecentClose: $("btn-recent-close"), recentlist: $("recentlist"),
   };
 
   const BULK_IMPORT_DAY = "2025-04-17";   // the day the first 46 records were entered at once
+  const OFF = 0, SPINDLE = 1, CLAW = 2;
+  const PAGE_NAMES = ["off", "spindle", "claw"];
   let state = null;
   let clockOffset = 0;                    // client seconds minus server seconds
   let artKey = "";
@@ -36,7 +49,6 @@
   let trackFor = "";
   let trackInfo = null;                   // Genius: story, samples, producers
   let sheetOpen = false;
-  let screenOff = false;
   let endedDismissed = null;              // `at` of an end-of-side card Luka tapped away
   let lastPhase = "";
   // The engine confirms a track change a few seconds after it happens (a tick, then a
@@ -77,6 +89,17 @@
     const d = new Date(iso.slice(0, 10) + "T12:00:00");
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   };
+  const fmtDay = (ts) => {
+    const d = new Date(ts * 1000), now = new Date();
+    const sameDay = (a, b) => a.toDateString() === b.toDateString();
+    if (sameDay(d, now)) return "Today";
+    const y = new Date(now); y.setDate(now.getDate() - 1);
+    if (sameDay(d, y)) return "Yesterday";
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
+      (d.getFullYear() !== now.getFullYear() ? ` ${d.getFullYear()}` : "");
+  };
+  const W = () => window.innerWidth;
+  const sample = (arr, n) => { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a.slice(0, n); };
 
   function rawPosition() {
     if (!state || state.track_elapsed == null) return null;
@@ -87,28 +110,80 @@
     return p == null ? null : (state.track_duration ? Math.min(p, state.track_duration) : p);
   }
 
+  // ── pages ────────────────────────────────────────────────────────────────
+  let pageIndex = SPINDLE;
+  let dotsTimer = 0, offTimer = 0;
+  function layoutPages(dx = 0, animate = false) {
+    const left = (pageIndex + 2) % 3, right = (pageIndex + 1) % 3;
+    el.pages.forEach((p, i) => {
+      p.classList.toggle("anim", animate);
+      const x = i === pageIndex ? dx : i === left ? dx - W() : dx + W();
+      p.style.transform = `translateX(${x}px)`;
+    });
+  }
+  // dir +1: the page to the right comes in (a swipe left); -1: the one to the left
+  function showPage(next, dir) {
+    if (next === pageIndex) { layoutPages(0, true); showDots(1200); return; }
+    const prev = pageIndex, far = 3 - prev - next;
+    pageIndex = next;
+    el.pages[far].classList.remove("anim");
+    el.pages[far].style.transform = `translateX(${dir >= 0 ? W() : -W()}px)`;   // parked where it enters from next
+    el.pages[prev].classList.add("anim");
+    el.pages[next].classList.add("anim");
+    requestAnimationFrame(() => {
+      el.pages[prev].style.transform = `translateX(${dir >= 0 ? -W() : W()}px)`;
+      el.pages[next].style.transform = "translateX(0px)";
+    });
+    onPageChanged();
+  }
+  function onPageChanged() {
+    el.body.dataset.page = PAGE_NAMES[pageIndex];
+    showDots(1800);
+    clearTimeout(offTimer);
+    el.pageOff.classList.toggle("arrived", pageIndex === OFF);
+    if (pageIndex === OFF) offTimer = setTimeout(() => el.pageOff.classList.remove("arrived"), 2200);
+    if (pageIndex !== SPINDLE) hideIdle();
+  }
+  function showDots(ms) {
+    clearTimeout(dotsTimer);
+    [...el.dots.children].forEach((d, i) => d.classList.toggle("on", i === pageIndex));
+    el.dots.classList.add("show");
+    if (ms) dotsTimer = setTimeout(() => el.dots.classList.remove("show"), ms);
+  }
+  // a tap on Off shows the way out for a moment: the dots and the word
+  function flashOff() {
+    el.pageOff.classList.add("arrived");
+    clearTimeout(offTimer);
+    offTimer = setTimeout(() => el.pageOff.classList.remove("arrived"), 2200);
+  }
+  layoutPages(0, false);
+
   // ── phases ───────────────────────────────────────────────────────────────
   function apply(st) {
     serverState = st;
     clockOffset = Date.now() / 1000 - st.server_time;
     st = viewOf(st);
     state = st;
-    // a tapped-away end card stays away; a new record coming on wakes a dark screen
+    // a tapped-away end card stays away; a record coming on brings the Spindle page
     const ended = st.ended && st.ended.at !== endedDismissed ? st.ended : null;
-    if (screenOff && st.phase === "playing" && lastPhase !== "playing") wake();
+    const playing = st.phase === "playing";
+    if (playing && lastPhase !== "playing") {
+      closeOverlays();
+      if (pageIndex !== SPINDLE) showPage(SPINDLE, pageIndex === OFF ? 1 : -1);
+    }
     lastPhase = st.phase;
     el.body.className = `phase-${st.phase}` + (sheetOpen ? " sheet-open" : "") + (ended ? " ended-open" : "");
-    const playing = st.phase === "playing";
     el.home.classList.toggle("hidden", !playing && !ended);
     requestAnimationFrame(() => el.home.classList.toggle("shown", playing || !!ended));
-    el.listening.classList.toggle("hidden", st.phase !== "listening");
+    el.listening.classList.toggle("hidden", st.phase !== "listening" || pickOpen || shelfOpen || recentOpen);
     if (playing) renderHome(st);
     renderEnded(ended);
     if (!playing && !ended) {
       closeSheet();
+      if (st.phase !== "idle") hideIdle();
       // idle and listening are black: the last record's blurred cover must not linger
-      // (the end-of-side card keeps it; once that goes, so does the backdrop)
-      if (artKey) { artKey = ""; el.art.removeAttribute("src"); el.bg.style.backgroundImage = ""; el.bg.classList.remove("ready"); }
+      // (the end-of-side card keeps it; once that goes, so does the backdrop; a pick owns it)
+      if (artKey && !pickOpen) { artKey = ""; el.art.removeAttribute("src"); el.bg.style.backgroundImage = ""; el.bg.classList.remove("ready"); }
     }
   }
 
@@ -119,7 +194,7 @@
       trackChangedAt = performance.now();
       const { main, feat } = splitFeat(st.title);
       el.title.textContent = main;
-      fitTitle();
+      fitTitle(el.title);
       el.artist.textContent = st.artist || "";
       el.feat.textContent = feat ? `feat. ${feat}` : "";
       lyricIndex = -1;
@@ -136,13 +211,12 @@
       const img = new Image();
       img.onload = () => {
         el.art.src = url;
-        el.bg.style.backgroundImage = `url("${url}")`;
-        el.bg.classList.add("ready");
+        setBackdrop(url);
         requestAnimationFrame(() => el.art.classList.remove("swap"));
       };
       img.src = url;
     } else if (!st.art && artKey) {
-      artKey = ""; el.art.removeAttribute("src"); el.bg.style.backgroundImage = ""; el.bg.classList.remove("ready");
+      artKey = ""; el.art.removeAttribute("src"); setBackdrop("");
     }
 
     const rows = st.tracklist || [];
@@ -154,15 +228,19 @@
     renderSide(st, rows);
   }
 
-  // Shrink the title until no word has to break (Plasticworld came out as "Plasticworl / d").
-  function fitTitle() {
-    const max = 108, min = 44;
+  function setBackdrop(url) {
+    el.bg.style.backgroundImage = url ? `url("${url}")` : "";
+    el.bg.classList.toggle("ready", !!url);
+  }
+
+  // Shrink a title until no word has to break (Plasticworld came out as "Plasticworl / d").
+  function fitTitle(node, max = 108, min = 44) {
     let size = max;
-    el.title.style.fontSize = size + "px";
-    const fits = () => { const w = el.title.clientWidth; return [...el.title.childNodes].length === 0 ||
-      Array.from(el.title.textContent.split(/\s+/)).every((word) => measure(word, size) <= w); };
-    while (size > min && !fits()) { size -= 4; el.title.style.fontSize = size + "px"; }
-    while (size > min && el.title.scrollHeight > size * 1.02 * 3.2) { size -= 4; el.title.style.fontSize = size + "px"; }
+    node.style.fontSize = size + "px";
+    const fits = () => { const w = node.clientWidth; return [...node.childNodes].length === 0 ||
+      Array.from(node.textContent.split(/\s+/)).every((word) => measure(word, size) <= w); };
+    while (size > min && !fits()) { size -= 4; node.style.fontSize = size + "px"; }
+    while (size > min && node.scrollHeight > size * 1.02 * 3.2) { size -= 4; node.style.fontSize = size + "px"; }
   }
   const canvas = document.createElement("canvas").getContext("2d");
   function measure(text, size) {
@@ -427,7 +505,6 @@
     hist += "</div>";
 
     const about = (info && info.story && info.story.text) ? esc(info.story.text) : "";
-    const trackName = state ? esc(state.title) : "";
     el.tiles.innerHTML = mast + `<div class="cols"><div class="col">` +
       sec(`On this track · ${state ? splitFeat(state.title).main : ""}`, `<div class="story">${story}</div>`) +
       sec("Credits", `<div class="cred">${credits}</div>`) +
@@ -438,25 +515,197 @@
       `</div></div>`;
   }
 
+  // ── nothing on the platter: the controls ─────────────────────────────────
+  const IDLE_CONTROLS_MS = 12000;
+  let idleOpen = false, idleTimer = 0;
+  function showIdle() {
+    if (!state || state.phase !== "idle" || pageIndex !== SPINDLE) return;
+    idleOpen = true;
+    el.idle.classList.remove("hidden");
+    requestAnimationFrame(() => el.idle.classList.add("shown"));
+    armIdleTimer();
+    loadCollection().then((col) => sample(col.filter((r) => r.cover), 12).forEach((r) => { new Image().src = r.cover; }));
+  }
+  function armIdleTimer() { clearTimeout(idleTimer); idleTimer = setTimeout(hideIdle, IDLE_CONTROLS_MS); }
+  function hideIdle() {
+    clearTimeout(idleTimer);
+    if (!idleOpen) return;
+    idleOpen = false;
+    el.idle.classList.remove("shown");
+    setTimeout(() => { if (!idleOpen) el.idle.classList.add("hidden"); }, 420);
+  }
+
+  // ── the shelf data ───────────────────────────────────────────────────────
+  let collection = null;                  // [{id, artist, title, year, released, formats, added, cover}]
+  async function loadCollection() {
+    if (collection) return collection;
+    try {
+      const r = await fetch("/api/collection");
+      const d = await r.json();
+      collection = d.releases || [];
+    } catch (e) { collection = []; }
+    return collection;
+  }
+
+  // ── the pick ─────────────────────────────────────────────────────────────
+  const WHEEL_TILE = 300 + 36;            // a cover plus the gap
+  let pickOpen = false, pickCard = null, lastPickId = 0, pickSerial = 0, pickFromShelf = false;
+  async function startPick() {
+    hideIdle();
+    const serial = ++pickSerial;
+    pickOpen = true; pickFromShelf = false;
+    el.pick.classList.remove("hidden");
+    el.landed.classList.remove("shown"); el.landed.classList.add("hidden");
+    el.wheel.classList.remove("hidden");
+    el.wheelstrip.innerHTML = "";
+    const col = await loadCollection();
+    el.wheelKicker.textContent = col.length ? `Picking one of ${col.length}` : "Picking one";
+    let card = null;
+    try { card = await (await fetch(`/api/collection/random?exclude=${lastPickId}`)).json(); } catch (e) { card = null; }
+    if (serial !== pickSerial || !pickOpen) return;
+    if (!card || card.error) { el.wheelKicker.textContent = "The shelf is empty"; return; }
+    // the covers that wheel past, the hit third from the end so something shows past it
+    const others = col.filter((r) => r.cover && r.id !== card.id);
+    const tiles = [...sample(others, 9), card, ...sample(others, 2)];
+    const hit = tiles.length - 3;
+    el.wheelstrip.innerHTML = tiles.map((r) => `<img src="${esc(r.cover || "")}" alt="">`).join("");
+    const centre = W() / 2 - 150;
+    el.wheelstrip.style.transition = "none";
+    el.wheelstrip.style.transform = `translateX(${centre}px)`;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      el.wheelstrip.style.transition = "";
+      el.wheelstrip.style.transform = `translateX(${centre - hit * WHEEL_TILE}px)`;
+    }));
+    setTimeout(() => { if (serial === pickSerial) el.wheelstrip.children[hit]?.classList.add("hit"); }, 1300);
+    setTimeout(() => { if (serial === pickSerial && pickOpen) land(card); }, 2000);
+  }
+
+  function land(card, fromShelf = false) {
+    pickCard = card; lastPickId = card.id; pickFromShelf = fromShelf;
+    pickOpen = true;
+    el.pick.classList.remove("hidden");
+    el.wheel.classList.add("hidden");
+    el.pickArt.src = card.cover || "";
+    setBackdrop(card.cover || "");
+    el.pickKicker.textContent = fromShelf ? "On the shelf" : "From the shelf";
+    el.pickTitle.textContent = card.title || "";
+    fitTitle(el.pickTitle, 108, 48);
+    el.pickArtist.textContent = card.artist || "";
+    const pr = card.pressing || {};
+    const year = card.released || pr.year || card.year;
+    const fmt = (pr.formats && pr.formats.length) ? fmtShort(pr.formats) : (card.formats || []).join(", ");
+    el.pickMeta.textContent = [year ? String(year) : "", fmt, card.added ? `on the shelf since ${fmtDate(card.added)}` : ""].filter(Boolean).join(" · ");
+    const pl = card.plays || {};
+    const plays = pl.user_plays != null ? `${pl.user_plays} ${pl.user_plays === 1 ? "play" : "plays"} on Last.fm` : "";
+    const last = pl.last_played ? `last on ${fmtDay(pl.last_played)}` : "";
+    el.pickPlays.textContent = [plays, last].filter(Boolean).join(" · ");
+    el.pickHint.textContent = "Pull it off the shelf. The screen wakes when the needle drops.";
+    el.btnPickDone.querySelector("span, b")?.remove();
+    el.btnPickDone.textContent = fromShelf ? "Back to the shelf" : "Done";
+    el.landed.classList.remove("hidden");
+    requestAnimationFrame(() => el.landed.classList.add("shown"));
+  }
+
+  function closePick() {
+    pickSerial++;
+    pickOpen = false; pickCard = null;
+    el.landed.classList.remove("shown");
+    el.pick.classList.add("hidden");
+    if (!state || state.phase !== "playing") setBackdrop("");
+  }
+
+  // ── the shelf ────────────────────────────────────────────────────────────
+  let shelfOpen = false, shelfSort = "recent";
+  async function openShelf() {
+    hideIdle();
+    shelfOpen = true;
+    el.shelf.classList.remove("hidden");
+    const col = await loadCollection();
+    el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
+    renderShelf();
+  }
+  function renderShelf() {
+    const col = (collection || []).slice();
+    const by = (f) => (a, b) => f(a).localeCompare(f(b), "en", { sensitivity: "base" });
+    if (shelfSort === "title") col.sort(by((r) => r.title));
+    else if (shelfSort === "artist") col.sort((a, b) => by((r) => r.artist)(a, b) || (a.released || a.year || 0) - (b.released || b.year || 0));
+    [...el.shelfSort.children].forEach((b) => b.classList.toggle("on", b.dataset.sort === shelfSort));
+    el.shelfgrid.innerHTML = col.length
+      ? col.map((r) => `<img src="${esc(r.cover || "")}" data-id="${r.id}" alt="${esc(r.title)}">`).join("")
+      : `<div class="empty">Nothing on the shelf yet</div>`;
+  }
+  function closeShelf() { shelfOpen = false; el.shelf.classList.add("hidden"); }
+
+  async function openCard(id, fromShelf) {
+    try {
+      const card = await (await fetch(`/api/collection/${id}`)).json();
+      if (card && !card.error) { if (fromShelf) closeShelf(); closeRecent(); land(card, fromShelf); }
+    } catch (e) { /* the shelf stays */ }
+  }
+
+  // ── recently played ──────────────────────────────────────────────────────
+  let recentOpen = false;
+  async function openRecent() {
+    hideIdle();
+    recentOpen = true;
+    el.recent.classList.remove("hidden");
+    el.recentlist.innerHTML = `<div class="empty">Looking back…</div>`;
+    let rows = [];
+    try { rows = await (await fetch("/api/history/albums?limit=12")).json(); } catch (e) { rows = []; }
+    if (!recentOpen) return;
+    if (!Array.isArray(rows) || !rows.length) { el.recentlist.innerHTML = `<div class="empty">Nothing has been on yet</div>`; return; }
+    el.recentlist.innerHTML = rows.map((r) => {
+      const rel = r.release;
+      const art = rel && rel.cover ? `<img src="${esc(rel.cover)}" alt="">` : `<div class="ph"></div>`;
+      const n = `${r.tracks} track${r.tracks === 1 ? "" : "s"}`;
+      return `<div class="rrow ${rel ? "" : "off"}" ${rel ? `data-id="${rel.id}"` : ""}>${art}<div><div class="rt">${esc(r.album)}</div><div class="ra">${esc(r.artist)}</div></div><div class="rw">${esc(fmtDay(r.last_played))}<br>${n}</div></div>`;
+    }).join("");
+  }
+  function closeRecent() { recentOpen = false; el.recent.classList.add("hidden"); }
+
+  function closeOverlays() { hideIdle(); closePick(); closeShelf(); closeRecent(); }
+
   // ── gestures ─────────────────────────────────────────────────────────────
+  // One pointer: a horizontal drag moves the pages; a vertical swipe opens or closes
+  // the info sheet; anything shorter than 14 px is a tap.
   let down = null;
-  document.addEventListener("pointerdown", (e) => { down = { x: e.clientX, y: e.clientY, t: Date.now(), target: e.target }; }, { passive: true });
+  document.addEventListener("pointerdown", (e) => {
+    down = { x: e.clientX, y: e.clientY, t: Date.now(), target: e.target, drag: false };
+    if (idleOpen) armIdleTimer();
+  }, { passive: true });
+  document.addEventListener("pointermove", (e) => {
+    if (!down) return;
+    const dx = e.clientX - down.x, dy = e.clientY - down.y;
+    if (!down.drag) {
+      if (sheetOpen || Math.abs(dx) < 16 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+      down.drag = true;
+      el.pages.forEach((p) => p.classList.remove("anim"));
+      showDots(0);
+    }
+    layoutPages(dx, false);
+  }, { passive: true });
   document.addEventListener("pointerup", (e) => {
     if (!down) return;
     const dx = e.clientX - down.x, dy = e.clientY - down.y, dt = Date.now() - down.t;
     const start = down; down = null;
-    if (screenOff) { wake(); return; }
-    if (Math.abs(dx) > 120 && Math.abs(dy) < 100 && dt < 1200) {
-      if (dx > 0 && !sheetOpen) sleep();   // swipe right: screen off
-      return;                              // swipe left: reserved (Claw mode)
+    if (start.drag) {
+      const speed = Math.abs(dx) / Math.max(1, dt);                       // px per ms
+      if (Math.abs(dx) > W() * 0.22 || speed > 0.6) showPage((pageIndex + (dx < 0 ? 1 : 2)) % 3, dx < 0 ? 1 : -1);
+      else { layoutPages(0, true); showDots(1200); }
+      return;
     }
     if (Math.abs(dy) > 100 && Math.abs(dx) < 160 && dt < 1500) {
-      if (dy < 0 && !sheetOpen) openSheet();
+      if (pageIndex !== SPINDLE) return;
+      if (dy < 0 && !sheetOpen && !pickOpen && !shelfOpen && !recentOpen) openSheet();
       else if (dy > 0 && sheetOpen && sheetAtTop()) closeSheet();
       return;
     }
     if (Math.abs(dx) < 14 && Math.abs(dy) < 14) tap(start);
   }, { passive: true });
+  document.addEventListener("pointercancel", () => {
+    if (down && down.drag) { layoutPages(0, true); showDots(1200); }
+    down = null;
+  });
   // The scroller owns vertical pans (touch-action: pan-y), so a pull-down on an open
   // sheet reaches us as touchmove, not pointerup: close on a pull past the top.
   let pull = null;
@@ -469,6 +718,7 @@
   }, { passive: true });
   const sheetAtTop = () => document.getElementById("sheetscroll").scrollTop <= 2;
   const closeZone = (t) => !!t.closest(".mast, .grab");
+  const hit = (t, node) => !!(node && (node === t || node.contains(t)));
 
   function tap(start) {
     const target = start.target;
@@ -476,19 +726,46 @@
       // "Flip for Side B" / "That's the record" tapped: he is not playing the rest, go dark
       endedDismissed = state.ended.at;
       apply(state);
-      sleep();
+      if (pageIndex !== OFF) showPage(OFF, -1);
       return;
     }
+    if (pageIndex !== SPINDLE) { showDots(1800); if (pageIndex === OFF) flashOff(); return; }
     if (sheetOpen) { if (!el.sheet.contains(target) || closeZone(target) || start.y < 140) closeSheet(); return; }
-    if (el.btnLyrics.contains(target) || el.title.contains(target) || el.artist.contains(target)) { toggleLyrics(); return; }
-    if (el.btnInfo.contains(target)) { openSheet(); return; }
+    if (pickOpen) {
+      if (hit(target, el.btnAnother)) { startPick(); return; }
+      if (hit(target, el.btnPickDone)) { const back = pickFromShelf; closePick(); if (back) openShelf(); return; }
+      return;
+    }
+    if (shelfOpen) {
+      if (hit(target, el.btnShelfClose)) { closeShelf(); return; }
+      const chip = target.closest("[data-sort]");
+      if (chip) { shelfSort = chip.dataset.sort; renderShelf(); return; }
+      const cover = target.closest("[data-id]");
+      if (cover) openCard(Number(cover.dataset.id), true);
+      return;
+    }
+    if (recentOpen) {
+      if (hit(target, el.btnRecentClose)) { closeRecent(); return; }
+      const row = target.closest("[data-id]");
+      if (row) openCard(Number(row.dataset.id), false);
+      return;
+    }
+    if (idleOpen) {
+      if (hit(target, el.btnPick)) { startPick(); return; }
+      if (hit(target, el.btnShelf)) { openShelf(); return; }
+      if (hit(target, el.btnRecent)) { openRecent(); return; }
+      hideIdle();
+      return;
+    }
+    if (state && state.phase === "idle") { showIdle(); return; }
+    if (!state || state.phase !== "playing") return;
+    if (hit(target, el.btnLyrics) || hit(target, el.title) || hit(target, el.artist)) { toggleLyrics(); return; }
+    if (hit(target, el.btnInfo)) { openSheet(); return; }
     if (el.lyrics.contains(target)) { toggleLyrics(false); }
   }
 
-  function sleep() { screenOff = true; el.off.classList.remove("hidden"); }
-  function wake() { screenOff = false; el.off.classList.add("hidden"); }
-
   document.addEventListener("contextmenu", (e) => e.preventDefault());
+  window.addEventListener("resize", () => layoutPages(0, false));
 
   // ── stream ───────────────────────────────────────────────────────────────
   // After the engine restarts, its caches are fresh and ours are stale: drop the
@@ -498,7 +775,7 @@
     const es = new EventSource("/events");
     es.onmessage = (e) => {
       try {
-        if (reconnected) { reconnected = false; infoFor = ""; trackFor = ""; info = null; trackInfo = null; }
+        if (reconnected) { reconnected = false; infoFor = ""; trackFor = ""; info = null; trackInfo = null; collection = null; }
         apply(JSON.parse(e.data));
         if (sheetOpen && !info) loadInfo();
       } catch (err) { console.error(err); }

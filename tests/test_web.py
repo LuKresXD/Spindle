@@ -206,3 +206,102 @@ def test_genius_parses_story_samples_and_producers():
                                "art": "https://img/hbfs.jpg"}]
     assert out["producers"] == ["Kanye West", "MIKE DEAN"] and out["release"] == "July 31, 2007"
     assert g.get("Kanye West", "Stronger") is out
+
+
+# ── the shelf ─────────────────────────────────────────────────────────────────
+
+class _Rel:
+    def __init__(self, rid, artist, title, added, cover="https://img/x.jpg", released=None,
+                 year=2019, formats=("Vinyl",)):
+        self.id, self.artist, self.title, self.added = rid, artist, title, added
+        self.cover, self.released, self.year, self.formats = cover, released, year, list(formats)
+
+
+class _Shelf:
+    ready = True
+
+    def __init__(self):
+        self.rels = [_Rel(1, "Massive Attack", "Mezzanine", "2026-02-26", released=1998),
+                     _Rel(2, "Kanye West (2)", "Graduation", "2026-11-06", released=2007),
+                     _Rel(3, "Кино", "45", "2026-10-14", cover="")]
+
+    def all_releases(self):
+        return sorted(self.rels, key=lambda r: r.added, reverse=True)
+
+    def release_by_id(self, rid):
+        return next((r for r in self.rels if r.id == rid), None)
+
+    def random_release(self, exclude=None):
+        return next(r for r in self.rels if r.id not in (exclude or set()))
+
+    def release_details(self, rel):
+        return {"formats": ["2 × Vinyl, LP, Album"], "year": rel.year, "country": "Europe"}
+
+    def find_release(self, artist, album):
+        return next((r for r in self.rels if r.title.lower() == album.lower()), None)
+
+
+class _Entry:
+    def __init__(self, artist, album, ts):
+        self.artist, self.album, self.timestamp = artist, album, ts
+
+
+class _History:
+    def recent(self, count=10, artist=None):
+        return [_Entry("Kanye West", "Graduation", 300), _Entry("Kanye West", "Graduation", 240),
+                _Entry("Pendulum", "Hold Your Colour", 100), _Entry("X", "", 50)]
+
+
+def test_shelf_lists_draws_and_serves_cards(tmp_path):
+    from spindle.web import Shelf
+    http = _Http({"/x.jpg": _Resp(200, None)})
+    http.routes["/x.jpg"].content = b"\xff\xd8\xff" + bytes(40)
+    info = Info(collection=_Collection(), scrobbler=_Scrobbler(), history=None, http=_Http({}))
+    shelf = Shelf(_Shelf(), _History(), info, http=http, art_dir=tmp_path)
+    listing = shelf.releases()
+    assert listing["count"] == 3 and [r["id"] for r in listing["releases"]] == [2, 3, 1]
+    row = listing["releases"][0]
+    assert row["artist"] == "Kanye West" and row["released"] == 2007   # "(2)" stripped, master year
+    assert row["cover"] == "/art/collection/2.jpg" and listing["releases"][1]["cover"] is None
+    card = shelf.random({1})
+    assert card["id"] == 2 and card["pressing"]["country"] == "Europe"
+    assert card["plays"]["user_plays"] == 158
+    assert shelf.one(1)["title"] == "Mezzanine" and shelf.one(9) is None
+    # covers: downloaded once, then the disk copy
+    assert shelf.cover(1) == http.routes["/x.jpg"].content and (tmp_path / "1.img").is_file()
+    assert shelf.cover(1) is not None and len(http.calls) == 1
+    assert shelf.cover(3) is None                                       # no cover listed
+    recent = shelf.recent_albums(limit=5)
+    assert [r["album"] for r in recent] == ["Graduation", "Hold Your Colour"]
+    assert recent[0]["tracks"] == 2 and recent[0]["release"]["id"] == 2
+    assert recent[1]["release"] is None and "key" not in recent[0]
+
+
+def test_server_routes_for_the_shelf(tmp_path):
+    srv = WebServer(WebConfig(host="127.0.0.1", port=0), collection=_Shelf(), history=_History())
+    srv.shelf.art_dir = tmp_path
+    (tmp_path / "2.img").write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(20))
+    srv.start()
+    port = srv.server_address[1]
+    try:
+        base = f"http://127.0.0.1:{port}"
+        d = json.loads(urllib.request.urlopen(f"{base}/api/collection").read())
+        assert d["count"] == 3 and d["releases"][0]["title"] == "Graduation"
+        card = json.loads(urllib.request.urlopen(f"{base}/api/collection/random?exclude=2,1")
+                          .read())
+        assert card["id"] == 3 and card["pressing"]["year"] == 2019
+        one = json.loads(urllib.request.urlopen(f"{base}/api/collection/1").read())
+        assert one["title"] == "Mezzanine"
+        art = urllib.request.urlopen(f"{base}/art/collection/2.jpg")
+        assert art.headers["Content-Type"] == "image/png" and art.read()[:4] == b"\x89PNG"
+        hist = json.loads(urllib.request.urlopen(f"{base}/api/history/albums?limit=1").read())
+        assert len(hist) == 1 and hist[0]["album"] == "Graduation"
+        for bad in ("/api/collection/77", "/art/collection/nope.jpg"):
+            try:
+                urllib.request.urlopen(base + bad)
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+            else:
+                raise AssertionError(bad)
+    finally:
+        srv.stop()

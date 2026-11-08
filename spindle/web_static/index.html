@@ -4,9 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>Spindle</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="phase-idle">
+<body class="phase-idle" data-page="spindle">
+<!-- three pages in a ring, swiped left and right: Off · Spindle · Claw -->
+<div id="pager" class="pager">
+
+<section id="page-off" class="page">
+  <div class="centre"><div id="offword" class="pageword faint">Off</div></div>
+</section>
+
+<section id="page-spindle" class="page">
 <div id="bg" class="bg"></div>
 <div class="veil"></div>
 
@@ -16,7 +25,7 @@
     <img id="art" class="art" alt="">
     <div id="albumline" class="meta"></div>
   </section>
-  <section class="centre">
+  <section class="centre-col">
     <div id="title" class="title"></div>
     <div id="artist" class="artist"></div>
     <div id="feat" class="feat"></div>
@@ -30,13 +39,82 @@
     <div id="lyrics" class="lyrics hidden"><div id="lyriclines" class="lyriclines"></div></div>
   </section>
   <div class="glass corner">
-    <button id="btn-lyrics" class="glass pill" type="button">Lyrics</button>
-    <button id="btn-info" class="glass pill" type="button">Info</button>
+    <button id="btn-lyrics" class="pill" type="button">Lyrics</button>
+    <button id="btn-info" class="pill" type="button">Info</button>
   </div>
 </main>
 
 <div id="listening" class="listening hidden">
   <div class="listen"><span class="dot pulse"></span><span>Listening</span></div>
+</div>
+
+<!-- nothing on the platter: a tap shows these, they fade after a while -->
+<div id="idle" class="idle hidden">
+  <div class="kicker">Nothing on the platter</div>
+  <button id="btn-pick" class="glass pill big" type="button">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h3.5c1.6 0 3 .8 3.9 2.1l3.2 4.8A4.7 4.7 0 0 0 17.5 15H21"/><path d="M3 18h3.5c1.3 0 2.5-.5 3.4-1.4"/><path d="M14.5 7.3A4.7 4.7 0 0 1 17.5 6H21"/><path d="m18 3 3 3-3 3"/><path d="m18 12 3 3-3 3"/></svg>
+    <span>Pick a record for me</span>
+  </button>
+  <div class="quiet">
+    <button id="btn-shelf" type="button">The shelf</button>
+    <button id="btn-recent" type="button">Recently played</button>
+  </div>
+</div>
+
+<!-- the pick: the covers wheel past, one lands and becomes the backdrop -->
+<div id="pick" class="pick hidden">
+  <div id="wheel" class="wheel">
+    <div id="wheel-kicker" class="kicker wheelkicker">Picking one</div>
+    <div id="wheelstrip" class="wheelstrip"></div>
+  </div>
+  <div id="landed" class="landed hidden">
+    <img id="pick-art" class="pickart" alt="">
+    <div class="pickcopy">
+      <div id="pick-kicker" class="kicker">From the shelf</div>
+      <div id="pick-title" class="picktitle"></div>
+      <div id="pick-artist" class="pickartist"></div>
+      <div id="pick-meta" class="meta pickmeta"></div>
+      <div id="pick-plays" class="meta pickmeta"></div>
+      <div class="row">
+        <button id="btn-another" class="glass pill big" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h3.5c1.6 0 3 .8 3.9 2.1l3.2 4.8A4.7 4.7 0 0 0 17.5 15H21"/><path d="M3 18h3.5c1.3 0 2.5-.5 3.4-1.4"/><path d="M14.5 7.3A4.7 4.7 0 0 1 17.5 6H21"/><path d="m18 3 3 3-3 3"/><path d="m18 12 3 3-3 3"/></svg>
+          <span>Another one</span>
+        </button>
+        <button id="btn-pick-done" class="glass pill big" type="button">Done</button>
+      </div>
+      <div id="pick-hint" class="hint">Pull it off the shelf. The screen wakes when the needle drops.</div>
+    </div>
+  </div>
+</div>
+
+<!-- the shelf: every record, a grid that scrolls -->
+<div id="shelf" class="shelf hidden">
+  <div class="shelfhead">
+    <div class="shelftitle">The shelf <span id="shelf-count" class="imuted"></span></div>
+    <div id="shelf-sort" class="glass tray">
+      <button class="pill on" data-sort="recent" type="button">Recent</button>
+      <button class="pill" data-sort="title" type="button">A–Z</button>
+      <button class="pill" data-sort="artist" type="button">Artist</button>
+    </div>
+    <button id="btn-shelf-close" class="glass pill" type="button">Close</button>
+  </div>
+  <div id="shelfgrid" class="shelfgrid"></div>
+</div>
+
+<!-- recently played: the last records that were on -->
+<div id="recent" class="recent hidden">
+  <div class="shelfhead">
+    <div class="shelftitle">Recently played</div>
+    <button id="btn-recent-close" class="glass pill" type="button">Close</button>
+  </div>
+  <div id="recentlist" class="recentlist"></div>
+</div>
+</section>
+
+<section id="page-claw" class="page">
+  <div class="centre"><div class="pageword">Claw</div></div>
+</section>
+
 </div>
 
 <div id="sheet" class="sheet hidden">
@@ -54,7 +132,7 @@
   </div>
 </div>
 
-<div id="off" class="off hidden"></div>
+<div id="dots" class="dots"><i></i><i class="on"></i><i></i></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

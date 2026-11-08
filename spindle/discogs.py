@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -95,6 +96,9 @@ class Release:
     tracks: list = field(default_factory=list)       # [{"position","title","duration","artist"}]
     loaded: bool = False
     added: str = ""                                   # date it entered the collection (YYYY-MM-DD)
+    cover: str = ""                                   # the cover image URL Discogs lists for it
+    master_id: int = 0                                # its master release, 0 = none
+    released: int | None = None    # ORIGINAL release year: None = not asked yet, 0 = unknown
 
     @property
     def positions(self) -> list[tuple[str, str]]:
@@ -107,7 +111,8 @@ class Release:
     def to_dict(self) -> dict:
         return {"id": self.id, "artist": self.artist, "title": self.title, "year": self.year,
                 "formats": self.formats, "tracks": self.tracks, "loaded": self.loaded,
-                "added": self.added}
+                "added": self.added, "cover": self.cover, "master_id": self.master_id,
+                "released": self.released}
 
     @staticmethod
     def from_dict(r: dict) -> Release:
@@ -115,9 +120,12 @@ class Release:
         if tracks is None:                              # v1 cache: [(position, title)]
             tracks = [{"position": p, "title": t, "duration": None, "artist": ""}
                       for p, t in r.get("positions", [])]
+        released = r.get("released")
         return Release(int(r["id"]), r["artist"], r["title"], int(r.get("year") or 0),
                        list(r.get("formats") or []), tracks, bool(r.get("loaded")),
-                       str(r.get("added") or ""))
+                       str(r.get("added") or ""), str(r.get("cover") or ""),
+                       int(r.get("master_id") or 0),
+                       None if released is None else int(released))
 
 
 class DiscogsCollection:
@@ -182,6 +190,7 @@ class DiscogsCollection:
             try:
                 self._refresh_if_stale()
                 self._prefetch_tracklists()
+                self._prefetch_masters()
             except Exception as e:  # the thread must survive anything
                 logger.warning("Discogs background: %s", e)
             self._wake.wait(timeout=300)
@@ -193,8 +202,26 @@ class DiscogsCollection:
         """Blocking refresh + prefetch (tests, one-off scripts)."""
         self._refresh_if_stale()
         self._prefetch_tracklists()
+        self._prefetch_masters()
 
     # ── queries (memory only, never block on the network) ────────────────────
+
+    def all_releases(self) -> list[Release]:
+        """Every record on the shelf, newest addition first."""
+        with self._lock:
+            return sorted(self._releases, key=lambda r: r.added, reverse=True)
+
+    def release_by_id(self, rid: int) -> Release | None:
+        with self._lock:
+            return next((r for r in self._releases if r.id == rid), None)
+
+    def random_release(self, exclude: set[int] | None = None) -> Release | None:
+        """One vinyl release drawn uniformly, never one of `exclude` while anything
+        else is left (the idle screen's "pick a record for me")."""
+        with self._lock:
+            pool = [r for r in self._releases if r.vinyl]
+        fresh = [r for r in pool if r.id not in (exclude or set())] or pool
+        return random.choice(fresh) if fresh else None
 
     def releases_for_artist(self, artist: str) -> list[Release]:
         with self._lock:
@@ -293,6 +320,7 @@ class DiscogsCollection:
         with self._lock:
             by_id = {r.id: r for r in self._releases}
         out: list[Release] = []
+        seen: set[int] = set()
         page = 1
         while True:
             data = self._get(f"/users/{self.username}/collection/folders/0/releases",
@@ -300,12 +328,19 @@ class DiscogsCollection:
             for item in data.get("releases", []):
                 info = item.get("basic_information", {})
                 rid = int(info.get("id", 0))
+                if rid in seen:                         # a second copy is still one record
+                    continue
+                seen.add(rid)
                 artists = ", ".join(a.get("name", "") for a in info.get("artists", []))
                 rel = by_id.get(rid) or Release(rid, artists, info.get("title", ""))
                 rel.artist, rel.title = artists, info.get("title", rel.title)
                 rel.year = int(info.get("year") or rel.year or 0)
                 rel.formats = [f.get("name", "") for f in info.get("formats", [])] or rel.formats
                 rel.added = str(item.get("date_added") or rel.added or "")[:10]
+                rel.cover = str(info.get("cover_image") or rel.cover or "")
+                rel.master_id = int(info.get("master_id") or rel.master_id or 0)
+                if not rel.master_id and rel.released is None:
+                    rel.released = rel.year           # no master: this pressing is the original
                 out.append(rel)
             pages = data.get("pagination", {}).get("pages", 1)
             if page >= pages:
@@ -344,13 +379,43 @@ class DiscogsCollection:
             if kind != "track" or not pos:
                 continue
             tracks.append(_track_dict(t, pos))
+        images = data.get("images") or []
+        primary = next((i.get("uri", "") for i in images if i.get("type") == "primary"),
+                       images[0].get("uri", "") if images else "")
         with self._lock:
             rel.tracks = tracks
             rel.loaded = True
             if not rel.year:
                 rel.year = int(data.get("year") or 0)
+            if not rel.cover and primary:
+                rel.cover = primary
+            if not rel.master_id:
+                rel.master_id = int(data.get("master_id") or 0)
+                if not rel.master_id and rel.released is None:
+                    rel.released = rel.year
             self._save_cache()
         logger.debug("Discogs: loaded %s — %s (%d tracks)", rel.artist, rel.title, len(tracks))
+
+    def _prefetch_masters(self) -> None:
+        """The original release year lives on the master: one call per record that has
+        one and has not been asked yet, rate limited like everything else."""
+        while not self._stop.is_set():
+            with self._lock:
+                pending = [r for r in self._releases if r.loaded and r.released is None]
+            if not pending:
+                return
+            rel = pending[0]
+            year = 0
+            try:
+                if rel.master_id:
+                    year = int(self._get(f"/masters/{rel.master_id}").get("year") or 0)
+            except requests.RequestException as e:
+                self.last_error = str(e)
+                logger.warning("Discogs: master for %s failed: %s", rel.title, e)
+                return
+            with self._lock:
+                rel.released = year or rel.year or 0
+                self._save_cache()
 
     def release_details(self, rel: Release) -> dict:
         """Pressing facts for the display's info sheet, one API call per release,
