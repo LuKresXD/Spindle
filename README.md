@@ -1,12 +1,13 @@
 <p align="center">
-  <img src="docs/logo.png" alt="Spindle" width="120">
+  <img src="docs/logo.png" alt="Spindle" width="110">
 </p>
 
 <h1 align="center">Spindle</h1>
 
 <p align="center">
-  <strong>Vinyl scrobbler for Raspberry Pi</strong><br>
-  Listens to your turntable, identifies tracks via audio fingerprinting, and scrobbles to Last.fm with Spotify-accurate metadata.
+  <strong>A vinyl scrobbler and now-playing display, on a Raspberry Pi beside the turntable.</strong><br>
+  It hears what the record is playing, works out which record it is, scrobbles the whole side to Last.fm,
+  and puts the cover, the lyrics and the liner notes on a touch screen on the wall.
 </p>
 
 <p align="center">
@@ -16,298 +17,222 @@
   <a href="https://www.last.fm/user/LuKresXD"><img src="https://img.shields.io/badge/Last.fm-scrobbling-red" alt="Last.fm"></a>
 </p>
 
+<p align="center">
+  <img src="docs/screens/now-playing.jpg" alt="Spindle on the 13-inch OLED: cover, title, progress, the side's tracklist" width="900">
+</p>
+
 ---
 
-## How it works
+## What it does
 
-```
-Turntable → RCA Y-splitter → USB audio adapter → Raspberry Pi → Last.fm
-                ↓
-            Speakers
-```
+Spindle listens to a split of the turntable's line-out through a USB audio adapter. Every two
+seconds it fingerprints the last few seconds of audio (ShazamIO, with AcoustID as a second
+opinion), asks which record is on the platter, and locks onto that record's tracklist. From then
+on it knows where you are in the side: it scrobbles each track to Last.fm as it ends, with the
+canonical Spotify names so vinyl plays stack with streaming plays, backfills what played before
+the first match, and stops at the end of the side to wait for the flip.
 
-Spindle listens to a USB audio adapter, fingerprints the last few seconds every 2 s, works out which record is on the platter (your Discogs collection decides when a track lives on several albums), locks onto its tracklist, and scrobbles the side to Last.fm with Spotify-canonical names so vinyl plays stack with your streaming plays. The design is written up in [`docs/ENGINE.md`](docs/ENGINE.md).
+Your **Discogs collection is the prior**. When a track sits on the album, a single and three
+compilations, the pressing you own wins, and a record Spotify never got still locks from the
+Discogs tracklist alone. The design is written up in [`docs/ENGINE.md`](docs/ENGINE.md).
 
-### Key features
+## The display
 
-- **Dual fingerprinting** — [AcoustID](https://acoustid.org) (Chromaprint) primary, [ShazamIO](https://github.com/dotX12/shazamio) fallback, off the main loop so the screen and silence detection never stall.
-- **Continuous capture** — one long-running `arecord` feeding a ring buffer; every fingerprint window is contiguous audio, a new attempt every 2 s.
-- **Your collection decides** — the Discogs collection is the prior: when a track sits on the album, a single and three compilations, the pressing you own wins. Records Spotify never got still lock from the Discogs tracklist alone.
-- **Album-lock, side-aware** — identify one track, scrobble the whole side. Backfills what played before the first ID, forward-fills gaps, advances by duration, and stops at the end of a side to wait for the flip. Re-locks onto a better tracklist when one appears (the album after a single, the owned pressing once the collection loaded).
-- **Spotify-canonical names** — `Playboi Carti — Poke It Out (with Nicki Minaj)`, so vinyl plays stack with streaming plays on Last.fm.
-- **Last.fm's rules, properly** — half the track or 4 minutes for early-ended tracks; an outbox thread with an offline queue that survives reboots; rejected scrobbles are reported, not retried forever.
-- **Telegram bot** — album-lock card, live now-playing edits, side summaries; `/now`, `/album`, `/history`, `/stats`, `/collection`.
-- **Screen** — cover, tracklist with the current track lit, `A3 · SIDE A`, progress, play count, on any framebuffer (13.3" HDMI OLED or the Waveshare SPI LCD).
-- **systemd service** — starts on boot, restarts on crash.
+<p align="center">
+  <img src="docs/screens/lyrics.jpg" alt="Time-synced lyrics" width="440">
+  <img src="docs/screens/info.jpg" alt="The liner notes page: story, credits, samples, your history" width="440">
+</p>
+
+Since v0.3 the screen is a web page Spindle serves itself, shown full screen by Chromium under
+the `cage` Wayland compositor on a 13.3-inch 1080p OLED with touch. Everything sits on the
+blurred cover; idle is pure black, so the panel is off until the needle drops.
+
+- **Now playing**: cover, title, artist, the feature credit on its own line, progress with
+  "Side A · 9 min left", this side's tracklist with the current track lit and played tracks dimmed.
+- **Lyrics**: tap the title or **Lyrics**. Time-synced lines from [LRCLIB](https://lrclib.net),
+  on the engine's clock, which the fingerprint offsets pin to within a second.
+- **Info**: swipe up or **Info** for the liner notes. The pressing from Discogs (label, country,
+  year, format, the median price of a VG+ copy), the story behind the track and the songs it
+  samples from Genius (with their covers), credits as prose from the Discogs per-track credits,
+  your plays of the track and of the record from Last.fm, and the album's story from Wikipedia.
+  Everything is prefetched on each track change, so it opens at once.
+- **End of side**: "Side A · finished / Flip for Side B / 5 tracks scrobbled". A tap turns the
+  screen off; a new record wakes it.
+- **Gestures**: swipe down, tap the top band or pull past the top to close Info; swipe right for
+  a dark screen; tap to wake.
+
+## How it hears
+
+- **Continuous capture**: one `arecord` feeding a ring buffer; every fingerprint window is
+  contiguous audio, a new attempt every 2 s. The card's capture gain is set at start so a
+  line-level deck neither clips nor idles in the noise.
+- **Music, not noise**: a session starts only when the level clears the gate *and* the spectrum
+  moves like music; a running turntable with no record stays dark.
+- **Offsets**: Shazam says where in the song the matched window sits. Two agreeing offsets pin
+  the track's start; a needle dropped mid-song counts from the song's true start; the ratio of
+  offsets to wall-clock measures the deck's speed, and the timing model runs at that speed.
+- **Album-lock**: identify once, scrobble the side. Backfill what played before the first match,
+  fill gaps the fingerprinter missed (bounded by the clock), advance by duration, re-lock onto a
+  better tracklist when one appears (the album after a single, the owned pressing once the
+  collection has loaded), never trade an owned pressing for a streaming edition.
+- **Any order**: play 3, go back to 1, play 2 and 3 again: each play is its own scrobble.
+- **Last.fm's rules**: half the track or four minutes; an outbox thread with an offline queue
+  that survives reboots; a scrobble Last.fm rejects is reported, not retried forever.
+- **Telegram**: album-lock card, live now-playing edits, side summaries; `/now`, `/album`,
+  `/history`, `/stats`, `/collection`.
 
 ## Hardware
 
-| Component | Example | Notes |
-|-----------|---------|-------|
-| Raspberry Pi | Pi 4 / Pi 5 | Any model with USB + network |
-| USB audio adapter | [Plugable USB-AUDIO](https://plugable.com/products/usb-audio) | Stereo input, line level |
-| RCA Y-splitters | Any | Split turntable output to speakers + Pi |
-| RCA → 3.5mm cable | Any | Connect splitter to USB adapter |
-| *(Optional)* Display | 13.3" 1080p OLED portable monitor on HDMI0 | Album art + track; black when idle. Any HDMI screen or the Waveshare 3.5" SPI LCD works (geometry auto-detected) |
-
-### Signal chain
+| Component | Used here | Notes |
+|-----------|-----------|-------|
+| Raspberry Pi | Pi 4 (2 GB) | Any model with USB and network |
+| USB audio adapter | [Plugable USB-AUDIO](https://plugable.com/products/usb-audio) | Stereo line-level input |
+| RCA Y-splitters + RCA → 3.5 mm | any | Split the deck's output to the speakers and the Pi |
+| Display *(optional)* | 13.3" 1080p OLED portable touch monitor | HDMI for video, its second USB-C to the Pi for touch. Any HDMI panel works; the framebuffer renderer still drives the Waveshare 3.5" SPI LCD |
 
 ```
-Turntable (phono out) → Preamp/Receiver (line out)
+Turntable (phono out) → preamp / receiver (line out)
     ↓
 RCA Y-splitter
-    ├── Speakers / Powered monitors
-    └── RCA → 3.5mm → USB audio adapter → Pi
+    ├── speakers
+    └── RCA → 3.5 mm → USB audio adapter → Raspberry Pi → Last.fm
+                                                   └→ HDMI → OLED
 ```
 
-> **Important:** The Pi needs a **line-level** signal, not phono. If your turntable has a built-in preamp or you're using a receiver's line/tape out, you're good.
+> The Pi needs a **line-level** signal, not phono. A turntable with a built-in preamp or a
+> receiver's line/tape out is fine.
 
 ## Quick start
 
-### 1. System dependencies
-
 ```bash
 sudo apt install -y python3-pip python3-venv ffmpeg libchromaprint-tools portaudio19-dev alsa-utils
-```
-
-### 2. Clone and install
-
-```bash
-git clone https://github.com/LuKresXD/spindle.git
-cd spindle
-python3 -m venv venv
-source venv/bin/activate
+git clone https://github.com/LuKresXD/spindle.git && cd spindle
+python3 -m venv venv && source venv/bin/activate
 pip install -e .
-```
-
-### 3. Configure
-
-```bash
 cp config.example.yaml config.yaml
 ```
 
-Edit `config.yaml` with your API keys:
+Fill in `config.yaml`:
 
-| Service | Get your key | Required |
-|---------|-------------|----------|
-| [AcoustID](https://acoustid.org/new-application) | Register an application | ✅ |
-| [Last.fm](https://www.last.fm/api/account/create) | Create API account | ✅ |
-| [Spotify](https://developer.spotify.com/dashboard) | Create an app | Recommended |
-| [Discogs](https://www.discogs.com/settings/developers) | Personal access token + your username | Recommended |
+| Service | Key | Needed for |
+|---------|-----|-----------|
+| [Last.fm](https://www.last.fm/api/account/create) | API account | scrobbling |
+| [AcoustID](https://acoustid.org/new-application) | application key | the second fingerprinter |
+| [Spotify](https://developer.spotify.com/dashboard) | app | canonical names and tracklists |
+| [Discogs](https://www.discogs.com/settings/developers) | personal token + username | your collection as the prior, side positions, pressing and price |
 
-> Spotify gives canonical names and tracklists; Discogs gives the records you actually own (album choice, side positions, tracklists Spotify lacks). Album-lock works with either; with neither, Spindle falls back to plain fingerprint → scrobble.
-
-Find your audio device:
+Find the audio device with `arecord -l` (`plughw:CARD=Device,DEV=0` for the Plugable), then:
 
 ```bash
-arecord -l
-# Look for your USB adapter, e.g.: card 1: Device [USB Audio Device], device 0
-# → device string: plughw:CARD=Device,DEV=0
+spindle --dry-run -v      # identify without scrobbling
+spindle -v                # the real thing
 ```
 
-### 4. Test
+Install as a service so it starts on boot and restarts on a crash:
 
 ```bash
-# Dry run — identify tracks without scrobbling
-spindle --dry-run -v
-```
-
-### 5. Run
-
-```bash
-spindle -v
-```
-
-### 6. Install as service (recommended)
-
-```bash
-# Edit spindle.service if your paths differ
 sudo cp spindle.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now spindle
+sudo systemctl daemon-reload && sudo systemctl enable --now spindle
+journalctl -u spindle -n 100
 ```
 
-Now Spindle starts on boot and restarts on crash. Check logs with:
+### The kiosk (touch display)
+
+Raspberry Pi OS, console boot (no desktop session: it would take the display), user `luka`:
 
 ```bash
-journalctl -u spindle -f
+sudo apt install cage chromium
+sudo cp spindle-kiosk.service /etc/systemd/system/
+sudo cp spindle-touch.rules /etc/udev/rules.d/98-spindle-touch.rules   # the touch controller's mouse half and the HDMI CEC inputs stay off the seat
+python3 tools/make_blank_cursor.py ~/.icons/blank
+sudo systemctl daemon-reload && sudo systemctl enable --now spindle-kiosk
 ```
 
-## Album-lock scrobbling
+```yaml
+web:
+  enabled: true           # Spindle serves the display at http://127.0.0.1:8787/
+display:
+  enabled: false          # the kiosk owns the screen; the framebuffer renderer is the fallback
+```
 
-Spindle's signature feature. When a track is identified (twice: one-off false matches never count):
-
-1. **Resolve** — which album? Your Discogs collection first, then the album already locked, then album > single > compilation. Owned pressing + Spotify edition are merged: record order and `A1…D3` positions, Spotify names and durations.
-2. **Lock** — the session takes that tracklist
-3. **Backfill** — how long has music been playing? Walk backwards through the side to scrobble tracks that played before the first ID
-4. **Predict** — advance by duration; scrobble each track as its time elapses; stop at the end of the side
-5. **Confirm** — later fingerprint hits confirm, correct, or re-lock onto a better tracklist
-6. **End** — silence (needle lift, side flip, end of record) ends the session
-
-This means: **drop the needle, walk away, come back to a fully scrobbled side** — even if fingerprinting only caught 1 out of 6 tracks.
-
-### Edge cases handled
-
-- Needle dropped mid-side → backfills only what fits in the elapsed time, never across a side boundary
-- Track on the album *and* a single *and* a compilation → the record you own wins; otherwise the album
-- Record not on Spotify → Discogs tracklist locks the album; Shazam/AcoustID name the tracks
-- Locked onto a single by mistake → re-locks onto the album when the next track arrives
-- Same artist, wrong title (sample, catalogue confusion) → ignored, the lock holds
-- Two different artists in a row → compilation mode, each track scrobbled when it ends
-- Needle lifted early → Last.fm's half-or-4-minutes rule decides
-- 20-second interludes / 13-minute epics → advance buffer scales (3–15 s)
-- Side flip → silence ends the session; side B starts fresh
-- Vinyl speed drift → ±3 % tolerance on all timing
-- USB adapter hiccup → the session holds instead of hearing "silence"; `arecord` is relaunched with backoff
-- WiFi down → scrobbles queue on disk and flush when it returns; a scrobble Last.fm rejects is reported, not retried forever
+The kiosk waits for `/healthz`, then opens the page. Static changes to the page need no engine
+restart: reload the browser (its DevTools port is on localhost) and the engine never notices.
 
 ## Configuration
 
-See [`config.example.yaml`](config.example.yaml) for all options. Key settings:
+See [`config.example.yaml`](config.example.yaml) for everything. The settings that matter most:
 
 ```yaml
 audio:
   device: "plughw:CARD=Device,DEV=0"
-  chunk_duration: 10        # fingerprint window size (seconds)
-  capture_gain_db: 20       # set the card's capture gain at start (a USB mic input at its
-                            # full 31 dB clips a line-level turntable and lifts its idle noise)
-  # Capture step is 2s — new window every 2s for fast identification
+  chunk_duration: 10         # fingerprint window (s); a new window every 2 s
+  capture_gain_db: 14        # the card's capture gain, set at start (31 dB clips a line-level deck)
 
 silence:
-  threshold_db: -45         # line-level USB capture: idle floor is ~-50 dB
-  min_silence_seconds: 8    # quiet this long = side over (run-out groove)
-  start_margin_db: 6        # music must clear threshold + margin to start a session
+  threshold_db: -45          # a line-level USB capture idles around -50 dB
+  start_margin_db: 6         # music must clear threshold + margin ...
+  start_ticks: 2             # ... for two ticks (run-out noise sits at the threshold)
+  min_silence_seconds: 8     # quiet this long = the side is over
 
 discogs:
-  token: ""                 # personal access token
-  username: ""              # your Discogs username
+  token: ""                  # your collection decides which album a track belongs to
+  username: ""
 
 scrobble:
-  min_play_seconds: 30      # Last.fm 30-second rule
-  dedup_window: 300         # ignore same track within 5 min
-
-telegram:
-  bot_token: ""             # from @BotFather
-  chat_id: ""               # your Telegram chat ID
-  silent: false             # silent notifications
-  verbose: false            # notify on every scrobble
-  errors: true              # notify on errors
-
-logging:
-  file: ""                  # optional log file path
-  max_bytes: 5000000        # 5 MB rotation
-  backup_count: 3           # keep 3 rotated files
+  min_play_seconds: 30
 ```
 
 ## Architecture
 
 ```
 spindle/
-├── cli.py          # Wiring + the 2 s tick loop
-├── engine.py       # Player + IdentifyWorker: transitions, identification off-thread, ScreenState
-├── state.py        # ScreenState / TrackRow: what the screen (or anything) renders from
-├── capture.py      # Continuous arecord -> ring buffer; levels and contiguous WAV windows
-├── fingerprint.py  # AcoustID (best-supported recording) + ShazamIO fallback, corrections
-├── resolve.py      # Fingerprint -> album: Discogs collection, locked album, album > single
-├── spotify.py      # Track candidates, canonical names, album tracklists
-├── discogs.py      # Your collection: releases, tracklists, positions (background refresh)
-├── tracklist.py    # AlbumTracklist, sides, Discogs <-> Spotify merge
-├── session.py      # Album-lock (side-aware, re-lock) + compilation session, backfill, timing
-├── scrobbler.py    # Last.fm outbox thread, offline queue, error classes, album play count
-├── art.py          # Cover art: Apple 1200 px -> Deezer -> Spotify, disk cache
-├── display.py      # Framebuffer renderer (HDMI OLED, or the Waveshare SPI LCD)
-├── history.py      # Scrobble history (JSONL log for stats)
+├── cli.py          # wiring + the 2 s tick loop
+├── engine.py       # Player + IdentifyWorker: phases, identification off-thread, ScreenState
+├── capture.py      # continuous arecord → ring buffer; levels, spectral motion, capture gain
+├── fingerprint.py  # ShazamIO (with offsets) + AcoustID, corrections
+├── resolve.py      # fingerprint → album: Discogs collection, locked album, album > single
+├── session.py      # album-lock: side-aware timing, offsets, deck speed, backfill, re-lock, any order
+├── tracklist.py    # AlbumTracklist, sides, Discogs ↔ Spotify merge
+├── discogs.py      # your collection, tracklists, pressing details, marketplace prices
+├── spotify.py      # candidates, canonical names, tracklists
+├── scrobbler.py    # Last.fm outbox thread, offline queue, play counts
+├── art.py          # cover art: Apple 1200 px → Deezer → Spotify
+├── web.py          # the display: SSE state, lyrics (LRCLIB), Info (Discogs, Genius, Wikipedia, Last.fm)
+├── web_static/     # the page: index.html, style.css, app.js (Inter, no framework)
+├── display.py      # framebuffer renderer (the fallback)
+├── state.py        # ScreenState / TrackRow: what any renderer draws from
+├── history.py      # scrobble log for stats
 ├── notify.py       # Telegram notifications
-├── bot.py          # Telegram bot command handler
-└── config.py       # YAML config loader
+├── bot.py          # Telegram bot commands
+└── config.py       # YAML config
 ```
 
-## Roadmap
+About 7,000 lines of Python, 650 lines of page, 83 tests. `ruff`, `mypy` and `pytest` run in CI.
 
-- [x] Audio capture + dual fingerprinting (AcoustID + ShazamIO)
-- [x] Last.fm scrobbling with dedup + canonicalization
-- [x] Spotify lookup for canonical artist/title format
-- [x] Album-lock scrobbling with retroactive backfill
-- [x] Offline scrobble queue (survives WiFi drops + reboots)
-- [x] systemd service (autostart, auto-restart)
-- [x] Telegram bot (notifications + `/now`, `/album`, `/history`, `/stats`, `/collection`)
-- [x] Scrobble history + statistics
-- [x] Rotating log files
-- [x] Framebuffer display: album art + track info, scales to the panel (13.3" HDMI OLED, Waveshare 3.5" LCD)
-- [x] Continuous capture (one arecord, ring buffer; fingerprints are always contiguous audio)
-- [x] Now-playing screen v2: tracklist with the current track lit, progress + time, side/position from Discogs, 1200 px art, listening state, scrobbled tick + play count
-- [x] Last.fm's half-or-4-minutes rule for early-ended tracks; `silence.min_silence_seconds` honoured
-- [x] Tests (`pytest`), lint (`ruff`), types (`mypy`)
-- [x] v0.2: the Discogs collection as the identification prior (owned album wins, Discogs-only locks, merged pressings), side-aware timing, re-lock, compilation-mode timing, identification and Last.fm off the tick thread, scrobble error classes
-- [ ] Touch "Claw mode" for the wall screen (Wayland kiosk)
+## History
 
-## Screen
-
-With `display.enabled: true` Spindle draws straight to `/dev/fb0` (no X, no
-Wayland): the Pi boots to the console and owns the panel. Idle is pure black,
-so an OLED shows nothing until the needle drops. While a side plays: cover on
-the left, artist / title / album · year, the album's tracklist with the
-current track lit and finished ones ticked, and a footer with the vinyl
-position from your Discogs collection (`discogs:` in config), a progress bar
-with elapsed / remaining time, your Last.fm play count for the album, and a
-tick once the track is scrobbled. Static parts re-render once a minute with a
-small pixel shift (burn-in); the progress band refreshes once a second.
-
-Frames can be rendered offscreen for a look without hardware:
-
-```python
-from spindle.display import Renderer
-from spindle.state import Phase, ScreenState, TrackRow
-r = Renderer(1920, 1080)
-st = ScreenState(phase=Phase.PLAYING, artist="Madvillain", title="Accordion", album="Madvillainy",
-                 tracklist=[TrackRow("Accordion", 72)], current_index=0, track_elapsed=10, track_duration=72)
-frame = r.playing(st, shift=False)
-y0, band = r.playing_band(frame, st)
-frame.image.paste(band, (0, y0)); frame.image.save("preview.png")
-```
+- **v0.1** (March 2026): capture, fingerprinting, Last.fm scrobbling, album-lock with backfill,
+  offline queue, Telegram bot, the first LCD screen. Built in four days.
+- **v0.2** (November 2026): the Discogs collection as the identification prior, side-aware timing,
+  re-lock, any-order listening, fingerprint offsets pin the start, deck speed measured, the
+  spectral-motion gate, identification and Last.fm off the tick thread.
+- **v0.3** (November 2026): the 13-inch OLED touch display as a self-served web page in a Wayland
+  kiosk: lyrics, the liner-notes page, end-of-side card, gestures, prefetching.
 
 ## Development
 
 ```bash
 pip install -e ".[display,dev]"
-ruff check spindle/ tests/
-pytest
+ruff check spindle tests && mypy spindle && pytest
 ```
-
-## License
-
-[MIT](LICENSE)
 
 ## Credits
 
-Built with [pyacoustid](https://github.com/beetbox/pyacoustid), [ShazamIO](https://github.com/dotX12/shazamio), [pylast](https://github.com/pylast/pylast), the [Spotify Web API](https://developer.spotify.com/documentation/web-api) and the [Discogs API](https://www.discogs.com/developers).
+Built by Luka Krestinin with [Claw](https://lukres.dev/projects/claw), his own agent, which writes
+the code to his spec while he chooses the stack, wires the rig and tunes it on real records.
+Standing on [ShazamIO](https://github.com/dotX12/shazamio), [pyacoustid](https://github.com/beetbox/pyacoustid),
+[pylast](https://github.com/pylast/pylast), [LRCLIB](https://lrclib.net), the
+[Spotify](https://developer.spotify.com/documentation/web-api), [Discogs](https://www.discogs.com/developers)
+and [Genius](https://genius.com) APIs, and [Inter](https://rsms.me/inter/).
 
-## Touch display (the 13.3" OLED)
-
-Since v0.3.0 the screen is a web page Spindle serves itself, shown full screen by
-Chromium under the `cage` Wayland compositor. The framebuffer renderer
-(`display.enabled: true`) is the fallback for a plain HDMI panel.
-
-```yaml
-web:
-  enabled: true           # serve the display at http://127.0.0.1:8787/
-display:
-  enabled: false          # the kiosk owns the screen; fb0 writes would vanish behind it
-```
-
-Install the kiosk once (Raspberry Pi OS, console boot, user `luka`):
-
-```bash
-sudo apt install cage chromium
-sudo cp spindle-kiosk.service /etc/systemd/system/
-sudo systemctl daemon-reload
-python3 tools/make_blank_cursor.py ~/.icons/blank   # the compositor's cursor, hidden
-sudo cp spindle-touch.rules /etc/udev/rules.d/98-spindle-touch.rules
-sudo systemctl enable --now spindle-kiosk
-```
-
-The page: cover, title, progress with "Side A · 10 min left", this side's
-tracklist; tap the title or **Lyrics** for time-synced lyrics (LRCLIB); swipe
-up or **Info** for the pressing (Discogs), credits, the story (Wikipedia) and
-your plays (Last.fm); a card when a side finishes; swipe right for a black
-screen, tap to wake. Idle is pure black (OLED off).
+[MIT](LICENSE)
