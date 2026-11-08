@@ -13,20 +13,26 @@ window.Motion = (() => {
   // A press squashes the control a little; the release springs it back with an
   // elastic settle. Delegated: anything matching PRESSABLE gets it.
   const PRESSABLE = ".pill, .quiet button, .shelfitem, .rrow[data-id], .wheel3d img";
+  // The feedback owns scale and nothing else: a shelf tile carries its sort offset in x/y and a
+  // wave may still be fading it in, so the press kills only scale tweens and the release never
+  // clears the transform (clearProps on any transform part drops the whole inline transform and
+  // sent a sorted tile back to its DOM cell: the black square in the Price sort, 2026-11-08).
+  const SCALE = "scale,scaleX,scaleY";
   let pressed = null;
   function press(el) {
     pressed = el;
-    gsap.killTweensOf(el);
-    gsap.to(el, { scale: 0.96, duration: D(0.1), ease: "power1.out", overwrite: true });
+    gsap.killTweensOf(el, SCALE);
+    gsap.to(el, { scale: 0.96, duration: D(0.1), ease: "power1.out" });
   }
   function release() {
     const el = pressed; pressed = null;
     if (!el) return;
     const w = el.offsetWidth || 1, h = el.offsetHeight || 1;
     const stretch = Math.min(10, 0.04 * w);
-    gsap.timeline({ overwrite: true })
+    gsap.killTweensOf(el, SCALE);
+    gsap.timeline()
       .to(el, { scaleX: (w + stretch) / w, scaleY: (h - stretch * 0.5) / h, duration: D(0.1), ease: "power1.out" })
-      .to(el, { scaleX: 1, scaleY: 1, duration: D(0.9), ease: "elastic.out(1, 0.4)", clearProps: "transform" });
+      .to(el, { scaleX: 1, scaleY: 1, duration: D(0.9), ease: "elastic.out(1, 0.4)" });
   }
   document.addEventListener("pointerdown", (e) => { const t = e.target.closest(PRESSABLE); if (t) press(t); }, { passive: true });
   document.addEventListener("pointerup", release, { passive: true });
