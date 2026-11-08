@@ -657,6 +657,7 @@ class Player:
             cur = tl.get_track_at(al.current_index)
             st.track_duration = float(cur.duration) if cur and cur.duration else None
             st.track_elapsed = max(0.0, (now - al.current_track_start) * s.deck_speed())
+            st.start_exact = al.start_exact
             st.scrobbled = st.tracklist[al.current_index].scrobbled if st.tracklist else False
             if s.deck_speed_samples >= 3:
                 st.deck_speed = s.deck_speed()

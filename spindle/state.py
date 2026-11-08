@@ -47,6 +47,7 @@ class ScreenState:
     current_index: int = -1         # index into tracklist, -1 = unknown
     track_elapsed: float | None = None   # seconds into the current track
     track_duration: float | None = None  # seconds; None = unknown
+    start_exact: bool = False       # the track's start is pinned by fingerprint offsets
 
     side: str = ""                  # "A" / "B" ... from Discogs
     position: str = ""              # "A3" from Discogs

@@ -197,7 +197,7 @@
   // The bar moves by transform (composited) ten times a second; the clock text
   // changes once a second; lyrics are checked every frame (cheap: an index compare).
   function lyricLead() {
-    if (!trackChangedAt) return LYRIC_BASE_LEAD;
+    if (!trackChangedAt || (state && state.start_exact)) return LYRIC_BASE_LEAD;   // pinned: no guess to cover
     const age = (performance.now() - trackChangedAt) / 1000;
     const fresh = age < FRESH_DECAY ? FRESH_LEAD * (1 - age / FRESH_DECAY) : 0;
     return LYRIC_BASE_LEAD + fresh;

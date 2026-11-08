@@ -518,3 +518,36 @@ def test_compilation_switch_returns_to_the_album_when_its_track_is_heard(clock, 
     assert s.album_state.scrobbled == {0, 1}                     # what played before survives
     assert s.album_state.current_track_start == back_at
     assert out == []                                             # Alpha "played" 10 s: no scrobble
+
+
+def test_needle_drop_into_the_first_track_keeps_the_song_clock(clock, album):
+    """The needle lands 20 s into Track 3 (109 s). Two agreeing offsets say the
+    song began before the music did; the clock counts from the song's start,
+    not from the drop, so lyrics are on time."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    music_start = clock.t
+    assert identified(s, album, "Track 3", music_start, at=music_start + 8, offset=22) == []
+    assert identified(s, album, "Track 3", music_start, at=music_start + 16, offset=30) == []
+    assert s.album_state.current_track_start == music_start - 20
+    assert s.start_exact
+    clock.t = music_start + 16
+    assert s.get_progress() == (36, 109)
+    # it played its last 89 s: scrobbled, timestamped when it was first heard
+    clock.t = music_start + 95
+    out = s.check_advance()
+    assert [(t.title, ts) for t, ts in out] == [("Track 3", music_start)]
+
+
+def test_needle_drop_near_the_end_counts_only_what_was_heard(clock, album):
+    """The needle lands 95 s into Track 3 (109 s): 14 s of it play. The clock
+    still shows the true position, but 14 s is not a play."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    music_start = clock.t
+    assert identified(s, album, "Track 3", music_start, at=music_start + 8, offset=97) == []
+    assert identified(s, album, "Track 3", music_start, at=music_start + 12, offset=101) == []
+    assert s.album_state.current_track_start == music_start - 95
+    clock.t = music_start + 12
+    assert s.get_progress() == (107, 109)
+    clock.t = music_start + 20
+    assert s.check_advance() == []
+    assert 2 not in s.album_state.scrobbled

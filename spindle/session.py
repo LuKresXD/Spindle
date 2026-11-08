@@ -309,7 +309,9 @@ class ScrobbleSession:
             return []
 
         result: list[tuple[TrackInfo, float]] = []
-        result.extend(self._try_scrobble(al.current_index, al.current_track_start))
+        heard_from = max(al.current_track_start, al.music_start)   # a needle drop skipped the rest
+        if self.played_enough(current, self._clock() - heard_from):
+            result.extend(self._try_scrobble(al.current_index, heard_from))
         al.completed.add(al.current_index)
 
         if al.tracklist.is_side_end(al.current_index):
@@ -387,6 +389,11 @@ class ScrobbleSession:
     @property
     def deck_speed_samples(self) -> int:
         return len(self._speed_samples)
+
+    @property
+    def start_exact(self) -> bool:
+        """The current track's start came from agreeing fingerprint offsets."""
+        return bool(self._album and self._album.start_exact)
 
     def current_track_start(self) -> float | None:
         if self.mode == SessionMode.ALBUM and self._album:
@@ -474,17 +481,26 @@ class ScrobbleSession:
         run = self._confirm.get(key)
         return run.start if run is not None else None
 
-    def _offset_start(self, track: TrackInfo, now: float, floor: float) -> float | None:
+    def _offset_start(self, track: TrackInfo, now: float, floor: float,
+                      needle: bool = False) -> float | None:
         """The offset-derived start, when it is physically possible: not after
-        now, not before `floor` by more than the needle tolerance, and not so
-        far back that the track would already be over."""
+        now, and not so far back that the track would already be over.
+
+        `floor` is the earliest the track can have started. With `needle`
+        the floor is when music began on the deck and a start before it is
+        the needle dropping into the song: the song's true start is kept, so
+        the clock (and the lyrics) count from where the song really is. Else
+        the floor is a previous track's start, which the start cannot precede
+        by more than the needle tolerance."""
         start = self._run_start(track)
         if start is None or start > now:
             return None
-        if start < floor - NEEDLE_TOLERANCE:
-            return None
         duration = track.duration or FALLBACK_TRACK_DURATION
         if now - start > duration + OFFSET_TOLERANCE:
+            return None
+        if needle:
+            return start
+        if start < floor - NEEDLE_TOLERANCE:
             return None
         return max(start, floor)
 
@@ -544,7 +560,7 @@ class ScrobbleSession:
         self._mismatch_count = 0
 
         track = tracklist.get_track_at(track_index) or resolved.track
-        start = self._offset_start(track, now, floor=music_start)
+        start = self._offset_start(track, now, floor=music_start, needle=True)
         pos = tracklist.position_at(track_index)
         logger.info("Session: 🔒 ALBUM — %s / %s  (track %d/%d%s, first ID: '%s', %s%s%s)",
                     tracklist.artist, tracklist.album_name, track_index + 1,
@@ -713,7 +729,7 @@ class ScrobbleSession:
             prev_idx = max((i for i in al.starts if i != track_index
                             and al.starts[i] < al.current_track_start), default=None)
             floor = al.starts[prev_idx] if prev_idx is not None else al.music_start
-            start = self._offset_start(track, now, floor=floor)
+            start = self._offset_start(track, now, floor=floor, needle=prev_idx is None)
             if start is not None and abs(start - al.current_track_start) > START_SNAP:
                 # a second or two matters for the lyrics; log the big corrections only
                 delta = abs(start - al.current_track_start)
@@ -800,10 +816,9 @@ class ScrobbleSession:
         if not self._album:
             return []
         current = self._album.tracklist.get_track_at(self._album.current_index)
-        elapsed = now - self._album.current_track_start
-        if current and self.played_enough(current, elapsed):
-            return self._try_scrobble(self._album.current_index,
-                                      self._album.current_track_start)
+        heard_from = max(self._album.current_track_start, self._album.music_start)
+        if current and self.played_enough(current, now - heard_from):
+            return self._try_scrobble(self._album.current_index, heard_from)
         return []
 
     # ── Album mode: scrobbling helpers ────────────────────────────────────────
