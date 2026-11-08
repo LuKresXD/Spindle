@@ -290,6 +290,8 @@ def test_server_routes_for_the_shelf(tmp_path):
         card = json.loads(urllib.request.urlopen(f"{base}/api/collection/random?exclude=2,1")
                           .read())
         assert card["id"] == 3 and card["pressing"]["year"] == 2019
+        draw = json.loads(urllib.request.urlopen(f"{base}/api/collection/draw?exclude=2,1").read())
+        assert draw["id"] == 3 and "pressing" not in draw and draw["cover"] is None
         one = json.loads(urllib.request.urlopen(f"{base}/api/collection/1").read())
         assert one["title"] == "Mezzanine"
         art = urllib.request.urlopen(f"{base}/art/collection/2.jpg")

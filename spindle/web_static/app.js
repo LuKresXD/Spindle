@@ -634,24 +634,50 @@
     hide(el.landed);
     show(el.wheel);
     el.wheelstrip.innerHTML = "";
+    // the draw is a memory lookup and comes back at once; the card (pressing from Discogs,
+    // plays from Last.fm) takes a second or two and is fetched behind the roll
+    const drawP = fetch(`/api/collection/draw?exclude=${lastPickId}`).then((r) => r.json()).catch(() => null);
     const col = await loadCollection();
     el.wheelKicker.textContent = col.length ? `Picking one of ${col.length}` : "Picking one";
     M.arrive(el.wheelKicker, { y: 12, duration: 0.7, delay: 0.3 });   // after the controls have left
-    let card = null;
-    try { card = await (await fetch(`/api/collection/random?exclude=${lastPickId}`)).json(); } catch (e) { card = null; }
+    const row = await drawP;
     if (serial !== pickSerial || !pickOpen) return;
-    if (!card || card.error) { el.wheelKicker.textContent = "The shelf is empty"; return; }
+    if (!row || row.error) { el.wheelKicker.textContent = "The shelf is empty"; return; }
+    const cardP = fetch(`/api/collection/${row.id}`).then((r) => r.json()).catch(() => null);
     // the covers that wheel past, the hit third from the end so something shows past it
-    const others = col.filter((r) => r.cover && r.id !== card.id);
-    const tiles = [...sample(others, 9), card, ...sample(others, 2)];
+    const others = col.filter((r) => r.cover && r.id !== row.id);
+    const tiles = [...sample(others, 9), row, ...sample(others, 2)];
     const hit = tiles.length - 3;
     el.wheelstrip.innerHTML = tiles.map((r) => `<img src="${esc(r.cover || "")}" alt="">`).join("");
-    await ready(tiles.map((r) => r.cover).filter(Boolean), 700);
+    await ready(tiles.map((r) => r.cover).filter(Boolean), 400);
     if (serial !== pickSerial || !pickOpen) return;
     const imgs = [...el.wheelstrip.children];
     wheelTl = M.wheel(el.wheelstrip, imgs, hit, {
-      onLand: () => { if (serial === pickSerial && pickOpen) land(card, false, imgs[hit]); },
+      onLand: async () => {
+        if (serial !== pickSerial || !pickOpen) return;
+        const card = (await Promise.race([cardP, new Promise((res) => setTimeout(() => res(null), 60))])) || row;
+        land(card, false, imgs[hit]);
+        if (!card.pressing) cardP.then((full) => { if (full && !full.error && serial === pickSerial && pickCard && pickCard.id === full.id) fillCard(full); });
+      },
     });
+  }
+
+  // the card's slower facts (pressing, plays) arriving after the landing
+  function cardLines(card) {
+    const pr = card.pressing || {};
+    const year = card.released || pr.year || card.year;
+    const fmt = (pr.formats && pr.formats.length) ? fmtShort(pr.formats) : (card.formats || []).join(", ");
+    const meta = [year ? String(year) : "", fmt, card.added ? `on the shelf since ${fmtDate(card.added)}` : ""].filter(Boolean).join(" · ");
+    const pl = card.plays || {};
+    const plays = pl.user_plays != null ? `${pl.user_plays} ${pl.user_plays === 1 ? "play" : "plays"} on Last.fm` : "";
+    const last = pl.last_played ? `last on ${fmtDay(pl.last_played)}` : "";
+    return { meta, plays: [plays, last].filter(Boolean).join(" · ") };
+  }
+  function fillCard(full) {
+    pickCard = full;
+    const lines = cardLines(full);
+    if (lines.meta !== el.pickMeta.textContent) { el.pickMeta.textContent = lines.meta; M.arrive(el.pickMeta, { y: 8, duration: 0.6 }); }
+    if (lines.plays && lines.plays !== el.pickPlays.textContent) { el.pickPlays.textContent = lines.plays; M.arrive(el.pickPlays, { y: 8, duration: 0.6 }); }
   }
 
   function land(card, fromShelf = false, fromTile = null) {
@@ -662,14 +688,9 @@
     el.pickKicker.textContent = fromShelf ? "On the shelf" : "From the shelf";
     el.pickTitle.textContent = card.title || "";
     el.pickArtist.textContent = card.artist || "";
-    const pr = card.pressing || {};
-    const year = card.released || pr.year || card.year;
-    const fmt = (pr.formats && pr.formats.length) ? fmtShort(pr.formats) : (card.formats || []).join(", ");
-    el.pickMeta.textContent = [year ? String(year) : "", fmt, card.added ? `on the shelf since ${fmtDate(card.added)}` : ""].filter(Boolean).join(" · ");
-    const pl = card.plays || {};
-    const plays = pl.user_plays != null ? `${pl.user_plays} ${pl.user_plays === 1 ? "play" : "plays"} on Last.fm` : "";
-    const last = pl.last_played ? `last on ${fmtDay(pl.last_played)}` : "";
-    el.pickPlays.textContent = [plays, last].filter(Boolean).join(" · ");
+    const lines = cardLines(card);
+    el.pickMeta.textContent = lines.meta;
+    el.pickPlays.textContent = lines.plays;
     el.pickHint.textContent = "Pull it off the shelf. The screen wakes when the needle drops.";
     el.btnPickDone.textContent = fromShelf ? "Back to the shelf" : "Done";
     show(el.landed);

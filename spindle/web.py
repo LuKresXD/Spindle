@@ -14,7 +14,8 @@ the rest on demand.
   GET /api/info    the info sheet: pressing (Discogs), credits, story (Wikipedia),
                    plays (Last.fm + the local history)
   GET /api/collection          the shelf: every record, newest first
-  GET /api/collection/random   one record drawn at random (?exclude=id,id), as a card
+  GET /api/collection/draw     one record drawn at random (?exclude=id,id): the row only, no network
+  GET /api/collection/random   the same draw as a full card (pressing + plays; two network calls)
   GET /api/collection/<id>     one record as a card: pressing, plays, last spin
   GET /api/history/albums      the records played most recently (?limit=12)
   GET /art/collection/<id>.jpg a record's cover, cached on disk
@@ -537,6 +538,14 @@ class Shelf:
 
     # one record ------------------------------------------------------------
 
+    def draw(self, exclude: set[int] | None = None) -> dict | None:
+        """The draw alone, from memory: the wheel can start on the tap while the card's
+        network calls (pressing, plays) run behind it."""
+        if self.collection is None:
+            return None
+        rel = self.collection.random_release(exclude)
+        return self._row(rel) if rel is not None else None
+
     def random(self, exclude: set[int] | None = None) -> dict | None:
         if self.collection is None:
             return None
@@ -716,8 +725,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._art(path[len("/art/"):])
             elif path == "/api/collection":
                 self._json(self.server.shelf.releases())
-            elif path == "/api/collection/random":
-                self._collection_random()
+            elif path in ("/api/collection/random", "/api/collection/draw"):
+                self._collection_random(full=path.endswith("random"))
             elif path.startswith("/api/collection/"):
                 self._collection_one(path[len("/api/collection/"):])
             elif path == "/api/history/albums":
@@ -771,10 +780,10 @@ class _Handler(BaseHTTPRequestHandler):
         ctype = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
         self._send(HTTPStatus.OK, data, ctype, "max-age=604800")
 
-    def _collection_random(self) -> None:
+    def _collection_random(self, full: bool = True) -> None:
         raw = self._query().get("exclude", "")
         exclude = {int(x) for x in raw.split(",") if x.strip().isdigit()}
-        card = self.server.shelf.random(exclude)
+        card = self.server.shelf.random(exclude) if full else self.server.shelf.draw(exclude)
         if card is None:
             self._json({"error": "the shelf is empty"}, HTTPStatus.NOT_FOUND)
             return
