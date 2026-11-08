@@ -438,10 +438,19 @@
   document.addEventListener("contextmenu", (e) => e.preventDefault());
 
   // ── stream ───────────────────────────────────────────────────────────────
+  // After the engine restarts, its caches are fresh and ours are stale: drop the
+  // sheet data on reconnect and reload it if the sheet is open.
+  let reconnected = false;
   function connect() {
     const es = new EventSource("/events");
-    es.onmessage = (e) => { try { apply(JSON.parse(e.data)); } catch (err) { console.error(err); } };
-    es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+    es.onmessage = (e) => {
+      try {
+        if (reconnected) { reconnected = false; infoFor = ""; trackFor = ""; info = null; trackInfo = null; }
+        apply(JSON.parse(e.data));
+        if (sheetOpen && !info) loadInfo();
+      } catch (err) { console.error(err); }
+    };
+    es.onerror = () => { es.close(); reconnected = true; setTimeout(connect, 2000); };
   }
   connect();
   requestAnimationFrame(frame);
