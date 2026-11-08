@@ -202,11 +202,12 @@ window.Motion = (() => {
     return gsap.fromTo(items, { x: (i) => from[i].x, y: (i) => from[i].y },
       { x: (i) => to[i].x, y: (i) => to[i].y, duration: D(0.65), ease: "power4.inOut", stagger: 0.003 });
   }
-  // Covers wave in from the top left (yPercent, so a sort's x/y offsets are left alone).
+  // Covers wave in from the top left: yPercent, so a sort's x/y offsets are left alone, and
+  // plain opacity, so no tile changes visibility mid-wave (each such change re-layerizes).
   function waveIn(items) {
     const list = gsap.utils.toArray(items);
     if (!list.length) return null;
-    return gsap.fromTo(list, { yPercent: 14, autoAlpha: 0 }, { yPercent: 0, autoAlpha: 1, duration: D(0.8), ease: SETTLE,
+    return gsap.fromTo(list, { yPercent: 14, opacity: 0 }, { yPercent: 0, opacity: 1, duration: D(0.8), ease: SETTLE,
       stagger: { each: 0.018, from: "start" } });
   }
 

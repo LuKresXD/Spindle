@@ -816,17 +816,18 @@
     const slotOf = new Map(sorted(collection).map((r, v) => [String(r.id), v]));
     const seen = (slot, first) => { const row = Math.floor(slot / COLS); return row >= first && row < first + rows; };
     const moving = [], from = [], to = [], still = [], at = [];
-    M.gsap.killTweensOf(kids, "x,y");
     kids.forEach((n, d) => {
       const v = slotOf.get(n.dataset.id);
       if (v == null) return;
       const was = n.dataset.slot === undefined ? d : +n.dataset.slot;
+      if (was === v && n.dataset.slot !== undefined) return;         // already where it belongs
       n.dataset.slot = v;
       const p = slotPos(v, step), q = slotPos(d, step), w = slotPos(was, step);
       const target = { x: p.x - q.x, y: p.y - q.y };
       if (animate && (seen(was, topRow) || seen(v, 0))) { moving.push(n); from.push({ x: w.x - q.x, y: w.y - q.y - scrolled }); to.push(target); }
       else { still.push(n); at.push(target); }
     });
+    M.gsap.killTweensOf(moving.concat(still), "x,y");                 // a tile whose slot is unchanged keeps its glide
     if (still.length) M.gsap.set(still, { x: (i) => at[i].x, y: (i) => at[i].y });   // one call, not one per tile
     el.shelfgrid.scrollTop = 0;
     placedSort = shelfSort;
@@ -860,7 +861,7 @@
     el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
     buildGrid(col);
     if (placedSort !== shelfSort) placeShelf(false);
-    el.shelfgrid.classList.toggle("priced", shelfSort === "price");
+    if (el.shelfgrid.classList.contains("priced") !== (shelfSort === "price")) el.shelfgrid.classList.toggle("priced");   // (an idle toggle still restyles 87 tags)
     el.shelfgrid.scrollTop = 0;
     M.arrive(el.shelf.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
     M.waveIn(visualOrder().slice(0, 21));

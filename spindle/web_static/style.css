@@ -224,7 +224,9 @@ body.ended-open #home { opacity: 0; }
 .imuted { color: rgba(255,255,255,.45); font-weight: 500; }
 
 /* nothing on the platter: the controls a tap reveals -------------------------- */
-.idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 34px; }
+.idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 34px;
+  will-change: opacity; }
+.idle > * { will-change: transform, opacity; }   /* the controls arrive and leave as layers */
 .quiet { display: flex; gap: 44px; }
 .quiet button { font-size: 26px; font-weight: 600; color: rgba(255,255,255,.55); padding: 12px 8px; }
 
@@ -257,7 +259,7 @@ body.ended-open #home { opacity: 0; }
 /* the shelf and the recent list ------------------------------------------------ */
 .shelf, .recent { position: absolute; inset: 0; padding: var(--pad-y) var(--pad-x) 0; display: flex; flex-direction: column; }
 .shelf.prepared { pointer-events: none; }   /* laid out and painted at opacity 0, waiting; see prepareShelf in app.js */
-.shelfhead { display: flex; align-items: center; gap: 24px; margin-bottom: 36px; }
+.shelfhead { display: flex; align-items: center; gap: 24px; margin-bottom: 36px; will-change: transform, opacity; }
 .shelftitle { font-size: 44px; font-weight: 700; letter-spacing: -.02em; flex: 1; }
 .tray { display: inline-flex; align-items: center; gap: 4px; padding: 6px; border-radius: 999px; overflow: visible; }
 .tray .pill { height: 52px; padding: 0 22px; font-size: 24px; background: transparent; box-shadow: none; }
