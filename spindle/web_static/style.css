@@ -1,13 +1,11 @@
 /* Spindle touch display: Liquid-Glass-style screen for a 1920x1080 OLED.
-   The backdrop is the cover, blurred once; glass panels blur what is behind them.
+   The backdrop is the cover, blurred once; glass panels are smoked lenses over it.
    Nothing animates continuously under a glass panel (the Pi's GPU budget). */
 
 @font-face { font-family: Inter; src: url("/static/InterVariable.ttf") format("truetype"); font-weight: 100 900; }
 
 :root {
   --pad-x: 84px; --pad-y: 72px;
-  --glass-fill: rgba(255,255,255,.12);
-  --glass-rim: rgba(255,255,255,.22);
   --text-dim: rgba(255,255,255,.62);
   --ease: cubic-bezier(.2,.8,.2,1);
 }
@@ -30,23 +28,25 @@ button { font: inherit; color: inherit; border: 0; background: none; cursor: non
 body.phase-playing .veil { opacity: 1; }
 
 /* glass --------------------------------------------------------------------- */
-/* The backdrop is already a blurred cover, so a translucent fill reads as glass
-   without backdrop-filter (which re-blurs the screen every frame on the Pi). */
-.glass { position: relative; background: var(--glass-fill);
-  border-radius: 36px; border: 1px solid var(--glass-rim);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.42), inset 0 -1px 0 rgba(255,255,255,.06),
-              inset 0 0 0 1.5px rgba(255,255,255,.07), 0 18px 60px rgba(0,0,0,.28); overflow: hidden; }
-.glass::before { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
-  background: radial-gradient(120% 55% at 10% 0%, rgba(255,255,255,.16), transparent 55%),
-              linear-gradient(160deg, rgba(255,255,255,.06), transparent 45%, rgba(255,255,255,.04) 100%); }
-.glass::after { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
-  background: linear-gradient(115deg, transparent 55%, rgba(255,255,255,.05) 70%, transparent 85%); }
+/* Liquid Glass over dark content: a smoked lens barely lighter than what is behind it,
+   a rim lit from the top and the leading edge, a soft shadow (Apple's iOS 27 design kit).
+   Gradients and shadows only: the backdrop is already the blurred cover, and backdrop-filter
+   would re-blur the screen every frame on the Pi. */
+.glass { position: relative; border-radius: 36px; overflow: hidden;
+  background: linear-gradient(180deg, rgba(40,40,46,.42) 0%, rgba(8,8,10,.56) 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.32), inset 0 -1px 0 rgba(255,255,255,.06),
+              inset 0 14px 22px -14px rgba(255,255,255,.14), 0 16px 44px rgba(0,0,0,.45); }
+.glass::before { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit; padding: 1.5px;
+  background: radial-gradient(circle 70px at 0 50%, rgba(255,255,255,.55), transparent 100%),
+              linear-gradient(180deg, rgba(255,255,255,.55) 0%, rgba(255,255,255,.13) 40%, rgba(255,255,255,.08) 70%, rgba(255,255,255,.22) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }
 
-.pill { display: inline-flex; align-items: center; gap: 12px; padding: 14px 24px; border-radius: 999px;
-  font-weight: 600; font-size: 24px; transition: background .25s var(--ease), transform .2s var(--ease); }
-.pill.on { background: rgba(255,255,255,.20); }
+.pill { display: inline-flex; align-items: center; gap: 14px; height: 68px; padding: 0 30px; border-radius: 999px;
+  font-weight: 600; font-size: 28px; letter-spacing: -0.01em; transition: background .25s var(--ease), transform .2s var(--ease); }
+.pill.on { background: rgba(255,255,255,.24); }        /* selected = a lighter inner glass, as a tab bar does */
 .pill:active { transform: scale(.96); }
-.pill.big { font-size: 30px; padding: 20px 34px; }
+.pill.big { font-size: 32px; height: 80px; padding: 0 38px; gap: 16px; }
+#sidepill { height: 56px; font-size: 24px; padding: 0 24px; gap: 12px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: #fff; box-shadow: 0 0 12px #fff; }
 .dot.pulse { animation: breathe 2.6s ease-in-out infinite; }
 @keyframes breathe { 0%, 100% { opacity: .3; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
@@ -80,8 +80,7 @@ body.phase-playing .veil { opacity: 1; }
 .row .pos, .row .dur { color: rgba(255,255,255,.55); font-weight: 500; font-variant-numeric: tabular-nums; }
 .row .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row.done .name, .row.done .pos, .row.done .dur { color: rgba(255,255,255,.42); }
-.row.cur { background: rgba(255,255,255,.16);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.45), inset 0 0 0 1px rgba(255,255,255,.08), 0 8px 24px rgba(0,0,0,.14); }
+.row.cur { background: rgba(255,255,255,.18); box-shadow: inset 0 1px 0 rgba(255,255,255,.28); }
 .row.cur .name { font-weight: 700; }
 .list.compact .row { font-size: 27px; padding: 13px 22px; }
 .list.tiny .row { font-size: 23px; padding: 9px 20px; gap: 16px; }
@@ -98,7 +97,11 @@ body.phase-playing .veil { opacity: 1; }
 .lyric.cur { color: #fff; transform: scale(1.22); }
 .lyric.empty { font-weight: 500; color: var(--text-dim); font-size: 30px; }
 
-.corner { position: absolute; right: var(--pad-x); bottom: 64px; display: flex; gap: 14px; }
+/* the two corner controls share one glass tray; the active one is a lighter inner pill */
+.corner { position: absolute; right: var(--pad-x); bottom: 56px; display: flex; gap: 4px; padding: 6px; border-radius: 999px; overflow: visible; }
+.corner .pill { height: 56px; padding: 0 24px; font-size: 26px; background: transparent; box-shadow: none; }
+.corner .pill::before { display: none; }
+.corner .pill.on { background: rgba(255,255,255,.22); }
 
 /* listening ----------------------------------------------------------------- */
 /* Just the word and a breathing dot on black: no box, no meter (the level is not
