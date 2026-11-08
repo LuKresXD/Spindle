@@ -152,14 +152,16 @@ window.Motion = (() => {
     const R = chord / (2 * Math.sin((CURVE / 2) * Math.PI / 180));
     const edge = 95;
     const proxy = { o: hit - 9, f: 0 };          // o: the ring's position; f: the fade-in
+    // One quick setter per tile: a gsap.set per tile per frame built fifteen tween objects a
+    // frame, a third of the Pi's budget and a major GC mid-roll.
+    const set = imgs.map((img) => gsap.quickSetter(img, "css"));
     const place = () => {
       imgs.forEach((img, i) => {
         const a = gsap.utils.clamp(-edge, edge, (i - proxy.o) * CURVE);
         const rad = a * Math.PI / 180;
         const dist = Math.abs(i - proxy.o);
-        // autoAlpha: a tile that is out of sight is also out of the compositor's hands
-        gsap.set(img, { x: Math.sin(rad) * R, z: -R * (1 - Math.cos(rad)), rotationY: -a,
-          autoAlpha: proxy.f * gsap.utils.clamp(0, 1, 1.1 - dist * 0.33), scale: 1 - Math.min(0.18, dist * 0.04) });
+        set[i]({ x: Math.sin(rad) * R, z: -R * (1 - Math.cos(rad)), rotationY: -a,
+          opacity: proxy.f * gsap.utils.clamp(0, 1, 1.1 - dist * 0.33), scale: 1 - Math.min(0.18, dist * 0.04) });
       });
     };
     gsap.set(imgs, { xPercent: -50, yPercent: -50, transformOrigin: "50% 50%" });
@@ -170,7 +172,8 @@ window.Motion = (() => {
     // still visibly turning until it stops: power3, not expo (whose long tail parks the
     // wheel a second before the hand-over).
     const tl = gsap.timeline({ paused: true });
-    tl.to(proxy, { f: 1, duration: D(0.3), ease: MICRO, onUpdate: place }, 0);
+    tl.to(proxy, { f: 1, duration: D(0.3), ease: MICRO, onUpdate: place,
+      onStart: () => gsap.set(imgs, { visibility: "inherit" }) }, 0);   // the stylesheet hides a tile until it is placed
     tl.to(proxy, { o: hit, duration: D(1.9), ease: "power3.out", onUpdate: place }, 0.12);
     requestAnimationFrame(() => requestAnimationFrame(() => tl.play()));
     tl.to(imgs.filter((_, i) => i !== hit), { autoAlpha: 0, duration: D(0.3), ease: MICRO, overwrite: "auto" }, ">-0.3");
