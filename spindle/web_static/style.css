@@ -113,10 +113,11 @@ body.phase-playing .veil { opacity: 1; }
 .corner .pill.on { background: transparent; }
 
 /* listening ----------------------------------------------------------------- */
-/* Just the word and a breathing dot on black: no box, no meter (the level is not
-   progress and read like a fake progress bar). */
+/* Needle down: the lockup draws itself and stays (the mark is cloned from the boot one at
+   start), the word and the live level settle beneath it. No box, no progress bar. */
 .listening { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
-.listen { display: flex; align-items: center; gap: 20px; font-size: 36px; font-weight: 500;
+.listenstack { display: flex; flex-direction: column; align-items: center; gap: 48px; transform: translateY(-18px); }
+.listen { display: flex; align-items: center; gap: 20px; font-size: 32px; font-weight: 500;
   color: rgba(255,255,255,.72); letter-spacing: -0.01em; }
 .listen .dot { width: 12px; height: 12px; }
 

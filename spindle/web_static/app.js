@@ -16,7 +16,7 @@
     artist: $("artist"), albumline: $("albumline"), sidetext: $("sidetext"), fill: $("fill"),
     feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
     lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"), corner: document.querySelector(".corner"),
-    listening: $("listening"), lvl: $("lvl"), sheet: $("sheet"), tiles: $("tiles"),
+    listening: $("listening"), listenlockup: $("listenlockup"), listenword: $("listenword"), listenrow: $("listenrow"), lvl: $("lvl"), sheet: $("sheet"), tiles: $("tiles"),
     ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"), endedSub: $("ended-sub"),
     pages: [$("page-off"), $("page-spindle"), $("page-claw")], pageOff: $("page-off"), offword: $("offword"), dots: $("dots"),
     idle: $("idle"), btnPick: $("btn-pick"), btnShelf: $("btn-shelf"), btnRecent: $("btn-recent"),
@@ -194,7 +194,7 @@
     el.home.classList.toggle("hidden", !playing && !ended);
     requestAnimationFrame(() => el.home.classList.toggle("shown", playing || !!ended));
     const listen = st.phase === "listening" && !pickOpen && !shelfOpen && !recentOpen;
-    if (listen && el.listening.classList.contains("hidden")) { show(el.listening); M.arrive(el.listening.firstElementChild, { y: 14, duration: 0.8 }); }
+    if (listen && el.listening.classList.contains("hidden")) { show(el.listening); M.listenIn(el.listenlockup.querySelector(".bootmark"), el.listenword, el.listenrow); }
     else if (!listen) hide(el.listening);
     if (listen) renderLevel(st.level_db);
     if (playing) renderHome(st);
@@ -1042,6 +1042,9 @@
   window.addEventListener("resize", rest);
 
   // ── boot ─────────────────────────────────────────────────────────────────
+  // The needle-down screen carries the same record mark: cloned here, before boot removes its overlay.
+  const bootMark = el.boot && el.boot.querySelector(".bootmark");
+  if (bootMark && el.listenlockup) { const m = bootMark.cloneNode(true); m.removeAttribute("id"); el.listenlockup.prepend(m); }
   document.fonts.ready.then(() => M.boot(el.boot, el.bootword));
 
   // ── stream ───────────────────────────────────────────────────────────────

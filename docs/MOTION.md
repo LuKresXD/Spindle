@@ -48,6 +48,7 @@ on every frame of its wave): anything the motion layer moves declares `will-chan
 - **Info.** The sheet slides with `house`; the masthead and sections stagger in.
 - **End of side.** "Flip for Side B" arrives word by word through masks.
 - **Boot.** The wordmark letters rise out of a mask once, then the current state fades in.
+- **Needle down.** The same lockup draws itself and stays: the record mark (disc, grooves from the inner, label, hole), the wordmark through its mask, then the Listening row with the live level rises beneath it. Replayable on every session start; the home screen cuts in over it when the first track is known.
 
 Engine: GSAP 3.15 with CustomEase, Flip and SplitText (free under GSAP's standard license;
 see `web_static/vendor/LICENSE-GSAP.txt`). The motion layer is `web_static/motion.js`; the

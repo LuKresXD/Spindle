@@ -278,10 +278,10 @@ window.Motion = (() => {
   }
 
   // ── boot: the record mark draws itself, the wordmark rises beside it, then the screen ──
-  function boot(overlay, word, onDone) {
-    const mark = overlay.querySelector(".bootmark");
+  // ── the lockup: the record mark draws itself, the wordmark rises beside it ────────
+  // Boot plays it once and fades it away; the needle-down screen plays it and keeps it.
+  function lockupIn(mark, word, tl = gsap.timeline()) {
     const split = SplitText.create(word, { type: "chars", mask: "chars", charsClass: "sc" });
-    const tl = gsap.timeline({ onComplete: () => { split.revert(); overlay.remove(); if (onDone) onDone(); } });
     if (mark) {
       const disc = mark.querySelector(".bm-disc"), label = mark.querySelector(".bm-label"), hole = mark.querySelector(".bm-hole");
       const grooves = [...mark.querySelectorAll(".bm-groove")];
@@ -291,12 +291,28 @@ window.Motion = (() => {
         .fromTo(label, { scale: 0.4, opacity: 0 }, { scale: 1, opacity: 1, duration: D(0.7), ease: "back.out(1.6)" }, 0.9)
         .fromTo(hole, { scale: 0, opacity: 0 }, { scale: 1, opacity: 1, duration: D(0.4), ease: SETTLE }, 1.25);
     }
-    tl.from(split.chars, { yPercent: 110, duration: D(1.1), ease: BIG, stagger: 0.035 }, 0.75)
+    tl.from(split.chars, { yPercent: 110, duration: D(1.1), ease: BIG, stagger: 0.035 }, 0.75);
+    tl.split = split;
+    return tl;
+  }
+  function boot(overlay, word, onDone) {
+    const mark = overlay.querySelector(".bootmark");
+    const tl = gsap.timeline({ onComplete: () => { tl.split.revert(); overlay.remove(); if (onDone) onDone(); } });
+    lockupIn(mark, word, tl)
       .to([word, mark].filter(Boolean), { autoAlpha: 0, duration: D(0.5), ease: MICRO }, "+=0.5")
       .to(overlay, { autoAlpha: 0, duration: D(0.6), ease: MICRO }, "<0.1");
     return tl;
   }
+  // Needle down: the lockup draws and stays; the Listening row rises beneath it as the
+  // grooves finish. Replayable: every part starts from its hidden state.
+  function listenIn(mark, word, row) {
+    gsap.killTweensOf([mark, word, row]);
+    const tl = gsap.timeline({ onComplete: () => tl.split.revert() });
+    lockupIn(mark, word, tl)
+      .fromTo(row, { y: 18, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: D(0.9), ease: SETTLE }, 1.5);
+    return tl;
+  }
 
   return { D, reduced, revealLines, revealWords, arrive, leave, fade, tray, rowGlide, handOver, odometer, countUp, weight, parallaxHead,
-           pageLayout, pageCommit, pageCancel, pageRest, wheel, glide, waveIn, boot, gsap };
+           pageLayout, pageCommit, pageCancel, pageRest, wheel, glide, waveIn, lockupIn, boot, listenIn, gsap };
 })();
