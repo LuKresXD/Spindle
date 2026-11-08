@@ -87,8 +87,11 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
   -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 12%, #000 78%, transparent 100%);
   mask-image: linear-gradient(180deg, transparent 0, #000 12%, #000 78%, transparent 100%); }
 .lyriclines { transition: transform .55s var(--ease); padding-top: 300px; }
+/* The current line scales up 1.22x from its left edge; a transform does not
+   reflow text, so the box is 1/1.22 of the column and the scaled line fills it
+   exactly instead of running off the right edge. */
 .lyric { font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; font-size: 52px; color: rgba(255,255,255,.38);
-  margin: 0 0 30px; transform-origin: left center; transition: color .4s var(--ease), transform .4s var(--ease); }
+  width: 82%; margin: 0 0 30px; transform-origin: left center; transition: color .4s var(--ease), transform .4s var(--ease); }
 .lyric.cur { color: #fff; transform: scale(1.22); }
 .lyric.empty { font-weight: 500; color: var(--text-dim); font-size: 30px; }
 

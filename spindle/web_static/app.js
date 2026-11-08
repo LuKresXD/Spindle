@@ -29,7 +29,6 @@
   let info = null;                        // album info (pressing, story, plays)
   let trackFor = "";
   let trackInfo = null;                   // Genius: story, samples, producers
-  const LYRIC_LEAD = 1.0;                 // show a line a touch early rather than late (Luka: ~1 s late at 0.6)
   let sheetOpen = false;
   let screenOff = false;
 
@@ -195,7 +194,7 @@
         }
       }
       if (now - lastSide > 5000) { lastSide = now; renderSide(state, state.tracklist || []); }
-      if (lyricsOn && lyrics && p != null) highlightLyric(p + LYRIC_LEAD);
+      if (lyricsOn && lyrics && p != null) highlightLyric(p);   // on the clock: a fixed lead only moves the error around
     }
     requestAnimationFrame(frame);
   }
