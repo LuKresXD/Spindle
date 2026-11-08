@@ -369,6 +369,9 @@ _URL_RE = re.compile(r"https?://\S+")
 # Genius hosts fan translations ("… Türkçe Çeviriler", "… Traducciones") whose
 # full_title still names the real artist — never let one win the song match.
 _TRANSLATION_RE = re.compile(r"genius|[çc]eviri|traduc|translation|перевод", re.I)
+# Genius ranks a song under its bare title; searching the full "(feat. X)" title
+# surfaces only fan-translation pages. Strip the feature suffix for the search.
+_FEAT_RE = re.compile(r"\s*[\(\[]\s*(feat|ft|featuring|with|w/)\b.*$", re.I)
 
 
 def _dom_text(node: Any) -> str:
@@ -419,7 +422,8 @@ class Genius:
         return result
 
     def _fetch(self, artist: str, title: str) -> dict:
-        r = self._http.get(f"{GENIUS}/search/multi", params={"q": f"{artist} {title}"},
+        search_title = _FEAT_RE.sub("", title).strip() or title
+        r = self._http.get(f"{GENIUS}/search/multi", params={"q": f"{artist} {search_title}"},
                            timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         song_id = None
