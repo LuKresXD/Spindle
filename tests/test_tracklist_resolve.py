@@ -3,7 +3,7 @@ from conftest import make_album
 from spindle.discogs import Release, clean_artist, parse_duration, same_album
 from spindle.fingerprint import TrackInfo
 from spindle.resolve import ResolveContext, Resolver
-from spindle.spotify import SpotifyCandidate, artist_matches
+from spindle.spotify import EDITION_RE, SpotifyCandidate, artist_matches
 from spindle.tracklist import (
     AlbumTracklist,
     box_part,
@@ -261,3 +261,14 @@ def test_resolver_merges_a_box_set_album_with_its_own_sides():
     assert out.tracklist.is_side_end(4) and not out.tracklist.is_side_end(3)
     assert [t.duration for t in out.tracklist.tracks] == durations
     assert out.reason == "spotify+discogs (100% of sides C-D of the box)"
+
+
+def test_edition_marker_is_a_qualifier_not_a_word_in_the_title():
+    editions = ["Whole Lotta Red (Deluxe)", "Graduation (Deluxe Edition)",
+                "Heroes (2017 Remaster)", "Love Deluxe - 2011 Remaster",
+                "Thriller 25 Super Deluxe Edition", "Low [Remastered]", "Promise: Expanded Edition",
+                "Madvillainy (Bonus Tracks)", "Ok Computer Remastered"]
+    plain = ["Love Deluxe", "Diamond Life", "Deluxe", "The Bonus Round", "Anniversary",
+             "Stronger Than Pride", "Special Edition Of You", "1999", "2 Alivë (Geëk Pack)"]
+    assert [bool(EDITION_RE.search(x)) for x in editions] == [True] * len(editions)
+    assert [bool(EDITION_RE.search(x)) for x in plain] == [False] * len(plain)

@@ -29,9 +29,15 @@ SEARCH_URL = "https://api.spotify.com/v1/search"
 ALBUM_URL = "https://api.spotify.com/v1/albums"
 
 # Deluxe / anniversary / remaster editions: fine to fall back to, never preferred.
+# The marker only counts as a qualifier: in brackets, after a dash or colon, or closing the
+# name as "... Edition" / "... Remaster(ed)". A plain title may carry the word (Sade's
+# "Love Deluxe" is the studio album, 2026-11-08).
+_EDITION_MARK = (r"(?:super\s+deluxe|deluxe|anniversary|remaster(?:ed)?|expanded|bonus|"
+                 r"special\s+edition|\d{4}\s+(?:remaster|edition|mix))")
 EDITION_RE = re.compile(
-    r"\b(?:deluxe|super\s+deluxe|anniversary|remaster(?:ed)?|expanded|bonus|"
-    r"special\s+edition|\d{4}\s+(?:remaster|edition|mix))\b",
+    rf"[\(\[][^\)\]]*\b{_EDITION_MARK}\b[^\)\]]*[\)\]]"
+    rf"|[-–—:]\s*[^-–—:]*\b{_EDITION_MARK}\b"
+    r"|\b(?:\w+\s+edition|remaster(?:ed)?|\d{4}\s+(?:remaster|edition|mix))\s*$",
     re.IGNORECASE,
 )
 _FEAT_RE = re.compile(r"\s*[\(\[](feat\.?|ft\.?|featuring)\b[^\)\]]*[\)\]]", re.IGNORECASE)
