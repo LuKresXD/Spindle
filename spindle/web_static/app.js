@@ -787,13 +787,21 @@
   };
   const priceTag = (r) => (r.price != null ? `$${Math.round(r.price)}` : "");
   const tile = (r, i) => `<div class="shelfitem" data-id="${r.id}"><img src="${esc(tileUrl(r.cover))}" alt="${esc(r.title)}"${i >= 28 ? ' loading="lazy"' : ""} decoding="async"><span class="price">${priceTag(r)}</span></div>`;
+  // The grid stays built between openings (the Pi paid for the 87 tiles every time);
+  // it is rebuilt only when the collection, its prices or the order changed.
+  let shelfKey = "";
+  const gridKey = (col) => `${shelfSort}|${col.map((r) => `${r.id}:${r.price ?? ""}`).join(",")}`;
   async function openShelf() {
     hideIdle();
     shelfOpen = true;
     show(el.shelf);
     const col = await loadCollection();
     el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
-    el.shelfgrid.innerHTML = sorted(col).map(tile).join("") || `<div class="empty">Nothing on the shelf yet</div>`;
+    const key = gridKey(col);
+    if (key !== shelfKey) {
+      shelfKey = key;
+      el.shelfgrid.innerHTML = sorted(col).map(tile).join("") || `<div class="empty">Nothing on the shelf yet</div>`;
+    }
     el.shelfgrid.classList.toggle("priced", shelfSort === "price");
     el.shelfgrid.scrollTop = 0;
     M.arrive(el.shelf.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
@@ -809,8 +817,18 @@
     const byId = new Map([...el.shelfgrid.querySelectorAll(".shelfitem[data-id]")].map((n) => [n.dataset.id, n]));
     const order = sorted(collection).map((r) => byId.get(String(r.id))).filter(Boolean);
     el.shelfgrid.scrollTop = 0;
-    el.shelfgrid.classList.toggle("priced", shelfSort === "price");
-    M.flipGrid(el.shelfgrid, () => order.forEach((n) => el.shelfgrid.appendChild(n)));
+    const priced = shelfSort === "price";
+    if (!priced) el.shelfgrid.classList.remove("priced");             // the tags fall away as the tiles set off
+    const tl = M.flipGrid(el.shelfgrid, () => order.forEach((n) => el.shelfgrid.appendChild(n)));
+    shelfKey = gridKey(collection);
+    const tagsIn = () => {                                            // ...and come back once everything has landed
+      if (!priced || shelfSort !== "price") return;
+      el.shelfgrid.classList.add("priced");
+      const box = el.shelfgrid.getBoundingClientRect();
+      const pills = [...el.shelfgrid.querySelectorAll(".shelfitem .price")].filter((n) => { const r = n.parentElement.getBoundingClientRect(); return r.top < box.bottom && n.textContent; });
+      M.gsap.fromTo(pills, { autoAlpha: 0 }, { autoAlpha: 1, duration: M.D(0.35), stagger: 0.012, clearProps: "opacity,visibility" });
+    };
+    if (tl) tl.eventCallback("onComplete", tagsIn); else tagsIn();
   }
   function closeShelf() { shelfOpen = false; M.leave(el.shelf, { duration: 0.3, onComplete: () => { if (!shelfOpen) hide(el.shelf); } }); }
 

@@ -200,7 +200,9 @@ window.Motion = (() => {
     const state = Flip.getState(items);
     reorder();
     const moving = items.filter((el) => before.has(el) || onScreen(el));
-    return Flip.from(state, { targets: moving, duration: D(0.65), ease: "power4.inOut", absolute: true, prune: true, stagger: 0.003 });
+    // Equal cells reordered in place: the tiles stay in the grid's flow (no absolute pass, so no
+    // reflow) and only transforms move; scale:true keeps width/height out of the tween entirely.
+    return Flip.from(state, { targets: moving, duration: D(0.65), ease: "power4.inOut", scale: true, prune: true, stagger: 0.003 });
   }
   // Covers wave in from the top left.
   function waveIn(items, { cap = 35 } = {}) {
