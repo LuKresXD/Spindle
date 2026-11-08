@@ -457,7 +457,8 @@ class Genius:
                     for x in rel.get("songs", [])[:n]:
                         out.append({
                             "title": (x.get("title") or "").replace("\xa0", " "),
-                            "artist": ((x.get("primary_artist") or {}).get("name") or "").replace("\xa0", " "),
+                            "artist": ((x.get("primary_artist") or {}).get("name") or "")
+                            .replace("\xa0", " "),
                             "art": x.get("song_art_image_thumbnail_url") or "",
                         })
                     return out

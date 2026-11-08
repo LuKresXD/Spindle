@@ -193,12 +193,16 @@ def test_genius_parses_story_samples_and_producers():
             "writer_artists": [{"name": "Kanye West"}],
             "song_relationships": [
                 {"relationship_type": "samples",
-                 "songs": [{"full_title": "Harder Better Faster Stronger by\u00a0Daft\u00a0Punk"}]},
+                 "songs": [{"full_title": "Harder Better Faster Stronger by\u00a0Daft\u00a0Punk",
+                            "title": "Harder Better Faster Stronger",
+                            "primary_artist": {"name": "Daft\u00a0Punk"},
+                            "song_art_image_thumbnail_url": "https://img/hbfs.jpg"}]},
                 {"relationship_type": "sampled_in", "songs": []}]}}}),
     })
     g = Genius(http=http)
     out = g.get("Kanye West", "Stronger")
     assert out["story"] == "The biggest hit from Graduation samples Daft Punk.\n\nSecond paragraph."
-    assert out["samples"] == ["Harder Better Faster Stronger by Daft Punk"]
+    assert out["samples"] == [{"title": "Harder Better Faster Stronger", "artist": "Daft Punk",
+                               "art": "https://img/hbfs.jpg"}]
     assert out["producers"] == ["Kanye West", "MIKE DEAN"] and out["release"] == "July 31, 2007"
     assert g.get("Kanye West", "Stronger") is out

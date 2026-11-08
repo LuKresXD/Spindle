@@ -72,6 +72,8 @@ ADVANCE_BUFFER_MAX   = 15    # max seconds past duration before auto-advance
 FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when nobody knows (4 min)
 REPLAY_SLACK         = 45    # s past a track's end: a backwards anchor is a replay, not lag
 OFFSET_TOLERANCE     = 5     # s: two offsets of one run must advance with the clock this closely
+START_SNAP           = 1.0   # s: adopt the offset start when it differs from the clock by more
+START_SAMPLES        = 5     # the start is the median of the newest this many offset estimates
 SPEED_MIN_INTERVAL   = 20    # s between two offsets before their ratio counts as a speed sample
 SPEED_SAMPLES_MIN    = 3     # samples before the measured deck speed replaces the assumed 1.0
 SPEED_SAMPLES_MAX    = 60    # keep the newest this many (the deck's speed drifts slowly)
@@ -151,7 +153,8 @@ class _Run:
     first_seen: float = 0.0          # window-end time of the run's first identification
     last_seen:  float = 0.0
     ref:        tuple[float, float] | None = None   # (at, offset) of the last consistent ID
-    start:      float | None = None  # at - offset - window, once a second offset confirms it
+    start:      float | None = None  # median of `starts`, once a second offset confirms the first
+    starts:     list = field(default_factory=list)  # at - offset - window per consistent ID
     speed_ref:  tuple[float, float] | None = None   # (at, offset) the deck speed is measured from
 
 
@@ -436,7 +439,9 @@ class ScrobbleSession:
                 ref_at, ref_offset = run.ref
                 drift = (offset - ref_offset) - (now - ref_at)
                 if abs(drift) <= OFFSET_TOLERANCE + VINYL_DRIFT * (now - ref_at):
-                    run.start = now - offset - self.window_seconds
+                    run.starts.append(now - offset - self.window_seconds)
+                    del run.starts[:-START_SAMPLES]
+                    run.start = sorted(run.starts)[len(run.starts) // 2]
                     run.ref = (now, offset)          # consistent: measure the next one from here
                     if run.speed_ref is None:
                         run.speed_ref = (ref_at, ref_offset)
@@ -448,6 +453,7 @@ class ScrobbleSession:
                             del self._speed_samples[:-SPEED_SAMPLES_MAX]
                 else:
                     run.start = None
+                    run.starts.clear()
                     logger.info("Session: offsets of '%s' disagree with the clock by %.0fs "
                                 "(a repeated section?) — position not trusted",
                                 track.title, drift)
@@ -708,10 +714,13 @@ class ScrobbleSession:
                             and al.starts[i] < al.current_track_start), default=None)
             floor = al.starts[prev_idx] if prev_idx is not None else al.music_start
             start = self._offset_start(track, now, floor=floor)
-            if start is not None and abs(start - al.current_track_start) > OFFSET_TOLERANCE:
-                logger.info("Session: track %d started %.0fs %s than the clock thought (offset)",
-                            track_index + 1, abs(start - al.current_track_start),
-                            "later" if start > al.current_track_start else "earlier")
+            if start is not None and abs(start - al.current_track_start) > START_SNAP:
+                # a second or two matters for the lyrics; log the big corrections only
+                delta = abs(start - al.current_track_start)
+                logger.log(logging.INFO if delta > OFFSET_TOLERANCE else logging.DEBUG,
+                           "Session: track %d started %.1fs %s than the clock thought (offset)",
+                           track_index + 1, delta,
+                           "later" if start > al.current_track_start else "earlier")
                 self._set_current(track_index, start, exact=True)
                 al.side_done = False
             elif start is not None and not al.start_exact:
