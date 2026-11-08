@@ -60,15 +60,34 @@ blurred cover; idle is pure black, so the panel is off until the needle drops.
   samples from Genius (with their covers), credits as prose from the Discogs per-track credits,
   your plays of the track and of the record from Last.fm, and the album's story from Wikipedia.
   Everything is prefetched on each track change, so it opens at once.
-- **End of side**: "Side A · finished / Flip for Side B / 5 tracks scrobbled". A tap turns the
-  screen off; a new record wakes it.
+- **End of side**: "Side A · finished / Flip for Side B / 5 tracks scrobbled". A tap goes to the
+  Off page; a new record brings the screen back.
 
 <p align="center">
   <img src="docs/screens/end-of-side.jpg" alt="End of side" width="720">
 </p>
 
-- **Gestures**: swipe down, tap the top band or pull past the top to close Info; swipe right for
-  a dark screen; tap to wake.
+- **Three pages in a ring** (v0.4): swipe left or right between **Off** (black on purpose: the page
+  dots and the word fade out after two seconds, a tap shows them again), **Spindle** (the record)
+  and **Claw** (a placeholder for now). The pages follow the finger and settle; a needle drop
+  always brings Spindle back, whatever page is up.
+- **Nothing on the platter**: the Spindle page is black until a tap reveals the controls, which
+  fade again after twelve seconds. **Pick a record for me** draws one of the records at random
+  while the covers wheel past; the pick lands with its cover as the backdrop, the original release
+  year, the pressing, when it joined the shelf and your Last.fm plays, and the screen then waits
+  for the needle ("Another one" draws again). **The shelf** is every cover in a grid, sorted by
+  arrival, title or artist; a tap opens that record's card. **Recently played** is the last
+  records that were on, from the scrobble history.
+- **Gestures**: swipe down, tap the top band or pull past the top to close Info; swipe left or
+  right to change the page; tap a black Spindle page for the controls.
+
+<p align="center">
+  <img src="docs/screens/shelf-controls.jpg" alt="Nothing on the platter: the controls a tap reveals" width="440">
+  <img src="docs/screens/pick.jpg" alt="The pick: a record drawn from the shelf" width="440">
+</p>
+<p align="center">
+  <img src="docs/screens/shelf.jpg" alt="The shelf: every record in a grid" width="720">
+</p>
 
 ## How it hears
 

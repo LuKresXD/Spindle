@@ -498,6 +498,8 @@ class Genius:
 
 COLLECTION_ART_DIR = Path.home() / ".cache" / "spindle" / "art" / "collection"
 COVER_WARM_GAP = 0.6             # seconds between cover downloads when warming the cache
+COVER_WARM_FIRST_DELAY = 5.0     # let the engine and the collection come up first
+COVER_WARM_EVERY = 600.0         # how often the warm-up looks for missing covers
 
 
 class Shelf:
@@ -604,28 +606,27 @@ class Shelf:
         return data
 
     def warm_covers(self) -> None:
-        """Download every missing cover once, slowly, off the request threads, so the
-        shelf and the wheel open with the pictures already there."""
+        """Keep every cover on disk: a slow pass over the missing ones, off the request
+        threads, repeated every few minutes so records added later (or a collection
+        refresh that only just learnt the cover URLs) are picked up too. The shelf and
+        the wheel then open with the pictures already there."""
         with self._lock:
             if self._warming:
                 return
             self._warming = True
 
         def run() -> None:
-            try:
-                for _ in range(120):                  # wait for the collection, up to a minute
-                    if self.collection is None or getattr(self.collection, "ready", False):
-                        break
-                    time.sleep(0.5)
-                if self.collection is None:
-                    return
-                for rel in self.collection.all_releases():
-                    if rel.cover and not (self.art_dir / f"{rel.id}.img").is_file():
-                        self.cover(rel.id)
-                        time.sleep(COVER_WARM_GAP)
-            finally:
-                with self._lock:
-                    self._warming = False
+            time.sleep(COVER_WARM_FIRST_DELAY)
+            while True:
+                try:
+                    if self.collection is not None and getattr(self.collection, "ready", False):
+                        for rel in self.collection.all_releases():
+                            if rel.cover and not (self.art_dir / f"{rel.id}.img").is_file():
+                                self.cover(rel.id)
+                                time.sleep(COVER_WARM_GAP)
+                except Exception as e:                # the loop must survive anything
+                    logger.debug("Cover warm-up: %s", e)
+                time.sleep(COVER_WARM_EVERY)
 
         threading.Thread(target=run, name="cover-warm", daemon=True).start()
 
