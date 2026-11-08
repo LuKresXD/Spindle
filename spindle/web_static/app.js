@@ -636,7 +636,7 @@
     el.wheelstrip.innerHTML = "";
     const col = await loadCollection();
     el.wheelKicker.textContent = col.length ? `Picking one of ${col.length}` : "Picking one";
-    M.arrive(el.wheelKicker, { y: 12, duration: 0.7 });
+    M.arrive(el.wheelKicker, { y: 12, duration: 0.7, delay: 0.3 });   // after the controls have left
     let card = null;
     try { card = await (await fetch(`/api/collection/random?exclude=${lastPickId}`)).json(); } catch (e) { card = null; }
     if (serial !== pickSerial || !pickOpen) return;
