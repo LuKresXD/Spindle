@@ -18,7 +18,10 @@ the rest on demand.
   GET /api/collection/random   the same draw as a full card (pressing + plays; two network calls)
   GET /api/collection/<id>     one record as a card: pressing, plays, last spin
   GET /api/history/albums      the records played most recently (?limit=12)
-  GET /art/collection/<id>.jpg a record's cover, cached on disk
+  GET /art/collection/<id>.jpg a record's cover, cached on disk; <id>.s.jpg a 320 px copy for
+                               tiles, <id>.blur.jpg a 32 px pre-blurred, darkened copy the page
+                               stretches to the whole screen as the backdrop (no CSS blur)
+  GET /art/<key>.blur.jpg      the same backdrop copy for the cover on screen
 
 Everything that goes to the network is cached per track or per album and
 runs on the request thread, never on the tick.
@@ -498,6 +501,35 @@ class Genius:
 # ── the shelf: the collection for the idle screen ─────────────────────────────
 
 COLLECTION_ART_DIR = Path.home() / ".cache" / "spindle" / "art" / "collection"
+COVER_VARIANTS = {"s": 320, "blur": 32}   # a tile-sized copy, and the backdrop seed
+BLUR_SATURATION, BLUR_BRIGHTNESS = 1.15, 0.62   # what the page used to do with a CSS filter
+
+
+def derive_cover(data: bytes, variant: str) -> bytes:
+    """A smaller copy of a cover. "s" is a 320 px JPEG for tiles. "blur" is a 32 px JPEG,
+    softened, saturated and darkened: stretched to a 1920 px screen by the GPU it reads
+    as a 64 px blur, for free, where a CSS filter cost the Pi a re-render every frame."""
+    if variant not in COVER_VARIANTS:
+        return data
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter
+    except ImportError:                       # no Pillow: the full cover will do
+        return data
+    import io
+    try:
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+        size = COVER_VARIANTS[variant]
+        im.thumbnail((size, size), Image.LANCZOS)
+        if variant == "blur":
+            im = im.filter(ImageFilter.GaussianBlur(1.2))
+            im = ImageEnhance.Color(im).enhance(BLUR_SATURATION)
+            im = ImageEnhance.Brightness(im).enhance(BLUR_BRIGHTNESS)
+        out = io.BytesIO()
+        im.save(out, "JPEG", quality=88 if variant == "s" else 80, optimize=True)
+        return out.getvalue()
+    except Exception as e:                    # a broken image: serve what we have
+        logger.debug("Cover variant %s failed: %s", variant, e)
+        return data
 COVER_WARM_GAP = 0.6             # seconds between cover downloads when warming the cache
 COVER_WARM_FIRST_DELAY = 5.0     # let the engine and the collection come up first
 COVER_WARM_EVERY = 600.0         # how often the warm-up looks for missing covers
@@ -588,12 +620,23 @@ class Shelf:
 
     # covers ----------------------------------------------------------------
 
-    def cover(self, rid: int) -> bytes | None:
-        """The cover bytes for a record: the disk cache, else one download."""
-        blob = self.art_dir / f"{rid}.img"
+    def cover(self, rid: int, variant: str = "") -> bytes | None:
+        """The cover bytes for a record: the disk cache, else one download. A variant
+        ("s", "blur") is derived from the full cover once and cached beside it."""
+        blob = self.art_dir / (f"{rid}.{variant}.img" if variant else f"{rid}.img")
         with contextlib.suppress(OSError):
             if blob.is_file():
                 return blob.read_bytes()
+        if variant:
+            full = self.cover(rid)
+            if full is None:
+                return None
+            data = derive_cover(full, variant)
+            with contextlib.suppress(OSError):
+                tmp = blob.with_suffix(".tmp")
+                tmp.write_bytes(data)
+                tmp.replace(blob)
+            return data
         if self.collection is None:
             return None
         rel = self.collection.release_by_id(rid)
@@ -630,9 +673,14 @@ class Shelf:
                 try:
                     if self.collection is not None and getattr(self.collection, "ready", False):
                         for rel in self.collection.all_releases():
-                            if rel.cover and not (self.art_dir / f"{rel.id}.img").is_file():
+                            if not rel.cover:
+                                continue
+                            if not (self.art_dir / f"{rel.id}.img").is_file():
                                 self.cover(rel.id)
                                 time.sleep(COVER_WARM_GAP)
+                            for variant in COVER_VARIANTS:
+                                if not (self.art_dir / f"{rel.id}.{variant}.img").is_file():
+                                    self.cover(rel.id, variant)
                 except Exception as e:                # the loop must survive anything
                     logger.debug("Cover warm-up: %s", e)
                 time.sleep(COVER_WARM_EVERY)
@@ -759,21 +807,26 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.OK, target.read_bytes(), ctype, cache)
 
     def _art(self, key: str) -> None:
-        hit = self.server.hub.art(key.split(".")[0])
+        parts = key.split(".")
+        hit = self.server.hub.art(parts[0])
         if hit is None:
             self._json({"error": "no such art"}, HTTPStatus.NOT_FOUND)
             return
         data, _source = hit
+        if len(parts) == 3 and parts[1] in COVER_VARIANTS:
+            data = self.server.cover_variant(parts[0], parts[1], data)
         ctype = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
         self._send(HTTPStatus.OK, data, ctype, "max-age=31536000, immutable")
 
     def _collection_art(self, name: str) -> None:
+        parts = name.split(".")                     # "123.jpg" | "123.s.jpg" | "123.blur.jpg"
+        variant = parts[1] if len(parts) == 3 and parts[1] in COVER_VARIANTS else ""
         try:
-            rid = int(name.split(".")[0])
+            rid = int(parts[0])
         except ValueError:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             return
-        data = self.server.shelf.cover(rid)
+        data = self.server.shelf.cover(rid, variant)
         if data is None:
             self._json({"error": "no cover"}, HTTPStatus.NOT_FOUND)
             return
@@ -864,6 +917,22 @@ class WebServer(ThreadingHTTPServer):
         self.hub.on_track = self._prefetch_track
         self.stopping = False
         self._thread: threading.Thread | None = None
+        self._variants: OrderedDict[str, bytes] = OrderedDict()   # (art key, variant) → bytes
+        self._variants_lock = threading.Lock()
+
+    def cover_variant(self, key: str, variant: str, data: bytes) -> bytes:
+        """A derived copy of the cover on screen, kept for the last few records."""
+        k = f"{key}.{variant}"
+        with self._variants_lock:
+            if k in self._variants:
+                self._variants.move_to_end(k)
+                return self._variants[k]
+        out = derive_cover(data, variant)
+        with self._variants_lock:
+            self._variants[k] = out
+            while len(self._variants) > 24:
+                self._variants.popitem(last=False)
+        return out
 
     def _prefetch_track(self, artist: str, title: str, album: str = "",
                         duration: float | None = None) -> None:

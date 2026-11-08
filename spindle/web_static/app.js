@@ -12,7 +12,7 @@
   const M = window.Motion;
   const $ = (id) => document.getElementById(id);
   const el = {
-    body: document.body, bg: $("bg"), home: $("home"), art: $("art"), title: $("title"),
+    body: document.body, bgs: [$("bg-a"), $("bg-b")], home: $("home"), art: $("art"), title: $("title"),
     artist: $("artist"), albumline: $("albumline"), sidetext: $("sidetext"), fill: $("fill"),
     feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
     lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"), corner: document.querySelector(".corner"),
@@ -249,9 +249,25 @@
     renderSide(st, rows);
   }
 
+  // Cover URLs come in three sizes: the cover, a tile copy and the pre-blurred backdrop seed.
+  const tileUrl = (u) => (u ? u.replace(/\.jpg$/, ".s.jpg") : "");
+  const blurUrl = (u) => (u ? u.replace(/\.jpg$/, ".blur.jpg") : "");
+  let bgFront = 0, bgUrl = "";
   function setBackdrop(url) {
-    el.bg.style.backgroundImage = url ? `url("${url}")` : "";
-    el.bg.classList.toggle("ready", !!url);
+    const seed = blurUrl(url);
+    if (seed === bgUrl) return;
+    bgUrl = seed;
+    const front = el.bgs[bgFront], back = el.bgs[1 - bgFront];
+    if (!seed) { M.fade(front, 0, { duration: 0.9, ease: "house" }); M.fade(back, 0, { duration: 0.9, ease: "house" }); return; }
+    const img = new Image();
+    img.onload = () => {
+      if (bgUrl !== seed) return;
+      back.style.backgroundImage = `url("${seed}")`;
+      M.fade(back, 1, { duration: 1.1, ease: "house" });
+      M.fade(front, 0, { duration: 1.1, ease: "house" });
+      bgFront = 1 - bgFront;
+    };
+    img.src = seed;
   }
 
   // Shrink a title until no word has to break (Plasticworld came out as "Plasticworl / d").
@@ -604,7 +620,7 @@
     preloading = true;
     try {
       const col = await loadCollection();
-      const urls = col.map((r) => r.cover).filter((u) => u && !covers.has(u));
+      const urls = col.flatMap((r) => (r.cover ? [r.cover, tileUrl(r.cover), blurUrl(r.cover)] : [])).filter((u) => !covers.has(u));
       const lane = async () => {
         while (urls.length) {
           const u = urls.shift();
@@ -628,11 +644,19 @@
   async function startPick() {
     hideIdle();
     const serial = ++pickSerial;
+    const again = pickOpen && !el.landed.classList.contains("hidden");   // "Another one": a card is up
     pickOpen = true; pickFromShelf = false;
     if (wheelTl) { wheelTl.kill(); wheelTl = null; }
     show(el.pick);
+    if (again) {
+      setBackdrop("");                                                    // the old record's colours go with its card
+      await M.leave(el.landed, { duration: 0.3 }).then();
+      if (serial !== pickSerial) return;
+    }
     hide(el.landed);
+    M.gsap.set(el.landed, { clearProps: "opacity,visibility" });
     show(el.wheel);
+    M.gsap.set(el.wheelKicker, { autoAlpha: 0 });
     el.wheelstrip.innerHTML = "";
     // the draw is a memory lookup and comes back at once; the card (pressing from Discogs,
     // plays from Last.fm) takes a second or two and is fetched behind the roll
@@ -644,12 +668,14 @@
     if (serial !== pickSerial || !pickOpen) return;
     if (!row || row.error) { el.wheelKicker.textContent = "The shelf is empty"; return; }
     const cardP = fetch(`/api/collection/${row.id}`).then((r) => r.json()).catch(() => null);
-    // the covers that wheel past, the hit third from the end so something shows past it
-    const others = col.filter((r) => r.cover && r.id !== row.id);
-    const tiles = [...sample(others, 9), row, ...sample(others, 2)];
-    const hit = tiles.length - 3;
-    el.wheelstrip.innerHTML = tiles.map((r) => `<img src="${esc(r.cover || "")}" alt="">`).join("");
-    await ready(tiles.map((r) => r.cover).filter(Boolean), 400);
+    // the covers that wheel past: three sit left of the start so the ring is full from the
+    // first frame, nine roll by, the hit lands, two show past it
+    const others = sample(col.filter((r) => r.cover && r.id !== row.id), 14);
+    const tiles = [...others.slice(0, 12), row, ...others.slice(12, 14)];
+    const hit = 12;
+    // tile-sized copies for the ring, the full cover for the hit (it flies into the card)
+    el.wheelstrip.innerHTML = tiles.map((r, i) => `<img src="${esc(i === hit ? r.cover : tileUrl(r.cover))}" alt="">`).join("");
+    await ready(tiles.map((r, i) => (i === hit ? r.cover : tileUrl(r.cover))).filter(Boolean), 400);
     if (serial !== pickSerial || !pickOpen) return;
     const imgs = [...el.wheelstrip.children];
     wheelTl = M.wheel(el.wheelstrip, imgs, hit, {
@@ -676,8 +702,10 @@
   function fillCard(full) {
     pickCard = full;
     const lines = cardLines(full);
-    if (lines.meta !== el.pickMeta.textContent) { el.pickMeta.textContent = lines.meta; M.arrive(el.pickMeta, { y: 8, duration: 0.6 }); }
-    if (lines.plays && lines.plays !== el.pickPlays.textContent) { el.pickPlays.textContent = lines.plays; M.arrive(el.pickPlays, { y: 8, duration: 0.6 }); }
+    const swap = (node, text) => { if (text === node.textContent) return;
+      M.fade(node, 0, { duration: 0.18 }).then(() => { node.textContent = text; M.fade(node, 1, { duration: 0.45, ease: "expo.out" }); }); };
+    swap(el.pickMeta, lines.meta);
+    if (lines.plays) swap(el.pickPlays, lines.plays);
   }
 
   function land(card, fromShelf = false, fromTile = null) {
@@ -738,7 +766,7 @@
     show(el.shelf);
     const col = await loadCollection();
     el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
-    el.shelfgrid.innerHTML = sorted(col).map((r) => `<img src="${esc(r.cover || "")}" data-id="${r.id}" alt="${esc(r.title)}">`).join("")
+    el.shelfgrid.innerHTML = sorted(col).map((r) => `<img src="${esc(tileUrl(r.cover))}" data-id="${r.id}" alt="${esc(r.title)}">`).join("")
       || `<div class="empty">Nothing on the shelf yet</div>`;
     el.shelfgrid.scrollTop = 0;
     M.arrive(el.shelf.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
@@ -779,7 +807,7 @@
     if (!Array.isArray(rows) || !rows.length) { el.recentlist.innerHTML = `<div class="empty">Nothing has been on yet</div>`; return; }
     el.recentlist.innerHTML = rows.map((r) => {
       const rel = r.release;
-      const art = rel && rel.cover ? `<img src="${esc(rel.cover)}" alt="">` : `<div class="ph"></div>`;
+      const art = rel && rel.cover ? `<img src="${esc(tileUrl(rel.cover))}" alt="">` : `<div class="ph"></div>`;
       const n = `${r.tracks} track${r.tracks === 1 ? "" : "s"}`;
       return `<div class="rrow ${rel ? "" : "off"}" ${rel ? `data-id="${rel.id}"` : ""}>${art}<div><div class="rt">${esc(r.album)}</div><div class="ra">${esc(r.artist)}</div></div><div class="rw">${esc(fmtDay(r.last_played))}<br>${n}</div></div>`;
     }).join("");

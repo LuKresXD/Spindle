@@ -307,3 +307,38 @@ def test_server_routes_for_the_shelf(tmp_path):
                 raise AssertionError(bad)
     finally:
         srv.stop()
+
+
+def test_cover_variants_are_smaller_and_served(tmp_path):
+    import io
+
+    from PIL import Image
+
+    from spindle.web import Shelf, derive_cover
+    buf = io.BytesIO()
+    Image.new("RGB", (600, 600), (200, 40, 40)).save(buf, "JPEG")
+    full = buf.getvalue()
+    small, blur = derive_cover(full, "s"), derive_cover(full, "blur")
+    assert Image.open(io.BytesIO(small)).size == (320, 320)
+    assert Image.open(io.BytesIO(blur)).size == (32, 32) and len(blur) < len(small) < len(full)
+    assert derive_cover(full, "nope") == full
+    shelf = Shelf(_Shelf(), None, None, http=_Http({}), art_dir=tmp_path)
+    (tmp_path / "1.img").write_bytes(full)
+    assert shelf.cover(1, "blur") == blur and (tmp_path / "1.blur.img").is_file()
+    assert shelf.cover(1, "s") == small
+    srv = WebServer(WebConfig(host="127.0.0.1", port=0), collection=_Shelf())
+    srv.shelf.art_dir = tmp_path
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        r = urllib.request.urlopen(f"{base}/art/collection/1.blur.jpg")
+        assert r.headers["Content-Type"] == "image/jpeg"
+        assert Image.open(io.BytesIO(r.read())).size == (32, 32)
+        st = _state(art=full)
+        srv.hub.publish(st)
+        key = json.loads(urllib.request.urlopen(f"{base}/api/state").read())["art"]
+        b = urllib.request.urlopen(f"{base}/art/{key}.blur.jpg").read()
+        assert Image.open(io.BytesIO(b)).size == (32, 32)
+        assert urllib.request.urlopen(f"{base}/art/{key}.jpg").read() == full
+    finally:
+        srv.stop()

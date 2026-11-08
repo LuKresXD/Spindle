@@ -161,10 +161,15 @@ window.Motion = (() => {
     };
     gsap.set(imgs, { xPercent: -50, yPercent: -50, transformOrigin: "50% 50%" });
     place();
-    // fast out of the gate, still visibly turning until it stops: power3, not expo (whose long
-    // tail parks the wheel a second before the hand-over)
-    const tl = gsap.timeline();
-    tl.to(proxy, { o: hit, duration: D(1.9), ease: "power3.out", onUpdate: place });
+    // The tiles are placed first and the ring fades in over the first frames, so the GPU
+    // uploads the twelve textures before anything has to move. Then fast out of the gate,
+    // still visibly turning until it stops: power3, not expo (whose long tail parks the
+    // wheel a second before the hand-over).
+    gsap.set(container, { opacity: 0 });
+    const tl = gsap.timeline({ paused: true });
+    tl.to(container, { opacity: 1, duration: D(0.3), ease: MICRO }, 0);
+    tl.to(proxy, { o: hit, duration: D(1.9), ease: "power3.out", onUpdate: place }, 0.12);
+    requestAnimationFrame(() => requestAnimationFrame(() => tl.play()));
     tl.to(imgs.filter((_, i) => i !== hit), { opacity: 0, duration: D(0.3), ease: MICRO }, ">-0.3");
     if (onLand) tl.call(onLand, null, ">-0.02");
     return tl;

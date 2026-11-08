@@ -20,9 +20,10 @@ button { font: inherit; color: inherit; border: 0; background: none; cursor: non
 .hidden { display: none !important; }
 
 /* backdrop ------------------------------------------------------------------ */
-.bg { position: absolute; inset: -14%; background: #140b18 center/cover no-repeat;
-  filter: blur(64px) saturate(1.15) brightness(.62); opacity: 0; transition: opacity 1.2s var(--ease); }
-.bg.ready { opacity: 1; }
+/* Two layers that crossfade. Each shows a 32 px pre-blurred, darkened copy of the cover the
+   server makes, stretched to the screen by the GPU: the look of a 64 px blur without a CSS
+   filter, which cost the Pi a re-render on every frame anything moved. */
+.bg { position: absolute; inset: 0; background: center/cover no-repeat; opacity: 0; will-change: opacity; }
 .veil { position: absolute; inset: 0; pointer-events: none; background:
   radial-gradient(90% 70% at 20% 10%, rgba(255,255,255,.12), transparent 60%),
   linear-gradient(180deg, rgba(0,0,0,.05), rgba(0,0,0,.38)); opacity: 0; transition: opacity 1.2s var(--ease); }
@@ -225,9 +226,9 @@ body.ended-open #home { opacity: 0; }
 .pickcopy .kicker { color: rgba(255,255,255,.55); }
 .picktitle { font-size: 108px; font-weight: 700; letter-spacing: -.025em; line-height: 1.02; margin-top: 18px; text-shadow: 0 2px 30px rgba(0,0,0,.25); }
 .pickartist { font-size: 50px; font-weight: 500; color: rgba(255,255,255,.8); margin-top: 12px; }
-.pickmeta { font-size: 26px; margin-top: 22px; }
-.pickmeta + .pickmeta { margin-top: 10px; }
-.pickmeta:empty { display: none; }
+/* the two fact lines keep their slot while the slower facts arrive, so nothing below moves */
+.pickmeta { font-size: 26px; margin-top: 22px; min-height: 34px; line-height: 34px; }
+.pickmeta + .pickmeta { margin-top: 6px; }
 .landed .row { margin-top: 56px; }
 .hint { font-size: 24px; font-weight: 500; color: rgba(255,255,255,.5); margin-top: 44px; }
 
