@@ -77,7 +77,12 @@
     el.listening.classList.toggle("hidden", st.phase !== "listening");
     if (playing) renderHome(st);
     renderEnded(st);
-    if (!playing && !st.ended) { closeSheet(); }
+    if (!playing && !st.ended) {
+      closeSheet();
+      // idle and listening are black: the last record's blurred cover must not linger
+      // (the end-of-side card keeps it; once that goes, so does the backdrop)
+      if (artKey) { artKey = ""; el.art.removeAttribute("src"); el.bg.style.backgroundImage = ""; el.bg.classList.remove("ready"); }
+    }
   }
 
   function renderHome(st) {
