@@ -311,7 +311,8 @@
     const out = [];
     const byTrack = (pr && state && state.position && pr.credits_by_track) ? pr.credits_by_track[state.position] : null;
     const src = (byTrack && byTrack.length) ? byTrack : (pr ? pr.credits : null);
-    const names = (re) => { const seen = []; (src || []).forEach((c) => { if (re.test(c.role) && c.name && !seen.includes(c.name)) seen.push(c.name); }); return seen; };
+    const clean = (n) => (n || "").replace(/\s*\(\d+\)\s*$/, "");   // Discogs "Southside (5)" → "Southside"
+    const names = (re) => { const seen = []; (src || []).forEach((c) => { const n = clean(c.name); if (re.test(c.role) && n && !seen.includes(n)) seen.push(n); }); return seen; };
     if (src) {
       const prod = names(/produc/i).slice(0, 4);
       const feat = names(/featur/i);
