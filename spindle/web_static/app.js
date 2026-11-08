@@ -9,8 +9,9 @@
     body: document.body, bg: $("bg"), home: $("home"), art: $("art"), title: $("title"),
     artist: $("artist"), albumline: $("albumline"), sidetext: $("sidetext"), fill: $("fill"),
     feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
+    btnDone: $("btn-done"),
     lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"),
-    listening: $("listening"), levelfill: $("levelfill"), sheet: $("sheet"), tiles: $("tiles"),
+    listening: $("listening"), sheet: $("sheet"), tiles: $("tiles"),
     ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"),
     endedSub: $("ended-sub"), off: $("off"),
   };
@@ -75,10 +76,6 @@
     el.home.classList.toggle("hidden", !playing && !st.ended);
     requestAnimationFrame(() => el.home.classList.toggle("shown", playing || !!st.ended));
     el.listening.classList.toggle("hidden", st.phase !== "listening");
-    if (st.phase === "listening") {
-      const pct = Math.max(0, Math.min(100, (st.level_db + 60) / 60 * 100));
-      el.levelfill.style.width = pct + "%";
-    }
     if (playing) renderHome(st);
     renderEnded(st);
     if (!playing && !st.ended) { closeSheet(); }
@@ -184,11 +181,12 @@
     const e = st.ended;
     el.ended.classList.toggle("hidden", !e);
     if (!e) return;
-    el.endedKicker.textContent = e.side ? `SIDE ${e.side} FINISHED` : "SIDE FINISHED";
-    el.endedTitle.textContent = `${e.scrobbled} track${e.scrobbled === 1 ? "" : "s"} scrobbled`;
+    const n = `${e.scrobbled} track${e.scrobbled === 1 ? "" : "s"} scrobbled`;
+    el.endedKicker.textContent = e.side ? `Side ${e.side} · finished` : "Side finished";
+    el.endedTitle.textContent = e.next_side ? `Flip for Side ${e.next_side}` : "That's the record";
     el.endedSub.textContent = e.next_side
-      ? `Flip for Side ${e.next_side}${e.next_title ? ` · starts with ${e.next_title}` : ""}`
-      : `${e.artist} · ${e.album}`;
+      ? `${n}${e.next_title ? ` · Side ${e.next_side} opens with ${splitFeat(e.next_title).main}` : ""}`
+      : `${n} · ${e.artist} · ${e.album}`;
   }
 
   // ── progress + lyrics clock ──────────────────────────────────────────────
@@ -313,8 +311,9 @@
   const sec = (h, body) => `<div class="sec"><h2>${esc(h)}</h2>${body}</div>`;
 
   function fmtShort(formats) {
-    return (formats || []).join(", ")
+    const f = (formats || []).join(", ")
       .replace(/Vinyl, LP, Album/gi, "LP").replace(/Vinyl, LP/gi, "LP").replace(/, Album/gi, "");
+    return f.split(", ").slice(0, 3).join(", ");          // "2 × LP, Deluxe Edition, Limited Edition"
   }
 
   function creditLines(pr, g) {
@@ -401,21 +400,33 @@
     const dx = e.clientX - down.x, dy = e.clientY - down.y, dt = Date.now() - down.t;
     const start = down; down = null;
     if (screenOff) { wake(); return; }
-    if (Math.abs(dx) > 120 && Math.abs(dy) < 90 && dt < 900) {
-      if (dx > 0) sleep();            // swipe right: screen off
-      return;                         // swipe left: reserved (Claw mode)
+    if (Math.abs(dx) > 120 && Math.abs(dy) < 100 && dt < 1200) {
+      if (dx > 0 && !sheetOpen) sleep();   // swipe right: screen off
+      return;                              // swipe left: reserved (Claw mode)
     }
-    if (Math.abs(dy) > 120 && Math.abs(dx) < 90 && dt < 900) {
-      const inSheet = el.sheet.contains(start.target);
-      if (dy < 0 && !inSheet) openSheet();
-      else if (dy > 0 && (!inSheet || document.getElementById("sheetscroll").scrollTop <= 0)) closeSheet();
+    if (Math.abs(dy) > 100 && Math.abs(dx) < 160 && dt < 1500) {
+      if (dy < 0 && !sheetOpen) openSheet();
+      else if (dy > 0 && sheetOpen && sheetAtTop()) closeSheet();
       return;
     }
-    if (Math.abs(dx) < 12 && Math.abs(dy) < 12) tap(start.target);
+    if (Math.abs(dx) < 14 && Math.abs(dy) < 14) tap(start);
   }, { passive: true });
+  // The scroller owns vertical pans (touch-action: pan-y), so a pull-down on an open
+  // sheet reaches us as touchmove, not pointerup: close on a pull past the top.
+  let pull = null;
+  document.addEventListener("touchstart", (e) => {
+    pull = sheetOpen && e.touches.length === 1 ? { y: e.touches[0].clientY, top: sheetAtTop() } : null;
+  }, { passive: true });
+  document.addEventListener("touchmove", (e) => {
+    if (!pull || !pull.top || !sheetOpen) return;
+    if (e.touches[0].clientY - pull.y > 110) { pull = null; closeSheet(); }
+  }, { passive: true });
+  const sheetAtTop = () => document.getElementById("sheetscroll").scrollTop <= 2;
+  const closeZone = (t) => el.btnDone.contains(t) || !!t.closest(".mast, .grab");
 
-  function tap(target) {
-    if (sheetOpen) { if (!el.sheet.contains(target)) closeSheet(); return; }
+  function tap(start) {
+    const target = start.target;
+    if (sheetOpen) { if (!el.sheet.contains(target) || closeZone(target) || start.y < 140) closeSheet(); return; }
     if (el.btnLyrics.contains(target) || el.title.contains(target) || el.artist.contains(target)) { toggleLyrics(); return; }
     if (el.btnInfo.contains(target)) { openSheet(); return; }
     if (el.lyrics.contains(target)) { toggleLyrics(false); }

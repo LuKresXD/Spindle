@@ -27,7 +27,7 @@ button { font: inherit; color: inherit; border: 0; background: none; cursor: non
 .veil { position: absolute; inset: 0; pointer-events: none; background:
   radial-gradient(90% 70% at 20% 10%, rgba(255,255,255,.12), transparent 60%),
   linear-gradient(180deg, rgba(0,0,0,.05), rgba(0,0,0,.38)); opacity: 0; transition: opacity 1.2s var(--ease); }
-body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
+body.phase-playing .veil { opacity: 1; }
 
 /* glass --------------------------------------------------------------------- */
 /* The backdrop is already a blurred cover, so a translucent fill reads as glass
@@ -48,7 +48,8 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .pill:active { transform: scale(.96); }
 .pill.big { font-size: 30px; padding: 20px 34px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: #fff; box-shadow: 0 0 12px #fff; }
-.dot.pulse { opacity: .8; }
+.dot.pulse { animation: breathe 2.6s ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { opacity: .3; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
 
 /* home ---------------------------------------------------------------------- */
 .stage { position: absolute; inset: 0; padding: var(--pad-y) var(--pad-x);
@@ -100,9 +101,12 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .corner { position: absolute; right: var(--pad-x); bottom: 64px; display: flex; gap: 14px; }
 
 /* listening ----------------------------------------------------------------- */
+/* Just the word and a breathing dot on black: no box, no meter (the level is not
+   progress and read like a fake progress bar). */
 .listening { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
-.level { display: inline-block; width: 160px; height: 8px; border-radius: 4px; background: rgba(255,255,255,.22); margin-left: 10px; overflow: hidden; }
-.level i { display: block; height: 100%; width: 0; background: #fff; border-radius: 4px; transition: width .4s var(--ease); }
+.listen { display: flex; align-items: center; gap: 20px; font-size: 36px; font-weight: 500;
+  color: rgba(255,255,255,.72); letter-spacing: -0.01em; }
+.listen .dot { width: 12px; height: 12px; }
 
 /* info sheet: a full-height liner-notes page that slides up over home ---------- */
 /* The page sits straight on the blurred cover (the backdrop is already blurred,
@@ -115,6 +119,7 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .sheet-scroll::-webkit-scrollbar { display: none; }
 .sheet.open { transform: translateY(0); }
 .grab { width: 76px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.4); margin: 0 auto 34px; }
+.pill.done { position: absolute; top: 28px; right: var(--pad-x); z-index: 2; }
 
 /* masthead */
 .mast { display: flex; align-items: flex-end; gap: 44px; padding-bottom: 38px; margin-bottom: 44px;
@@ -156,13 +161,15 @@ body.sheet-open #home { opacity: 0; transition: opacity .5s var(--ease); }
 body.sheet-open .corner { visibility: hidden; }
 
 /* end of side --------------------------------------------------------------- */
-.ended { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6; }
-.ended .card { width: 900px; padding: 56px 64px; text-align: center; animation: pop .5s var(--ease); background: rgba(24,14,30,.9); }
-.ended .title { font-size: 72px; margin-top: 14px; }
-.ended .artist { font-size: 34px; margin-top: 18px; }
-.kicker { font-size: 26px; letter-spacing: .08em; }
-@keyframes pop { from { transform: scale(.94); opacity: 0; } to { transform: none; opacity: 1; } }
-body.ended-open #home { opacity: .3; }
+/* End of side: type on the blurred cover, same veil as the Info page, no card. */
+.ended { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6;
+  background: linear-gradient(180deg, rgba(7,6,10,.42) 0%, rgba(7,6,10,.62) 30%, rgba(7,6,10,.78) 100%); }
+.endcopy { text-align: center; max-width: 1400px; padding: 0 120px; animation: pop .6s var(--ease); }
+.kicker { text-transform: uppercase; letter-spacing: .16em; font-weight: 700; font-size: 24px; color: rgba(255,255,255,.5); }
+.endtitle { font-size: 104px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; margin-top: 22px; }
+.endsub { font-size: 34px; font-weight: 500; color: rgba(255,255,255,.62); margin-top: 26px; }
+@keyframes pop { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+body.ended-open #home { opacity: 0; }
 
 /* screen off (swipe right) ---------------------------------------------------- */
 .off { position: absolute; inset: 0; background: #000; z-index: 10; }
