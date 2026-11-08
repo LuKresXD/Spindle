@@ -192,17 +192,27 @@ window.Motion = (() => {
   }
 
   // ── the shelf: a sort change is a Flip, not a re-render ───────────────────
+  // A sort of equal cells: measure, reorder, measure, and glide every tile that is on screen
+  // before or after from where it was to where it is. Two layouts in all; the Flip plugin's
+  // own pass forced one per tile on the Pi and froze the shelf for most of a second.
   function flipGrid(grid, reorder) {
     const items = Array.from(grid.children);
     const box = grid.getBoundingClientRect();
-    const onScreen = (el) => { const r = el.getBoundingClientRect(); return r.bottom > box.top - 60 && r.top < box.bottom + 60; };
-    const before = new Set(items.filter(onScreen));
-    const state = Flip.getState(items);
+    const near = (r) => r.bottom > box.top - 60 && r.top < box.bottom + 60;
+    const before = items.map((el) => el.getBoundingClientRect());
+    gsap.killTweensOf(items);
+    gsap.set(items, { clearProps: "transform" });
     reorder();
-    const moving = items.filter((el) => before.has(el) || onScreen(el));
-    // Equal cells reordered in place: the tiles stay in the grid's flow (no absolute pass, so no
-    // reflow) and only transforms move; scale:true keeps width/height out of the tween entirely.
-    return Flip.from(state, { targets: moving, duration: D(0.65), ease: "power4.inOut", scale: true, prune: true, stagger: 0.003 });
+    const moving = [], from = [];
+    items.forEach((el, i) => {
+      const a = before[i], b = el.getBoundingClientRect();
+      const dx = a.left - b.left, dy = a.top - b.top;
+      if ((Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) || !(near(a) || near(b))) return;
+      moving.push(el); from.push({ dx, dy });
+    });
+    if (!moving.length) return null;
+    gsap.set(moving, { x: (i) => from[i].dx, y: (i) => from[i].dy });
+    return gsap.to(moving, { x: 0, y: 0, duration: D(0.65), ease: "power4.inOut", stagger: 0.003, clearProps: "transform" });
   }
   // Covers wave in from the top left.
   function waveIn(items, { cap = 35 } = {}) {

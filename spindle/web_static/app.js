@@ -644,6 +644,7 @@
     preloading = true;
     try {
       const col = await loadCollection();
+      if (!shelfOpen) buildGrid(col);        // the shelf is laid out while nobody is looking
       const urls = col.flatMap((r) => (r.cover ? [r.cover, tileUrl(r.cover), blurUrl(r.cover)] : [])).filter((u) => !covers.has(u));
       const lane = async () => {
         while (urls.length) {
@@ -791,17 +792,19 @@
   // it is rebuilt only when the collection, its prices or the order changed.
   let shelfKey = "";
   const gridKey = (col) => `${shelfSort}|${col.map((r) => `${r.id}:${r.price ?? ""}`).join(",")}`;
+  function buildGrid(col) {
+    const key = gridKey(col);
+    if (key === shelfKey) return;
+    shelfKey = key;
+    el.shelfgrid.innerHTML = sorted(col).map(tile).join("") || `<div class="empty">Nothing on the shelf yet</div>`;
+  }
   async function openShelf() {
     hideIdle();
     shelfOpen = true;
     show(el.shelf);
     const col = await loadCollection();
     el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
-    const key = gridKey(col);
-    if (key !== shelfKey) {
-      shelfKey = key;
-      el.shelfgrid.innerHTML = sorted(col).map(tile).join("") || `<div class="empty">Nothing on the shelf yet</div>`;
-    }
+    buildGrid(col);
     el.shelfgrid.classList.toggle("priced", shelfSort === "price");
     el.shelfgrid.scrollTop = 0;
     M.arrive(el.shelf.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
@@ -816,10 +819,9 @@
     sortTray.to(el.shelfSort.querySelector(`[data-sort="${shelfSort}"]`));
     const byId = new Map([...el.shelfgrid.querySelectorAll(".shelfitem[data-id]")].map((n) => [n.dataset.id, n]));
     const order = sorted(collection).map((r) => byId.get(String(r.id))).filter(Boolean);
-    el.shelfgrid.scrollTop = 0;
     const priced = shelfSort === "price";
     if (!priced) el.shelfgrid.classList.remove("priced");             // the tags fall away as the tiles set off
-    const tl = M.flipGrid(el.shelfgrid, () => order.forEach((n) => el.shelfgrid.appendChild(n)));
+    const tl = M.flipGrid(el.shelfgrid, () => { order.forEach((n) => el.shelfgrid.appendChild(n)); el.shelfgrid.scrollTop = 0; });
     shelfKey = gridKey(collection);
     const tagsIn = () => {                                            // ...and come back once everything has landed
       if (!priced || shelfSort !== "price") return;
