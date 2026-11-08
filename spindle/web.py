@@ -73,7 +73,7 @@ class StateHub:
         self._ended: dict | None = None
         self._clock = clock
         self.on_album: Callable[[str, str], None] | None = None   # set by the server
-        self.on_track: Callable[[str, str], None] | None = None
+        self.on_track: Callable[[str, str, str, float | None], None] | None = None
         self._album_seen: tuple[str, str] | None = None
         self._track_seen: tuple[str, str] | None = None
 
@@ -92,7 +92,7 @@ class StateHub:
             if track_key != self._track_seen:
                 self._track_seen = track_key
                 with contextlib.suppress(Exception):
-                    self.on_track(st.artist, st.title)
+                    self.on_track(st.artist, st.title, st.album or "", st.track_duration)
         if st.art:
             key = art_key(st.art)
             with self._cond:
@@ -628,9 +628,22 @@ class WebServer(ThreadingHTTPServer):
         self.info = Info(collection, scrobbler, history)
         self.genius = Genius()
         self.hub.on_album = self.info.prefetch
-        self.hub.on_track = self.genius.prefetch
+        self.hub.on_track = self._prefetch_track
         self.stopping = False
         self._thread: threading.Thread | None = None
+
+    def _prefetch_track(self, artist: str, title: str, album: str = "",
+                        duration: float | None = None) -> None:
+        """Warm everything the page asks for on a track change, so Lyrics and
+        Info open instantly: the Genius page, this track's Last.fm plays and
+        the synced lyrics (same duration rounding as the page's request)."""
+        self.genius.prefetch(artist, title)
+
+        def run() -> None:
+            self.info.track_plays(artist, title)
+            self.lyrics.get(artist, title, album, float(round(duration)) if duration else None)
+
+        threading.Thread(target=run, name="track-prefetch", daemon=True).start()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.serve_forever, name="web", daemon=True)

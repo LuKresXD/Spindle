@@ -96,8 +96,8 @@
       el.artist.textContent = st.artist || "";
       el.feat.textContent = feat ? `feat. ${feat}` : "";
       lyricIndex = -1;
-      if (lyricsOn) loadLyrics(st);
-      if (sheetOpen) loadInfo();
+      loadLyrics(st);      // into the hidden panels too, so Lyrics and Info open instantly
+      loadInfo();
     }
     el.albumline.textContent = [st.album, st.year].filter(Boolean).join(" · ");
 
