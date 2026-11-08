@@ -4,7 +4,15 @@ from spindle.discogs import Release, clean_artist, parse_duration, same_album
 from spindle.fingerprint import TrackInfo
 from spindle.resolve import ResolveContext, Resolver
 from spindle.spotify import SpotifyCandidate, artist_matches
-from spindle.tracklist import AlbumTracklist, covers, merge, norm_title, side_of, titles_match
+from spindle.tracklist import (
+    AlbumTracklist,
+    box_part,
+    covers,
+    merge,
+    norm_title,
+    side_of,
+    titles_match,
+)
 
 
 def test_title_matching_is_case_and_punctuation_tolerant():
@@ -191,3 +199,65 @@ def test_resolver_rejects_a_wrong_title_or_artist():
     cands = [cand("Song", "Somebody Else", "a", "Album", "album", 0)]
     out = Resolver(FakeSpotify(cands, {}), None).resolve(TrackInfo(title="Song", artist="Artist"))
     assert not out.has_album
+
+
+PROMISE = ["Is It a Crime", "The Sweetest Taboo", "War of the Hearts", "You're Not the Man",
+           "Jezebel", "Mr Wrong", "Punch Drunk", "Never as Good as the First Time", "Fear",
+           "Tar Baby", "Maureen"]
+
+
+def sade_box():
+    """Six records in one release, sides A to L; here the first three albums."""
+    diamond = ["Smooth Operator", "Your Love Is King", "Hang On To Your Love",
+               "Frankie's First Affair", "When Am I Going To Make A Living", "Cherry Pie",
+               "Sally", "I Will Be Your Friend", "Why Can't We Live Together"]
+    stronger = ["Love Is Stronger Than Pride", "Paradise", "Nothing Can Come Between Us",
+                "Haunt Me", "Turn My Back On You", "Keep Looking", "Clean Heart", "Give It Up",
+                "I Never Thought I'd See The Day", "Siempre Hay Esperanza"]
+    sides = [("A", 4), ("B", 5), ("C", 5), ("D", 6), ("E", 5), ("F", 5)]
+    pos = [f"{side}{i}" for side, n in sides for i in range(1, n + 1)]
+    titles = diamond + [t.title() for t in PROMISE] + stronger
+    tracks = [{"position": p, "title": t, "duration": None, "artist": ""}
+              for p, t in zip(pos, titles, strict=True)]
+    return Release(16026908, "Sade", "This Far", 2020, ["Box Set", "Vinyl", "Vinyl", "Vinyl"],
+                   tracks, True)
+
+
+def test_box_part_cuts_the_album_sides_out_of_a_box_set():
+    pressing = FakeCollection([sade_box()]).tracklist(sade_box())
+    promise = make_album([200] * 11, artist="Sade", album="Promise", album_id="promise",
+                         titles=PROMISE)
+    assert covers(promise, pressing) < 0.5                  # the whole box never qualifies
+    part = box_part(pressing, promise)
+    assert part is not None
+    assert [side_of(p) for p in part.positions] == ["C"] * 5 + ["D"] * 6
+    assert part.discogs_release_id == 16026908 and covers(promise, part) == 1.0
+    # scattered hits (a compilation box) give nothing
+    scattered = make_album([200, 200], artist="Sade", album="Best", album_id="best",
+                           titles=["Smooth Operator", "Maureen"])
+    assert box_part(pressing, scattered) is None
+    # a single record is never cut, a double album with the album on its first record is
+    one_lp = make_album([100, 100], positions=["A1", "B1"])
+    assert box_part(one_lp, make_album([100], titles=["Track 1"])) is None
+    two_lp = make_album([100] * 4, positions=["A1", "B1", "C1", "D1"])
+    half = box_part(two_lp, make_album([100, 100], titles=["Track 1", "Track 2"]))
+    assert half is not None and half.positions == ["A1", "B1"]
+    assert box_part(make_album([100, 100]), promise) is None   # no sides at all
+
+
+def test_resolver_merges_a_box_set_album_with_its_own_sides():
+    cands = [cand("Is It a Crime", "Sade", "promise", "Promise", "album", 0, 1),
+             cand("Is It a Crime", "Sade", "best", "The Best of Sade", "compilation", 1, 2)]
+    durations = [384, 277, 400, 300, 325, 250, 330, 320, 280, 240, 260]
+    albums = {"promise": make_album(durations, artist="Sade", album="Promise",
+                                    album_id="promise", titles=PROMISE)}
+    r = Resolver(FakeSpotify(cands, albums), FakeCollection([sade_box()]))
+    out = r.resolve(TrackInfo(title="Is It a Crime", artist="Sade", source="shazam"))
+    assert out.album_id == "promise" and out.owned
+    assert out.tracklist.source == "merged" and out.tracklist.album_name == "Promise"
+    assert out.tracklist.positions == [f"C{i}" for i in range(1, 6)] + \
+        [f"D{i}" for i in range(1, 7)]
+    assert out.tracklist.discogs_release_id == 16026908
+    assert out.tracklist.is_side_end(4) and not out.tracklist.is_side_end(3)
+    assert [t.duration for t in out.tracklist.tracks] == durations
+    assert out.reason == "spotify+discogs (100% of sides C-D of the box)"

@@ -24,7 +24,7 @@ from typing import Protocol
 
 from .fingerprint import TrackInfo
 from .spotify import EDITION_RE, SpotifyCandidate, artist_matches
-from .tracklist import AlbumTracklist, covers, merge, titles_match
+from .tracklist import AlbumTracklist, box_part, covers, merge, side_of, titles_match
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +147,19 @@ class Resolver:
                 pressing = self.collection.tracklist(rel)
                 if pressing is not None and pressing.tracks:
                     cov = covers(tl, pressing)
+                    part = None
+                    if cov < MERGE_MIN_COVERAGE:
+                        # a box set: the album sits on a few of the pressing's sides
+                        part = box_part(pressing, tl, MERGE_MIN_COVERAGE)
+                        if part is not None:
+                            pressing, cov = part, covers(tl, part)
                     if cov >= MERGE_MIN_COVERAGE:
                         tl = merge(tl, pressing)
-                        reason = f"spotify+discogs ({cov:.0%} of pressing)"
+                        if part is not None:
+                            sides = f"{side_of(part.positions[0])}-{side_of(part.positions[-1])}"
+                            reason = f"spotify+discogs ({cov:.0%} of sides {sides} of the box)"
+                        else:
+                            reason = f"spotify+discogs ({cov:.0%} of pressing)"
                     else:
                         reason = f"spotify (owned pressing differs, {cov:.0%} overlap)"
                 else:

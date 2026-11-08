@@ -157,6 +157,44 @@ def merge(streaming: AlbumTracklist, pressing: AlbumTracklist) -> AlbumTracklist
     )
 
 
+def box_part(pressing: AlbumTracklist, streaming: AlbumTracklist,
+             min_fill: float = 0.5) -> AlbumTracklist | None:
+    """The sides of a box set that carry this streaming album, as a pressing of their own.
+
+    A box (Sade's "This Far": six records, sides A to L, one Discogs release) covers a
+    streaming album with two of its sides, so the whole box never reaches the merge
+    threshold. The run of sides from the first to the last that holds one of the
+    album's tracks does: return just those, in the pressing's order, so the side map
+    and the flips still work. None when the pressing has no sides or fewer than four
+    (one record), when the album's tracks are scattered across the box (a compilation
+    box), or when the run is the whole pressing already (then the normal coverage rule
+    has the last word).
+    """
+    if not pressing.positions or len(pressing.positions) != len(pressing.tracks):
+        return None
+    sides = [side_of(pos) for pos in pressing.positions]
+    if not all(sides):
+        return None
+    order = list(dict.fromkeys(sides))                  # side letters in pressing order
+    hits = {side for side, t in zip(sides, pressing.tracks, strict=True)
+            if any(titles_match(t.title, st.title) for st in streaming.tracks)}
+    if not hits:
+        return None
+    first = min(order.index(side) for side in hits)
+    last = max(order.index(side) for side in hits)
+    keep = set(order[first:last + 1])
+    if len(order) < 4 or keep == set(order):
+        return None         # one record is never cut: a half-matched album is another edition
+    idx = [i for i, side in enumerate(sides) if side in keep]
+    part = AlbumTracklist(
+        album_id=pressing.album_id, album_name=pressing.album_name, artist=pressing.artist,
+        tracks=[pressing.tracks[i] for i in idx], release_date=pressing.release_date,
+        positions=[pressing.positions[i] for i in idx], source=pressing.source,
+        discogs_release_id=pressing.discogs_release_id, owned=pressing.owned,
+    )
+    return part if covers(streaming, part) >= min_fill else None
+
+
 def covers(streaming: AlbumTracklist, pressing: AlbumTracklist) -> float:
     """Fraction of the pressing's tracks found in the streaming edition (0..1)."""
     if not pressing.tracks:

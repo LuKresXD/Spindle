@@ -62,6 +62,11 @@ Discogs order and positions (`A1 … D3`), Spotify names and durations. If
 Spotify has nothing but the collection has a release with that track, the
 **Discogs tracklist alone** carries the album lock (white labels, local
 pressings, anything streaming never got).
+A box set is one Discogs release (Sade's *This Far*: six records, sides A to L),
+so against a nine-track album the whole box never reaches the coverage bar; the
+resolver then cuts the box to the run of sides that hold the album's tracks
+(`box_part`) and merges with that, so the side map and the flips still work.
+One record is never cut this way: a half-matched single LP is another edition.
 
 The collection loads on its own thread at start, refreshes daily, and
 prefetches every release's tracklist once (cached on disk). Lookups from the
