@@ -119,7 +119,6 @@ body.phase-playing .veil { opacity: 1; }
 .sheet-scroll::-webkit-scrollbar { display: none; }
 .sheet.open { transform: translateY(0); }
 .grab { width: 76px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.4); margin: 0 auto 34px; }
-.pill.done { position: absolute; top: 28px; right: var(--pad-x); z-index: 2; }
 
 /* masthead */
 .mast { display: flex; align-items: flex-end; gap: 44px; padding-bottom: 38px; margin-bottom: 44px;

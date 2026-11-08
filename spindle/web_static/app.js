@@ -9,7 +9,6 @@
     body: document.body, bg: $("bg"), home: $("home"), art: $("art"), title: $("title"),
     artist: $("artist"), albumline: $("albumline"), sidetext: $("sidetext"), fill: $("fill"),
     feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
-    btnDone: $("btn-done"),
     lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"),
     listening: $("listening"), sheet: $("sheet"), tiles: $("tiles"),
     ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"),
@@ -422,7 +421,7 @@
     if (e.touches[0].clientY - pull.y > 110) { pull = null; closeSheet(); }
   }, { passive: true });
   const sheetAtTop = () => document.getElementById("sheetscroll").scrollTop <= 2;
-  const closeZone = (t) => el.btnDone.contains(t) || !!t.closest(".mast, .grab");
+  const closeZone = (t) => !!t.closest(".mast, .grab");
 
   function tap(start) {
     const target = start.target;
