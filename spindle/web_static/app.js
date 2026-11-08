@@ -8,7 +8,7 @@
   const el = {
     body: document.body, bg: $("bg"), home: $("home"), art: $("art"), title: $("title"),
     artist: $("artist"), albumline: $("albumline"), sidetext: $("sidetext"), fill: $("fill"),
-    elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
+    feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
     lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"),
     listening: $("listening"), levelfill: $("levelfill"), sheet: $("sheet"), tiles: $("tiles"),
     ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"),
@@ -44,6 +44,13 @@
   const serverNow = () => Date.now() / 1000 - clockOffset;
   const fmtCount = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n);
   const sideOf = (pos) => (pos && /^[A-Za-z]/.test(pos)) ? pos[0].toUpperCase() : "";
+  // "Maria I'm Drunk (feat. Justin Bieber & Young Thug)" → bare title + the feature credit,
+  // shown on its own smaller line instead of stacking the title seven lines high.
+  const FEAT_RE = /\s*[\(\[]\s*(?:feat|ft|featuring|with|w\/)\.?\s*([^\)\]]*)[\)\]]\s*$/i;
+  function splitFeat(title) {
+    const m = FEAT_RE.exec(title || "");
+    return m ? { main: (title || "").slice(0, m.index).trim() || title, feat: m[1].trim() } : { main: title || "", feat: "" };
+  }
   const fmtDate = (iso) => {
     if (!iso) return "";
     if (iso.slice(0, 10) === BULK_IMPORT_DAY) return iso.slice(0, 4);
@@ -82,9 +89,11 @@
     if (key !== trackKey) {
       trackKey = key;
       trackChangedAt = performance.now();
-      el.title.textContent = st.title || "";
+      const { main, feat } = splitFeat(st.title);
+      el.title.textContent = main;
       fitTitle();
       el.artist.textContent = st.artist || "";
+      el.feat.textContent = feat ? `feat. ${feat}` : "";
       lyricIndex = -1;
       if (lyricsOn) loadLyrics(st);
       if (sheetOpen) loadInfo();
@@ -124,6 +133,7 @@
     const fits = () => { const w = el.title.clientWidth; return [...el.title.childNodes].length === 0 ||
       Array.from(el.title.textContent.split(/\s+/)).every((word) => measure(word, size) <= w); };
     while (size > min && !fits()) { size -= 4; el.title.style.fontSize = size + "px"; }
+    while (size > min && el.title.scrollHeight > size * 1.02 * 3.2) { size -= 4; el.title.style.fontSize = size + "px"; }
   }
   const canvas = document.createElement("canvas").getContext("2d");
   function measure(text, size) {
@@ -147,7 +157,7 @@
     el.list.innerHTML = shown.map(({ r, i }) => {
       const cls = i === cur ? "cur" : (r.scrobbled ? "done" : "");
       const pos = r.position || String(i + 1).padStart(2, "0");
-      return `<div class="row ${cls}"><span class="pos">${esc(pos)}</span><span class="name">${esc(r.title)}</span><span class="dur">${r.duration ? mmss(r.duration) : ""}</span></div>`;
+      return `<div class="row ${cls}"><span class="pos">${esc(pos)}</span><span class="name">${esc(splitFeat(r.title).main)}</span><span class="dur">${r.duration ? mmss(r.duration) : ""}</span></div>`;
     }).join("");
   }
 
@@ -374,7 +384,7 @@
     const about = (info && info.story && info.story.text) ? esc(info.story.text) : "";
     const trackName = state ? esc(state.title) : "";
     el.tiles.innerHTML = mast + `<div class="cols"><div class="col">` +
-      sec(`On this track · ${state ? state.title : ""}`, `<div class="story">${story}</div>`) +
+      sec(`On this track · ${state ? splitFeat(state.title).main : ""}`, `<div class="story">${story}</div>`) +
       sec("Credits", `<div class="cred">${credits}</div>`) +
       `</div><div class="col">` +
       (samples ? sec("Samples", `<div class="samples">${samples}</div>`) : "") +

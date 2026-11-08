@@ -64,6 +64,8 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .title { font-weight: 700; letter-spacing: -0.025em; line-height: 1.02; font-size: 108px;
   text-shadow: 0 2px 30px rgba(0,0,0,.25); overflow-wrap: normal; word-break: keep-all; }
 .artist { font-weight: 500; color: rgba(255,255,255,.80); letter-spacing: -0.01em; font-size: 50px; margin-top: 12px; }
+.feat { font-weight: 500; color: rgba(255,255,255,.55); font-size: 30px; margin-top: 8px; }
+.feat:empty { display: none; }
 .meta { font-weight: 500; color: var(--text-dim); }
 .progress { margin-top: 62px; }
 .track { position: relative; height: 7px; border-radius: 4px; background: rgba(255,255,255,.26); overflow: hidden; }
