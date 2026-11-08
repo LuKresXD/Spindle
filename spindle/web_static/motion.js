@@ -149,28 +149,29 @@ window.Motion = (() => {
     const chord = TILE + GAP;
     const R = chord / (2 * Math.sin((CURVE / 2) * Math.PI / 180));
     const edge = 95;
-    const proxy = { o: hit - 9 };
+    const proxy = { o: hit - 9, f: 0 };          // o: the ring's position; f: the fade-in
     const place = () => {
       imgs.forEach((img, i) => {
         const a = gsap.utils.clamp(-edge, edge, (i - proxy.o) * CURVE);
         const rad = a * Math.PI / 180;
         const dist = Math.abs(i - proxy.o);
+        // autoAlpha: a tile that is out of sight is also out of the compositor's hands
         gsap.set(img, { x: Math.sin(rad) * R, z: -R * (1 - Math.cos(rad)), rotationY: -a,
-          opacity: gsap.utils.clamp(0, 1, 1.15 - dist * 0.26), scale: 1 - Math.min(0.18, dist * 0.04) });
+          autoAlpha: proxy.f * gsap.utils.clamp(0, 1, 1.15 - dist * 0.26), scale: 1 - Math.min(0.18, dist * 0.04) });
       });
     };
     gsap.set(imgs, { xPercent: -50, yPercent: -50, transformOrigin: "50% 50%" });
     place();
-    // The tiles are placed first and the ring fades in over the first frames, so the GPU
-    // uploads the twelve textures before anything has to move. Then fast out of the gate,
+    // The tiles are placed first and fade in one by one over the first frames (never the
+    // group: an opacity on the 3D parent costs an extra render pass every frame), so the
+    // GPU uploads the textures before anything has to move. Then fast out of the gate,
     // still visibly turning until it stops: power3, not expo (whose long tail parks the
     // wheel a second before the hand-over).
-    gsap.set(container, { opacity: 0 });
     const tl = gsap.timeline({ paused: true });
-    tl.to(container, { opacity: 1, duration: D(0.3), ease: MICRO }, 0);
+    tl.to(proxy, { f: 1, duration: D(0.3), ease: MICRO, onUpdate: place }, 0);
     tl.to(proxy, { o: hit, duration: D(1.9), ease: "power3.out", onUpdate: place }, 0.12);
     requestAnimationFrame(() => requestAnimationFrame(() => tl.play()));
-    tl.to(imgs.filter((_, i) => i !== hit), { opacity: 0, duration: D(0.3), ease: MICRO }, ">-0.3");
+    tl.to(imgs.filter((_, i) => i !== hit), { autoAlpha: 0, duration: D(0.3), ease: MICRO, overwrite: "auto" }, ">-0.3");
     if (onLand) tl.call(onLand, null, ">-0.02");
     return tl;
   }
