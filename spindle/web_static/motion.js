@@ -180,9 +180,12 @@ window.Motion = (() => {
   function handOver(fromImg, toImg, { onDone } = {}) {
     gsap.set(toImg, { autoAlpha: 0 });
     gsap.set(fromImg, { zIndex: 5 });
-    const tl = gsap.timeline({ onComplete: () => { gsap.set(toImg, { autoAlpha: 1 }); gsap.set(fromImg, { autoAlpha: 0 }); if (onDone) onDone(); } });
+    // The tile scales into the slot (its corners grow with it and land on the card's radius),
+    // then the card's own cover fades in over it: no cut at the end of the flight.
+    const tl = gsap.timeline({ onComplete: () => { if (onDone) onDone(); } });
     tl.add(Flip.fit(fromImg, toImg, { duration: D(0.85), ease: "house", scale: true }), 0);
-    tl.to(fromImg, { borderRadius: 32, duration: D(0.85), ease: "house" }, 0);
+    tl.to(toImg, { autoAlpha: 1, duration: D(0.3), ease: MICRO }, ">-0.1");
+    tl.to(fromImg, { autoAlpha: 0, duration: D(0.3), ease: MICRO }, "<");
     return tl;
   }
 

@@ -217,7 +217,11 @@ body.ended-open #home { opacity: 0; }
 .wheelkicker { position: absolute; left: 0; right: 0; top: 300px; text-align: center; }
 /* the covers sit on a curve in depth; the motion layer places each one */
 .wheel3d { position: absolute; inset: 0; perspective: 1600px; transform-style: preserve-3d; }
-.wheel3d img { position: absolute; left: 50%; top: 50%; width: 300px; height: 300px; object-fit: cover; border-radius: 18px;
+/* hidden until the motion layer has placed them (a frame can pass between insertion and
+   placement, and fifteen covers stacked at the centre is what that frame would show);
+   a 17 px radius reads as the card's 32 px once the hit has grown into its slot */
+.wheel3d img { position: absolute; left: 50%; top: 50%; width: 300px; height: 300px; object-fit: cover; border-radius: 17px;
+  opacity: 0; visibility: hidden;
   background: rgba(255,255,255,.06); box-shadow: 0 14px 36px rgba(0,0,0,.5); backface-visibility: hidden; will-change: transform; }
 /* (a tight shadow: a wide one triples each tile's texture, and the Pi is fill-rate bound) */
 .landed { position: absolute; inset: 0; padding: var(--pad-y) var(--pad-x); display: grid; grid-template-columns: 560px 1fr;
