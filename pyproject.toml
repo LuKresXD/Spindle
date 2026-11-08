@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spindle"
-version = "0.3.6"
+version = "0.4.0"
 description = "Vinyl scrobbler for Raspberry Pi — fingerprint what's playing and scrobble to Last.fm"
 readme = "README.md"
 license = "MIT"

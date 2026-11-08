@@ -106,8 +106,10 @@ blurred cover; idle is pure black, so the panel is off until the needle drops.
 - **Any order**: play 3, go back to 1, play 2 and 3 again: each play is its own scrobble.
 - **Last.fm's rules**: half the track or four minutes; an outbox thread with an offline queue
   that survives reboots; a scrobble Last.fm rejects is reported, not retried forever.
-- **Telegram**: album-lock card, live now-playing edits, side summaries; `/now`, `/album`,
-  `/history`, `/stats`, `/collection`.
+- **Telegram as a log** (v0.4): no bot, no commands. One card when Spindle comes up (and whether
+  after a boot, a clean stop or a crash), a card at once when something is dropped for good (a
+  rejected scrobble), WARNING log lines as a digest at most every ten minutes, and a word when
+  the offline queue gets through. Silent by default.
 
 ## Hardware
 
@@ -230,8 +232,7 @@ spindle/
 ├── display.py      # framebuffer renderer (the fallback)
 ├── state.py        # ScreenState / TrackRow: what any renderer draws from
 ├── history.py      # scrobble log for stats
-├── notify.py       # Telegram notifications
-├── bot.py          # Telegram bot commands
+├── notify.py       # Telegram as the log channel: start, error and digest cards
 └── config.py       # YAML config
 ```
 

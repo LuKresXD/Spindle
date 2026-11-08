@@ -1,269 +1,268 @@
-"""Telegram notifications for Spindle events.
+"""Telegram as Spindle's log channel.
 
-Sends rich notifications via the Telegram Bot API:
-  - Album art photos when album-lock activates
-  - Live-edited now-playing caption as tracks advance
-  - Detailed session summaries on side finish
-  - Mute/unmute support
+Nothing conversational lives here any more: no commands, no now-playing cards, no
+side summaries (the display and Last.fm have those). The bot posts only what a
+log would, each as one short card in the same shape:
+
+    🟢 <b>Spindle is back</b>
+    <i>restarted · stopped for 6 s · 12:40</i>
+    Display on · 87 records on the shelf · capture 14 dB
+
+  started    once per start: up after a boot, back after a stop, back after a crash
+  error      at once: something was dropped or failed for good (a rejected scrobble)
+  warning    as a digest: WARNING log lines, batched for a minute, at most one card
+             every ten minutes, repeats counted
+  recovered  the offline queue delivered
+
+Everything goes out on a background thread; the engine never waits on Telegram.
 """
 
+from __future__ import annotations
+
+import contextlib
+import json
 import logging
+import os
 import threading
+import time
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
 
 import requests
 
 from .config import TelegramConfig
-from .fingerprint import TrackInfo
 
 logger = logging.getLogger(__name__)
 
+DIGEST_WINDOW = 60.0        # a first warning waits this long for company
+DIGEST_GAP = 600.0          # and no two digests closer than this
+DIGEST_LINES = 8            # lines shown; the rest is a count
+LINE_MAX = 160              # characters per digest line
+BOOT_WINDOW = 180.0         # a start this soon after boot is "booted", not "restarted"
+DEFAULT_RUN_PATH = Path.home() / ".local" / "share" / "spindle" / "run.json"
+
 
 class Notifier:
-    """Sends Telegram notifications for scrobble events.
+    """The log channel: start cards, error cards, warning digests, recoveries."""
 
-    Photo messages are sent when album art is available. The now-playing
-    message is edited in-place as tracks advance (no spam).
-    """
-
-    def __init__(self, cfg: TelegramConfig):
+    def __init__(self, cfg: TelegramConfig, clock: Callable[[], float] = time.time,
+                 send: Callable[[str, bool], None] | None = None):
         self.cfg = cfg
         self.enabled = bool(cfg.bot_token and cfg.chat_id)
-        self.muted = False
-
-        # Now-playing message tracking (for in-place edits)
-        self._np_msg_id: int | None = None
-        self._np_is_photo: bool = False
-        self.current_art_url: str | None = None
-
-        # Scrobble tracking for session summaries
-        self._session_tracks: list[str] = []  # "artist — title" for this session
-
+        self._clock = clock
+        self._deliver = send or self._post
+        self._lock = threading.Lock()
+        self._pending: list[tuple[float, str]] = []
+        self._last_digest = 0.0
+        self._timer: threading.Timer | None = None
         if not self.enabled:
-            logger.info("Telegram notifications disabled (no bot_token/chat_id)")
+            logger.info("Telegram log channel disabled (no bot_token/chat_id)")
 
-    # ── Low-level Telegram API ───────────────────────────────────────────
+    # ── transport ────────────────────────────────────────────────────────────
 
-    def _api(self, method: str, payload: dict,
-             timeout: int = 10) -> dict | None:
-        """Call a Telegram Bot API method. Returns the result dict or None."""
-        if not self.enabled:
-            return None
+    def _post(self, text: str, silent: bool) -> None:
         try:
-            url = f"https://api.telegram.org/bot{self.cfg.bot_token}/{method}"
-            resp = requests.post(url, json=payload, timeout=timeout)
-            if resp.ok:
-                return resp.json().get("result")
-            else:
-                logger.debug("Telegram %s failed: %s", method, resp.text)
-                return None
+            resp = requests.post(f"https://api.telegram.org/bot{self.cfg.bot_token}/sendMessage",
+                                 json={"chat_id": self.cfg.chat_id, "text": text,
+                                       "parse_mode": "HTML", "disable_notification": silent,
+                                       "disable_web_page_preview": True}, timeout=10)
+            if not resp.ok:
+                logger.debug("Telegram sendMessage failed: %s", resp.text)
         except Exception as e:
-            logger.debug("Telegram %s error: %s", method, e)
-            return None
+            logger.debug("Telegram sendMessage error: %s", e)
 
-    def _send_text(self, text: str, silent: bool | None = None) -> int | None:
-        """Send a text message synchronously. Returns message_id."""
-        result = self._api("sendMessage", {
-            "chat_id": self.cfg.chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_notification": silent if silent is not None else self.cfg.silent,
-        })
-        return result.get("message_id") if result else None
-
-    def _send_photo(self, photo_url: str, caption: str) -> int | None:
-        """Send a photo message synchronously. Returns message_id."""
-        result = self._api("sendPhoto", {
-            "chat_id": self.cfg.chat_id,
-            "photo": photo_url,
-            "caption": caption,
-            "parse_mode": "HTML",
-            "disable_notification": self.cfg.silent,
-        }, timeout=15)
-        if result:
-            return result.get("message_id")
-        # Fallback to text if photo fails
-        logger.debug("Photo send failed, falling back to text")
-        return self._send_text(caption)
-
-    def _edit_caption(self, msg_id: int, caption: str) -> None:
-        """Edit a photo message's caption."""
-        self._api("editMessageCaption", {
-            "chat_id": self.cfg.chat_id,
-            "message_id": msg_id,
-            "caption": caption,
-            "parse_mode": "HTML",
-        })
-
-    def _edit_text(self, msg_id: int, text: str) -> None:
-        """Edit a text message."""
-        self._api("editMessageText", {
-            "chat_id": self.cfg.chat_id,
-            "message_id": msg_id,
-            "text": text,
-            "parse_mode": "HTML",
-        })
-
-    def _fire(self, fn, *args, **kwargs) -> None:
-        """Run a function on a background thread (fire-and-forget)."""
-        threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True).start()
-
-    def _fire_send(self, text: str, silent: bool | None = None) -> None:
-        """Fire-and-forget text send (no message_id needed)."""
-        if not self.enabled or self.muted:
+    def _send(self, text: str, silent: bool | None = None) -> None:
+        if not self.enabled:
             return
-        self._fire(self._send_text, text, silent)
+        quiet = self.cfg.silent if silent is None else silent
+        threading.Thread(target=self._deliver, args=(text, quiet), name="telegram",
+                         daemon=True).start()
 
-    # ── Caption builder ──────────────────────────────────────────────────
+    def _clock_text(self, at: float | None = None) -> str:
+        return datetime.fromtimestamp(at or self._clock()).strftime("%H:%M")
 
-    def _build_np_caption(self, artist: str, album: str,
-                          track_title: str, track_num: int,
-                          total_tracks: int) -> str:
-        """Build the now-playing caption."""
-        filled = round(track_num / total_tracks * 10) if total_tracks else 0
-        bar = "▓" * filled + "░" * (10 - filled)
+    # ── cards ────────────────────────────────────────────────────────────────
 
-        lines = [
-            f"🎵 <b>{_esc(artist)}</b> — <i>{_esc(album)}</i>",
-            "",
-            f"▶️ {_esc(track_title)}",
-            f"Track {track_num}/{total_tracks} {bar}",
-        ]
+    def started(self, facts: dict) -> None:
+        """One card per start. `facts`: reason (booted | restarted | crashed | started),
+        stopped_for (seconds, after a clean stop), version, display (bool),
+        records (int | None), gain_db (float | None), dry_run (bool)."""
+        reason = facts.get("reason", "started")
+        when = self._clock_text()
+        if facts.get("dry_run"):
+            head, sub = "🧪 <b>Spindle in dry run</b>", f"identifying only · {when}"
+        elif reason == "crashed":
+            head = "🟠 <b>Spindle is back after a crash</b>"
+            sub = f"the last run ended without a stop · {when}"
+        elif reason == "restarted":
+            gap = facts.get("stopped_for")
+            gap_text = f"stopped for {_duration(gap)} · " if gap is not None else ""
+            head, sub = "🟢 <b>Spindle is back</b>", f"restarted · {gap_text}{when}"
+        elif reason == "booted":
+            head, sub = "🟢 <b>Spindle is up</b>", f"booted · {when}"
+        else:
+            head, sub = "🟢 <b>Spindle is up</b>", f"started · {when}"
+        if facts.get("version"):
+            sub = f"v{facts['version']} · {sub}"
+        bits = []
+        if "display" in facts:
+            bits.append("Display on" if facts["display"] else "Display off")
+        if facts.get("records") is not None:
+            n = facts["records"]
+            bits.append(f"{n} record{'s' if n != 1 else ''} on the shelf")
+        if facts.get("gain_db") is not None:
+            bits.append(f"capture {facts['gain_db']:g} dB")
+        lines = [head, f"<i>{_esc(sub)}</i>"]
+        if bits:
+            lines.append(_esc(" · ".join(bits)))
+        self._send("\n".join(lines))
 
-        if self._session_tracks:
-            lines.append(f"\n✅ Scrobbled: {len(self._session_tracks)}")
-
-        return "\n".join(lines)
-
-    # ── Public API ───────────────────────────────────────────────────────
-
-    def album_locked(self, artist: str, album: str, track_num: int,
-                     total_tracks: int, first_track: str,
-                     art_url: str | None = None) -> None:
-        """Notify when album-lock activates — sends photo if art available."""
-        if self.muted:
-            self.current_art_url = art_url
-            return
-
-        self.current_art_url = art_url
-        caption = self._build_np_caption(
-            artist, album, first_track, track_num, total_tracks)
-
-        def _do():
-            if art_url:
-                self._np_msg_id = self._send_photo(art_url, caption)
-                self._np_is_photo = True
-            else:
-                self._np_msg_id = self._send_text(caption)
-                self._np_is_photo = False
-
-        # Run in thread to avoid blocking audio loop, but we need msg_id
-        # before track_advanced is called (typically minutes later).
-        t = threading.Thread(target=_do, daemon=True)
-        t.start()
-
-    def track_scrobbled(self, track: TrackInfo, is_backfill: bool = False) -> None:
-        """Record a scrobble. Always tracks for session summary.
-        Sends individual notification only if verbose mode is on."""
-        self._session_tracks.append(f"{track.artist} — {track.title}")
-
-        if self.cfg.verbose and not self.muted:
-            prefix = "↩️" if is_backfill else "✅"
-            self._fire_send(
-                f"{prefix} {_esc(track.artist)} — {_esc(track.title)}", silent=True)
-
-    def track_advanced(self, artist: str, album: str, track_title: str,
-                       track_num: int, total_tracks: int) -> None:
-        """Notify when album-lock advances — edits the now-playing message."""
-        if self.muted:
-            return
-
-        caption = self._build_np_caption(
-            artist, album, track_title, track_num, total_tracks)
-
-        def _do():
-            if self._np_msg_id:
-                if self._np_is_photo:
-                    self._edit_caption(self._np_msg_id, caption)
-                else:
-                    self._edit_text(self._np_msg_id, caption)
-            else:
-                # Photo hasn't been sent yet or failed — send new text
-                self._np_msg_id = self._send_text(caption, silent=True)
-                self._np_is_photo = False
-
-        self._fire(_do)
-
-    def side_finished(self, artist: str, album: str,
-                      tracks_scrobbled: int, total_played: int) -> None:
-        """Notify when an album side/session ends — includes track listing."""
-        lines = [
-            "⏹ <b>Side finished</b>",
-            f"{_esc(artist)} — <i>{_esc(album)}</i>",
-            "",
-        ]
-
-        for i, track_name in enumerate(self._session_tracks, 1):
-            # Show just the title (strip "Artist — " prefix)
-            title = track_name.split(" — ", 1)[-1] if " — " in track_name else track_name
-            lines.append(f"  {i}. {_esc(title)}")
-
-        lines.append("")
-        lines.append(f"✅ {tracks_scrobbled}/{total_played} tracks scrobbled")
-
-        self._fire_send("\n".join(lines))
-        self._np_msg_id = None
-        self._np_is_photo = False
-        self._session_tracks = []
-
-    def compilation_finished(self, tracks_scrobbled: int) -> None:
-        """Notify when a compilation session ends."""
-        lines = [
-            "⏹ <b>Compilation finished</b>",
-            "",
-        ]
-
-        for i, track_name in enumerate(self._session_tracks, 1):
-            lines.append(f"  {i}. {_esc(track_name)}")
-
-        lines.append("")
-        lines.append(f"✅ {tracks_scrobbled} track{'s' if tracks_scrobbled != 1 else ''}")
-
-        self._fire_send("\n".join(lines))
-        self._np_msg_id = None
-        self._np_is_photo = False
-        self._session_tracks = []
-
-    def error(self, message: str) -> None:
-        """Notify on error (if error notifications enabled)."""
+    def error(self, title: str, detail: str = "") -> None:
+        """Something failed for good: one card, at once."""
         if not self.cfg.errors:
             return
-        self._fire_send(f"⚠️ Spindle: {_esc(message)}")
+        lines = [f"🔴 <b>{_esc(title)}</b>"]
+        if detail:
+            lines.append(_esc(_clip(detail, 400)))
+        lines.append(f"<i>{self._clock_text()}</i>")
+        self._send("\n".join(lines))
 
-    def queue_flushed(self, count: int) -> None:
-        """Notify when offline queue is flushed."""
-        if count > 0:
-            self._fire_send(
-                f"📡 Flushed {count} queued scrobble{'s' if count != 1 else ''}")
-
-    def started(self) -> None:
-        """Notify that Spindle has started."""
-        self._fire_send("🟢 Spindle started — listening for vinyl")
-        self._np_msg_id = None
-        self._np_is_photo = False
-        self._session_tracks = []
-
-    def track_advanced_simple(self, track: TrackInfo) -> None:
-        """Simple notification for compilation/simple mode track changes."""
-        if self.muted:
+    def recovered(self, count: int) -> None:
+        """The offline queue got through."""
+        if count <= 0:
             return
-        self._fire_send(
-            f"🎵 {_esc(track.artist)} — <i>{_esc(track.title)}</i>",
-            silent=True)
+        self._send(f"📡 <b>Back online</b> · {count} queued scrobble{'s' if count != 1 else ''} "
+                   f"delivered · <i>{self._clock_text()}</i>")
+
+    # ── warnings: a digest ───────────────────────────────────────────────────
+
+    def warning(self, line: str) -> None:
+        """Queue a WARNING for the next digest."""
+        if not self.cfg.errors or not self.enabled:
+            return
+        now = self._clock()
+        with self._lock:
+            self._pending.append((now, _clip(line, LINE_MAX)))
+            if self._timer is None:
+                wait = max(DIGEST_WINDOW, self._last_digest + DIGEST_GAP - now)
+                self._timer = threading.Timer(wait, self.flush_warnings)
+                self._timer.daemon = True
+                self._timer.start()
+
+    def flush_warnings(self) -> None:
+        """Send the pending warnings as one card (the timer calls this; tests may too)."""
+        with self._lock:
+            pending, self._pending = self._pending, []
+            self._timer = None
+            if not pending:
+                return
+            self._last_digest = self._clock()
+        counts: dict[str, int] = {}
+        for _, line in pending:
+            counts[line] = counts.get(line, 0) + 1
+        first, last = pending[0][0], pending[-1][0]
+        span = self._clock_text(first) if len(pending) == 1 or self._clock_text(first) == \
+            self._clock_text(last) else f"{self._clock_text(first)}–{self._clock_text(last)}"
+        n = len(pending)
+        head = f"⚠️ <b>{n} warning{'s' if n != 1 else ''}</b> · <i>{span}</i>"
+        rows = [f"• {_esc(line)}" + (f"  ×{c}" if c > 1 else "") for line, c in counts.items()]
+        if len(rows) > DIGEST_LINES:
+            rows = rows[:DIGEST_LINES] + [f"…and {len(rows) - DIGEST_LINES} more"]
+        self._send("\n".join([head, *rows]), silent=True)
+
+    def logging_handler(self) -> logging.Handler:
+        """A handler that turns Spindle's WARNING log lines into digest entries."""
+        return _WarningHandler(self)
+
+
+class _WarningHandler(logging.Handler):
+    def __init__(self, notifier: Notifier):
+        super().__init__(level=logging.WARNING)
+        self.notifier = notifier
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno != logging.WARNING or not record.name.startswith("spindle") \
+                or record.name == __name__:
+            return
+        try:
+            where = record.name.rsplit(".", 1)[-1]
+            self.notifier.warning(f"{where}: {record.getMessage()}")
+        except Exception:                         # a log handler must never raise
+            pass
+
+
+class RunRecord:
+    """Remembers whether the previous run stopped cleanly, so the start card can say
+    "back after a crash" instead of pretending every start is a restart."""
+
+    def __init__(self, path: Path | None = None, clock: Callable[[], float] = time.time,
+                 uptime: Callable[[], float | None] | None = None):
+        self.path = path or DEFAULT_RUN_PATH
+        self._clock = clock
+        self._uptime = uptime or _system_uptime
+
+    def begin(self) -> dict:
+        """Record this start; return the reason for it and the gap since the last stop."""
+        previous: dict = {}
+        with contextlib.suppress(OSError, ValueError):
+            previous = json.loads(self.path.read_text())
+        now = self._clock()
+        up = self._uptime()
+        facts: dict = {}
+        if up is not None and up < BOOT_WINDOW:
+            facts["reason"] = "booted"
+        elif previous and not previous.get("clean_exit", True):
+            facts["reason"] = "crashed"
+        elif previous.get("ended_at"):
+            facts["reason"] = "restarted"
+            facts["stopped_for"] = max(0.0, now - float(previous["ended_at"]))
+        else:
+            facts["reason"] = "started"
+        self._write({"started_at": now, "pid": os.getpid(), "clean_exit": False})
+        return facts
+
+    def end(self) -> None:
+        """A clean stop: the next start is a restart, not a recovery."""
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            data = {}
+        data.update({"clean_exit": True, "ended_at": self._clock()})
+        self._write(data)
+
+    def _write(self, data: dict) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(self.path)
+        except OSError as e:
+            logger.debug("Run record not written: %s", e)
+
+
+def _system_uptime() -> float | None:
+    try:
+        return float(Path("/proc/uptime").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _duration(seconds: float) -> str:
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s} s"
+    if s < 3600:
+        return f"{s // 60} min"
+    if s < 86400:
+        return f"{s // 3600} h {(s % 3600) // 60:02d}"
+    return f"{s // 86400} d"
+
+
+def _clip(text: str, n: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[: n - 1] + "…"
 
 
 def _esc(text: str) -> str:
-    """Escape HTML special characters."""
-    return (text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;"))
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

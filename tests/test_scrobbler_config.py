@@ -32,7 +32,7 @@ class FlakyNetwork:
 def make(tmp_path, script):
     s = Scrobbler(LastFMConfig(api_key="k", api_secret="s", username="u"),
                   ScrobbleConfig(dedup_window=300), queue_path=tmp_path / "q.json",
-                  threaded=False, on_error=lambda m: errors.append(m))
+                  threaded=False, on_error=lambda t, d: errors.append(f"{t}: {d}"))
     s.network = FlakyNetwork(script)
     return s
 

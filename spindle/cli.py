@@ -12,14 +12,13 @@ from pathlib import Path
 
 from . import __version__
 from .art import ArtProvider
-from .bot import SpindleBot
 from .capture import DEFAULT_STEP, ContinuousCapture
 from .config import SpindleConfig, load_config
 from .display import Display
 from .engine import Extras, IdentifyWorker, Player
 from .fingerprint import Corrections, Identifier
 from .history import ScrobbleHistory
-from .notify import Notifier
+from .notify import Notifier, RunRecord
 from .resolve import Resolver
 from .scrobbler import Scrobbler
 from .session import ScrobbleSession
@@ -77,6 +76,9 @@ def main() -> None:
         sys.exit(1)
 
     notifier = Notifier(cfg.telegram)
+    logging.getLogger().addHandler(notifier.logging_handler())   # WARNING lines → a digest
+    run = RunRecord()
+    run_facts = run.begin()
 
     # Last.fm (its own outbox thread; the engine never waits on it)
     scrobbler = None
@@ -84,7 +86,8 @@ def main() -> None:
         if not cfg.lastfm.api_key or not cfg.lastfm.username:
             logger.error("Last.fm credentials not set: check config.yaml")
             sys.exit(1)
-        scrobbler = Scrobbler(cfg.lastfm, cfg.scrobble, on_error=notifier.error)
+        scrobbler = Scrobbler(cfg.lastfm, cfg.scrobble, on_error=notifier.error,
+                              on_recovered=notifier.recovered)
         scrobbler.connect()
 
     # Spotify (canonical names, tracklists) and the Discogs collection (the records he owns)
@@ -143,7 +146,7 @@ def main() -> None:
 
     player = Player(
         cfg, capture, worker,
-        session=session, scrobbler=scrobbler, notifier=notifier, history=history,
+        session=session, scrobbler=scrobbler, history=history,
         extras=extras, dry_run=args.dry_run,
     )
 
@@ -155,20 +158,17 @@ def main() -> None:
         player.side_listeners.append(web.hub.side_ended)
         logger.info("Touch display served at http://%s:%d/", cfg.web.host, cfg.web.port)
 
-    bot = None
-    if cfg.telegram.bot_token and cfg.telegram.chat_id and not args.dry_run:
-        bot = SpindleBot(bot_token=cfg.telegram.bot_token, chat_id=cfg.telegram.chat_id,
-                         session=session, history=history, notifier=notifier, player=player,
-                         collection=collection, scrobbler=scrobbler)
-        bot.start()
-
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     if args.dry_run:
         logger.info("DRY RUN: will identify but not scrobble")
-    else:
-        notifier.started()
+    notifier.started({
+        **run_facts, "version": __version__, "dry_run": args.dry_run,
+        "display": cfg.display.enabled or cfg.web.enabled,
+        "records": collection.stats()["releases"] if collection is not None else None,
+        "gain_db": cfg.audio.capture_gain_db,
+    })
 
     # Tick loop: a steady STEP cadence regardless of how long a tick takes.
     next_tick = time.monotonic()
@@ -185,7 +185,7 @@ def main() -> None:
                     scrobbler.flush_queue()
         except Exception as e:
             logger.error("Error in tick: %s", e, exc_info=True)
-            notifier.error(str(e))
+            notifier.error("A tick failed", str(e))
             time.sleep(5)
         next_tick += DEFAULT_STEP
         delay = next_tick - time.monotonic()
@@ -195,8 +195,7 @@ def main() -> None:
             next_tick = time.monotonic()
 
     player.close()
-    if bot:
-        bot.stop()
+    run.end()
     if web is not None:
         web.stop()
     display.clear()

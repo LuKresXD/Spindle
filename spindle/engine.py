@@ -37,7 +37,6 @@ from .capture import DEFAULT_STEP, ContinuousCapture
 from .config import SpindleConfig
 from .fingerprint import TrackInfo
 from .history import ScrobbleHistory
-from .notify import Notifier
 from .resolve import ResolveContext, Resolved, Resolver
 from .scrobbler import Scrobbler
 from .session import ScrobbleSession, SessionMode, _artist_key, normalize_title
@@ -201,7 +200,6 @@ class Player:
         *,
         session: ScrobbleSession | None,
         scrobbler: Scrobbler | None,
-        notifier: Notifier,
         history: ScrobbleHistory,
         extras: Extras | None = None,
         dry_run: bool = False,
@@ -213,7 +211,6 @@ class Player:
         self.worker = worker
         self.session = session
         self.scrobbler = scrobbler
-        self.notifier = notifier
         self.history = history
         self.extras = extras or Extras()
         self.dry_run = dry_run
@@ -370,26 +367,17 @@ class Player:
                          res.raw.title if res.raw else "no match")
         if self.session:
             al = self.session.album_state
-            al_artist = al.tracklist.artist if al else None
-            al_album = al.tracklist.album_name if al else None
             al_scrobbled = len(al.scrobbled) if al else 0
-            al_played = (al.current_index + 1) if al else 0
-            comp_count = self.session.comp_scrobbled_count     # read before reset()
             for t, ts in self.session.on_silence():
                 self._scrobble(t, ts)
             if al is not None:
                 al_scrobbled = len(al.scrobbled)
-            if al_artist and al_scrobbled:
-                self.notifier.side_finished(al_artist, al_album or "", al_scrobbled, al_played)
             if al is not None and al_scrobbled:
                 self._announce_side_end(al, al_scrobbled)
             if self.session.deck_speed_samples >= 3:
                 logger.info("Deck speed: %+.1f%% (%d offset pairs)",
                             (self.session.deck_speed() - 1) * 100,
                             self.session.deck_speed_samples)
-            elif comp_count > 0 or self.session.comp_scrobbled_count > 0:
-                self.notifier.compilation_finished(
-                    max(comp_count, self.session.comp_scrobbled_count))
         self._finalize_simple(now)
 
         self.phase = Phase.IDLE
@@ -436,8 +424,6 @@ class Player:
         s = self.session
         if not (s and s.is_locked()):
             return
-        al = s.album_state
-        prev_idx = al.current_index if al else -1
         advanced = s.check_advance()
         for t, ts in advanced:
             self._scrobble(t, ts)
@@ -446,12 +432,6 @@ class Player:
             return
         self._set_playing(predicted, s.current_track_start() or self.clock(), scrobbled=True)
         self._now_playing(predicted)
-        al = s.album_state
-        if advanced and al and al.current_index != prev_idx:
-            self.notifier.track_advanced(
-                al.tracklist.artist, al.tracklist.album_name, predicted.title,
-                al.current_index + 1, len(al.tracklist.tracks),
-            )
 
     # ── identification ───────────────────────────────────────────────────────
 
@@ -500,7 +480,6 @@ class Player:
 
         if s and resolved.has_album and not self.dry_run:
             was_locked = s.is_locked()
-            was_album = s.locked_album_id
             was_mode = s.mode
             out = s.on_identified(resolved, self.music_since or at, at=at)
             al = s.album_state if s.is_locked() else None
@@ -511,13 +490,6 @@ class Player:
                 self._finalize_simple(at)             # a simple-mode track gave way to the lock
             for t, ts in out:
                 self._scrobble(t, ts, backfill=True)
-            al = s.album_state
-            if al and s.is_locked() and (not was_locked or al.album_id != was_album):
-                self.notifier.album_locked(
-                    al.tracklist.artist, al.tracklist.album_name,
-                    al.current_index + 1, len(al.tracklist.tracks), track.title,
-                    art_url=resolved.art_url or None,
-                )
             if s.mode == SessionMode.COMPILATION and was_mode != SessionMode.COMPILATION:
                 logger.info("Session: compilation mode active (per-track scrobble only)")
         elif s and s.mode == SessionMode.COMPILATION and not self.dry_run:
@@ -597,7 +569,6 @@ class Player:
         if self.scrobbler and not self.dry_run:
             self.scrobbler.scrobble(t, timestamp=int(timestamp))
             self.history.log(t, timestamp, source="backfill" if backfill else "live")
-            self.notifier.track_scrobbled(t, is_backfill=backfill)
             self._playcount_cache.pop((t.artist.lower(), (t.album or "").lower()), None)
 
     def _now_playing(self, t: TrackInfo) -> None:

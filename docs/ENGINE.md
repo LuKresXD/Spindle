@@ -145,7 +145,7 @@ send flushes the queue; otherwise it is retried every 10 minutes.
 | `scrobbler.py` | Last.fm outbox, offline queue, play counts |
 | `art.py` | cover art with a disk cache |
 | `display.py` | framebuffer renderer |
-| `bot.py` / `notify.py` | Telegram |
+| `notify.py` | Telegram as the log channel (start, errors, warning digests) |
 
 ## Touch display
 

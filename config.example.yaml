@@ -61,12 +61,11 @@ art:
   itunes: true                              # 1200 px covers from Apple's catalog
   deezer: true                              # has the explicit albums Apple's search hides
 
-telegram:
+telegram:                                   # the log channel: one card per start, errors, warning digests
   bot_token: ""                             # from @BotFather
   chat_id: ""                               # your chat ID (get from @userinfobot)
-  silent: false                             # send without notification sound
-  verbose: false                            # notify on every individual scrobble
-  errors: true                              # notify on errors
+  silent: true                              # post without a notification sound
+  errors: true                              # post errors and warning digests
 
 logging:
   file: ""                                  # e.g. /home/pi/spindle/spindle.log

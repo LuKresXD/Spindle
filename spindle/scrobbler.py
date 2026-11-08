@@ -148,12 +148,14 @@ class Scrobbler:
 
     def __init__(self, lastfm_cfg: LastFMConfig, scrobble_cfg: ScrobbleConfig,
                  queue_path: Path | None = None, threaded: bool = True,
-                 on_error: Callable[[str], None] | None = None):
+                 on_error: Callable[[str, str], None] | None = None,
+                 on_recovered: Callable[[int], None] | None = None):
         self.cfg = lastfm_cfg
         self.scrobble_cfg = scrobble_cfg
         self.network: pylast.LastFMNetwork | None = None
         self.threaded = threaded
-        self.on_error = on_error
+        self.on_error = on_error              # (title, detail): something dropped for good
+        self.on_recovered = on_recovered      # (count): the offline queue got through
         self._queue = ScrobbleQueue(queue_path)
         self._last_scrobble: str | None = None
         self._last_scrobble_time: float = 0
@@ -313,7 +315,7 @@ class Scrobbler:
                 self.failed += 1
                 logger.error("Scrobble REJECTED by Last.fm, dropped: %s — %s", track_key, e)
                 if self.on_error:
-                    self.on_error(f"Last.fm rejected {track_key}: {e}")
+                    self.on_error("Last.fm rejected a scrobble", f"{track_key} · {e}")
 
     def _maybe_flush(self) -> None:
         if len(self._queue) and time.time() - self._last_flush_attempt >= QUEUE_FLUSH_INTERVAL:
@@ -347,4 +349,6 @@ class Scrobbler:
                 logger.error("  ✗ %s — %s REJECTED, dropped: %s", entry["artist"],
                              entry["title"], e)
         logger.info("Flushed %d/%d (remaining: %d)", sent, len(entries), len(self._queue))
+        if sent and self.on_recovered:
+            self.on_recovered(sent)
         return sent

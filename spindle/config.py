@@ -106,11 +106,11 @@ class ArtConfig:
 
 @dataclass
 class TelegramConfig:
+    """Telegram is Spindle's log channel: start cards, errors, warning digests."""
     bot_token: str = ""
     chat_id: str = ""
-    silent: bool = False      # send notifications silently (no sound)
-    verbose: bool = False     # notify on every individual scrobble
-    errors: bool = True       # notify on errors
+    silent: bool = True       # post without a notification sound
+    errors: bool = True       # post errors and warning digests (start cards always post)
 
 
 @dataclass

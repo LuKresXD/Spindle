@@ -41,7 +41,6 @@ class Recorder:
     def __init__(self):
         self.scrobbles = []
         self.now_playing = []
-        self.events = []
 
     # scrobbler
     def scrobble(self, t, timestamp=None):
@@ -56,12 +55,6 @@ class Recorder:
 
     def queue_size(self):
         return 0
-
-    # notifier
-    def __getattr__(self, name):
-        def ev(*a, **k):
-            self.events.append((name, a))
-        return ev
 
 
 class FakeHistory:
@@ -94,7 +87,7 @@ def make_player(tmp_path, clock, identify, with_session=True, albums=None):
     extras = Extras()
     extras.album_playcount = rec.album_playcount
     worker = IdentifyWorker(identify, resolver, FakeArt(), threaded=False)
-    player = Player(cfg, cap, worker, session=session, scrobbler=rec, notifier=rec,
+    player = Player(cfg, cap, worker, session=session, scrobbler=rec,
                     history=FakeHistory(), extras=extras, clock=clock, step=2)
     return player, cap, rec
 
@@ -132,7 +125,6 @@ def test_idle_until_music_then_listening_then_playing(tmp_path):
     assert st.album_playcount == 7
     assert st.art == b"\x89PNG-not-really"
     assert rec.now_playing[-1] == "Track 2"
-    assert ("album_locked", ("Madvillain", "Madvillainy", 2, 3, "Track 2")) in rec.events
 
 
 def test_runout_noise_near_threshold_never_starts_a_session(tmp_path):
@@ -178,7 +170,6 @@ def test_quiet_pause_does_not_end_session(tmp_path):
         clock.advance(2)
     assert st.phase == Phase.IDLE
     assert not player.session.is_locked()
-    assert all(e[0] != "side_finished" for e in rec.events)  # nothing scrobbled (too short)
 
 
 def test_timing_advance_scrobbles_and_identify_slows_when_locked(tmp_path):
@@ -199,7 +190,6 @@ def test_timing_advance_scrobbles_and_identify_slows_when_locked(tmp_path):
     assert rec.scrobbles and rec.scrobbles[0][0] == "Track 1"
     assert player.state.current_index == 1        # advanced to Track 2 by timing
     assert calls["n"] < ticks / 2                  # locked: far fewer fingerprints than ticks
-    assert ("track_advanced", ("Madvillain", "Madvillainy", "Track 2", 2, 3)) in rec.events
 
 
 def test_simple_mode_without_any_tracklist_source(tmp_path):
