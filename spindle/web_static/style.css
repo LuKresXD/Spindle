@@ -103,11 +103,12 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .level i { display: block; height: 100%; width: 0; background: #fff; border-radius: 4px; transition: width .4s var(--ease); }
 
 /* info sheet: a full-height liner-notes page that slides up over home ---------- */
-.sheet { position: absolute; left: 0; right: 0; bottom: 0; height: 1004px;
-  border-radius: 48px 48px 0 0; transform: translateY(104%); transition: transform .55s var(--ease); z-index: 5;
-  overflow: hidden; background: rgba(18,11,22,.95); border-top: 1px solid rgba(255,255,255,.12);
-  box-shadow: 0 -26px 80px rgba(0,0,0,.45); will-change: transform; }
-.sheet-scroll { height: 100%; overflow-y: auto; touch-action: pan-y; padding: 30px 120px 72px;
+/* The page sits straight on the blurred cover (the backdrop is already blurred,
+   so no backdrop-filter is needed): a gradient veil for legibility, no slab. */
+.sheet { position: absolute; inset: 0; transform: translateY(104%); transition: transform .55s var(--ease); z-index: 5;
+  overflow: hidden; will-change: transform;
+  background: linear-gradient(180deg, rgba(7,6,10,.42) 0%, rgba(7,6,10,.62) 30%, rgba(7,6,10,.78) 100%); }
+.sheet-scroll { height: 100%; overflow-y: auto; touch-action: pan-y; padding: 34px 120px 72px;
   scrollbar-width: none; contain: content; }
 .sheet-scroll::-webkit-scrollbar { display: none; }
 .sheet.open { transform: translateY(0); }
@@ -149,7 +150,7 @@ body.phase-playing .veil, body.phase-listening .veil { opacity: 1; }
 .hist .sub { font-size: 22px; color: rgba(255,255,255,.52); margin-top: 10px; }
 .imuted { color: rgba(255,255,255,.5); font-weight: 500; }
 #home { will-change: opacity; }
-body.sheet-open #home { opacity: .14; transition: opacity .5s var(--ease); }
+body.sheet-open #home { opacity: 0; transition: opacity .5s var(--ease); }
 body.sheet-open .corner { visibility: hidden; }
 
 /* end of side --------------------------------------------------------------- */
