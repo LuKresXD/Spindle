@@ -181,11 +181,13 @@ window.Motion = (() => {
     gsap.set(toImg, { autoAlpha: 0 });
     gsap.set(fromImg, { zIndex: 5 });
     // The tile scales into the slot (its corners grow with it and land on the card's radius),
-    // then the card's own cover fades in over it: no cut at the end of the flight.
+    // then the card's own cover fades in OVER the still-solid tile and the tile is dropped
+    // only once the cover is fully there. Never a crossfade of the two: two half-transparent
+    // copies of the same picture add up to three quarters, and the cover visibly dips.
     const tl = gsap.timeline({ onComplete: () => { if (onDone) onDone(); } });
     tl.add(Flip.fit(fromImg, toImg, { duration: D(0.85), ease: "house", scale: true }), 0);
     tl.to(toImg, { autoAlpha: 1, duration: D(0.3), ease: MICRO }, ">-0.1");
-    tl.to(fromImg, { autoAlpha: 0, duration: D(0.3), ease: MICRO }, "<");
+    tl.set(fromImg, { autoAlpha: 0 });
     return tl;
   }
 
