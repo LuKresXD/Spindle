@@ -5,18 +5,20 @@
 
    The screen is three pages in a ring, swiped left and right: Off (black on
    purpose), Spindle (the record: playing, or black with the shelf controls a tap
-   reveals) and Claw (a placeholder for now). A needle drop always brings Spindle. */
+   reveals) and Claw (a placeholder for now). A needle drop always brings Spindle.
+   Everything that moves goes through the motion layer (motion.js, docs/MOTION.md). */
 (() => {
   "use strict";
+  const M = window.Motion;
   const $ = (id) => document.getElementById(id);
   const el = {
     body: document.body, bg: $("bg"), home: $("home"), art: $("art"), title: $("title"),
     artist: $("artist"), albumline: $("albumline"), sidetext: $("sidetext"), fill: $("fill"),
     feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
-    lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"),
+    lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"), corner: document.querySelector(".corner"),
     listening: $("listening"), sheet: $("sheet"), tiles: $("tiles"),
     ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"), endedSub: $("ended-sub"),
-    pages: [$("page-off"), $("page-spindle"), $("page-claw")], pageOff: $("page-off"), dots: $("dots"),
+    pages: [$("page-off"), $("page-spindle"), $("page-claw")], pageOff: $("page-off"), offword: $("offword"), dots: $("dots"),
     idle: $("idle"), btnPick: $("btn-pick"), btnShelf: $("btn-shelf"), btnRecent: $("btn-recent"),
     pick: $("pick"), wheel: $("wheel"), wheelKicker: $("wheel-kicker"), wheelstrip: $("wheelstrip"),
     landed: $("landed"), pickArt: $("pick-art"), pickKicker: $("pick-kicker"), pickTitle: $("pick-title"),
@@ -24,7 +26,9 @@
     btnAnother: $("btn-another"), btnPickDone: $("btn-pick-done"), pickHint: $("pick-hint"),
     shelf: $("shelf"), shelfCount: $("shelf-count"), shelfSort: $("shelf-sort"), btnShelfClose: $("btn-shelf-close"),
     shelfgrid: $("shelfgrid"), recent: $("recent"), btnRecentClose: $("btn-recent-close"), recentlist: $("recentlist"),
+    boot: $("boot"), bootword: $("bootword"),
   };
+  const dims = el.pages.map((p) => p.querySelector(".page-dim"));
 
   const BULK_IMPORT_DAY = "2025-04-17";   // the day the first 46 records were entered at once
   const OFF = 0, SPINDLE = 1, CLAW = 2;
@@ -33,6 +37,7 @@
   let clockOffset = 0;                    // client seconds minus server seconds
   let artKey = "";
   let listKey = "";
+  let sideKey = "";
   let trackKey = "";
   let lyricsOn = false;
   let lyrics = null;                      // {synced: [[t, line]], plain}
@@ -50,6 +55,7 @@
   let trackInfo = null;                   // Genius: story, samples, producers
   let sheetOpen = false;
   let endedDismissed = null;              // `at` of an end-of-side card Luka tapped away
+  let endedShown = false;
   let lastPhase = "";
   // The engine confirms a track change a few seconds after it happens (a tick, then a
   // fingerprint). When the start is pinned and the deck speed measured, the clock knows
@@ -100,6 +106,8 @@
   };
   const W = () => window.innerWidth;
   const sample = (arr, n) => { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a.slice(0, n); };
+  const show = (node) => { node.classList.remove("hidden"); M.gsap.set(node, { clearProps: "opacity,visibility" }); };
+  const hide = (node) => node.classList.add("hidden");
 
   function rawPosition() {
     if (!state || state.track_elapsed == null) return null;
@@ -111,37 +119,46 @@
   }
 
   // ── pages ────────────────────────────────────────────────────────────────
+  // The incoming page slides over the outgoing one, which recedes at a third of
+  // the speed and darkens. The ring: left of Off is Claw, right of Claw is Off.
   let pageIndex = SPINDLE;
+  let moving = false;
   let dotsTimer = 0, offTimer = 0;
-  function layoutPages(dx = 0, animate = false) {
-    const left = (pageIndex + 2) % 3, right = (pageIndex + 1) % 3;
-    el.pages.forEach((p, i) => {
-      p.classList.toggle("anim", animate);
-      const x = i === pageIndex ? dx : i === left ? dx - W() : dx + W();
-      p.style.transform = `translateX(${x}px)`;
-    });
+  const neighbour = (dir) => (pageIndex + (dir > 0 ? 1 : 2)) % 3;
+  function rest() {
+    M.pageRest(el.pages[pageIndex], el.pages.filter((_, i) => i !== pageIndex), dims);
   }
-  // dir +1: the page to the right comes in (a swipe left); -1: the one to the left
-  function showPage(next, dir) {
-    if (next === pageIndex) { layoutPages(0, true); showDots(1200); return; }
-    const prev = pageIndex, far = 3 - prev - next;
+  function dragTo(dx) {
+    const dir = dx < 0 ? 1 : -1;
+    const incoming = neighbour(dir), third = neighbour(-dir);
+    M.gsap.set(el.pages[third], { visibility: "hidden" });
+    M.pageLayout(W(), Math.min(1, Math.abs(dx) / W()), dir, el.pages[pageIndex], el.pages[incoming],
+                 { outgoing: dims[pageIndex], incoming: dims[incoming] });
+  }
+  async function showPage(next, dir, prog = 0, speed = 0) {
+    if (next === pageIndex || moving) { if (!moving) { rest(); showDots(1200); } return; }
+    moving = true;
+    const prev = pageIndex;
     pageIndex = next;
-    el.pages[far].classList.remove("anim");
-    el.pages[far].style.transform = `translateX(${dir >= 0 ? W() : -W()}px)`;   // parked where it enters from next
-    el.pages[prev].classList.add("anim");
-    el.pages[next].classList.add("anim");
-    requestAnimationFrame(() => {
-      el.pages[prev].style.transform = `translateX(${dir >= 0 ? -W() : W()}px)`;
-      el.pages[next].style.transform = "translateX(0px)";
-    });
     onPageChanged();
+    await M.pageCommit(W(), prog, dir, el.pages[prev], el.pages[next], { outgoing: dims[prev], incoming: dims[next] }, speed);
+    rest();
+    moving = false;
+  }
+  async function snapBack(dx) {
+    const dir = dx < 0 ? 1 : -1, incoming = neighbour(dir);
+    moving = true;
+    await M.pageCancel(W(), Math.min(1, Math.abs(dx) / W()), dir, el.pages[pageIndex], el.pages[incoming],
+                       { outgoing: dims[pageIndex], incoming: dims[incoming] });
+    rest();
+    moving = false;
+    showDots(1200);
+    if (pageIndex !== SPINDLE) hideIdle();
   }
   function onPageChanged() {
     el.body.dataset.page = PAGE_NAMES[pageIndex];
     showDots(1800);
-    clearTimeout(offTimer);
-    el.pageOff.classList.toggle("arrived", pageIndex === OFF);
-    if (pageIndex === OFF) offTimer = setTimeout(() => el.pageOff.classList.remove("arrived"), 2200);
+    if (pageIndex === OFF) flashOff(); else M.fade(el.offword, 0, { duration: 0.3 });
     if (pageIndex === SPINDLE) showIdle(); else hideIdle();
   }
   function showDots(ms) {
@@ -150,13 +167,13 @@
     el.dots.classList.add("show");
     if (ms) dotsTimer = setTimeout(() => el.dots.classList.remove("show"), ms);
   }
-  // a tap on Off shows the way out for a moment: the dots and the word
+  // the Off page names itself for a moment: on arrival, and on a tap
   function flashOff() {
-    el.pageOff.classList.add("arrived");
     clearTimeout(offTimer);
-    offTimer = setTimeout(() => el.pageOff.classList.remove("arrived"), 2200);
+    M.fade(el.offword, 1, { duration: 0.7, ease: "expo.out" });
+    offTimer = setTimeout(() => M.fade(el.offword, 0, { duration: 0.9 }), 2200);
   }
-  layoutPages(0, false);
+  rest();
 
   // ── phases ───────────────────────────────────────────────────────────────
   function apply(st) {
@@ -175,7 +192,9 @@
     el.body.className = `phase-${st.phase}` + (sheetOpen ? " sheet-open" : "") + (ended ? " ended-open" : "");
     el.home.classList.toggle("hidden", !playing && !ended);
     requestAnimationFrame(() => el.home.classList.toggle("shown", playing || !!ended));
-    el.listening.classList.toggle("hidden", st.phase !== "listening" || pickOpen || shelfOpen || recentOpen);
+    const listen = st.phase === "listening" && !pickOpen && !shelfOpen && !recentOpen;
+    if (listen && el.listening.classList.contains("hidden")) { show(el.listening); M.arrive(el.listening.firstElementChild, { y: 14, duration: 0.8 }); }
+    else if (!listen) hide(el.listening);
     if (playing) renderHome(st);
     renderEnded(ended);
     if (!playing && !ended) {
@@ -183,7 +202,7 @@
       if (st.phase !== "idle") hideIdle();
       // idle and listening are black: the last record's blurred cover must not linger
       // (the end-of-side card keeps it; once that goes, so does the backdrop; a pick owns it)
-      if (artKey && !pickOpen) { artKey = ""; el.art.removeAttribute("src"); el.bg.style.backgroundImage = ""; el.bg.classList.remove("ready"); }
+      if (artKey && !pickOpen) { artKey = ""; el.art.removeAttribute("src"); setBackdrop(""); }
     }
   }
 
@@ -197,6 +216,9 @@
       fitTitle(el.title);
       el.artist.textContent = st.artist || "";
       el.feat.textContent = feat ? `feat. ${feat}` : "";
+      M.revealLines(el.title);
+      M.revealLines(el.artist, { delay: 0.08 });
+      if (feat) M.arrive(el.feat, { delay: 0.18, y: 14 });
       lyricIndex = -1;
       loadLyrics(st);      // into the hidden panels too, so Lyrics and Info open instantly
       loadInfo();
@@ -207,12 +229,11 @@
     if (st.art && st.art !== artKey) {
       artKey = st.art;
       const url = `/art/${st.art}.jpg`;
-      el.art.classList.add("swap");
       const img = new Image();
       img.onload = () => {
         el.art.src = url;
         setBackdrop(url);
-        requestAnimationFrame(() => el.art.classList.remove("swap"));
+        M.arrive(el.art, { y: 22, scale: 0.96, duration: 1.1 });
       };
       img.src = url;
     } else if (!st.art && artKey) {
@@ -248,6 +269,7 @@
     return canvas.measureText(text).width * 0.975;             // letter-spacing -0.025em
   }
 
+  const rowGlide = M.rowGlide(el.list);
   function renderList(st, rows) {
     const cur = st.current_index;
     const side = cur >= 0 && rows[cur] ? sideOf(rows[cur].position) : "";
@@ -261,11 +283,18 @@
     }
     el.list.classList.toggle("compact", shown.length > 6);
     el.list.classList.toggle("tiny", shown.length > 8);
+    const sk = shown.map(({ r }) => r.position + "|" + r.title).join("\n");
+    const sameSet = sk === sideKey;
+    sideKey = sk;
+    const ind = el.list.querySelector(".row-ind");
     el.list.innerHTML = shown.map(({ r, i }) => {
       const cls = i === cur ? "cur" : (r.scrobbled ? "done" : "");
       const pos = r.position || String(i + 1).padStart(2, "0");
       return `<div class="row ${cls}"><span class="pos">${esc(pos)}</span><span class="name">${esc(splitFeat(r.title).main)}</span><span class="dur">${r.duration ? mmss(r.duration) : ""}</span></div>`;
     }).join("");
+    if (ind) el.list.prepend(ind);
+    const curRow = el.list.querySelector(".row.cur");
+    if (sameSet) rowGlide.to(curRow); else { rowGlide.place(curRow); M.arrive(el.list.querySelectorAll(".row"), { y: 16, stagger: 0.04, duration: 0.7 }); }
   }
 
   function renderSide(st, rows) {
@@ -288,14 +317,20 @@
   }
 
   function renderEnded(e) {
-    el.ended.classList.toggle("hidden", !e);
-    if (!e) return;
+    if (!e) { if (endedShown) { endedShown = false; hide(el.ended); } return; }
     const n = `${e.scrobbled} track${e.scrobbled === 1 ? "" : "s"} scrobbled`;
     el.endedKicker.textContent = e.side ? `Side ${e.side} · finished` : "Side finished";
     el.endedTitle.textContent = e.next_side ? `Flip for Side ${e.next_side}` : "That's the record";
     el.endedSub.textContent = e.next_side
       ? `${n}${e.next_title ? ` · Side ${e.next_side} opens with ${splitFeat(e.next_title).main}` : ""}`
       : `${n} · ${e.artist} · ${e.album}`;
+    if (!endedShown) {
+      endedShown = true;
+      show(el.ended);
+      M.arrive(el.endedKicker, { y: 14, duration: 0.8 });
+      M.revealWords(el.endedTitle, { delay: 0.1 });
+      M.arrive(el.endedSub, { y: 14, delay: 0.35, duration: 0.8 });
+    }
   }
 
   // ── progress + lyrics clock ──────────────────────────────────────────────
@@ -350,7 +385,7 @@
     if (key === lyricsFor && lyrics) { renderLyrics(); return; }
     lyricsFor = key; lyrics = null; lyricIndex = -1;
     el.lyriclines.innerHTML = `<div class="lyric empty">Finding lyrics…</div>`;
-    el.lyriclines.style.transform = "translateY(0)";
+    M.gsap.set(el.lyriclines, { y: 0 });
     try {
       const q = new URLSearchParams({ artist: st.artist, title: st.title, album: st.album || "" });
       if (st.track_duration) q.set("duration", String(Math.round(st.track_duration)));
@@ -367,11 +402,12 @@
   function renderLyrics() {
     if (!lyrics || !lyrics.synced || !lyrics.synced.length) {
       el.lyriclines.innerHTML = `<div class="lyric empty">No synced lyrics for this one</div>`;
-      el.lyriclines.style.transform = "translateY(0)";
+      M.gsap.set(el.lyriclines, { y: 0 });
       return;
     }
     el.lyriclines.innerHTML = lyrics.synced.map(([, line]) => `<div class="lyric">${esc(line) || "♪"}</div>`).join("");
     lyricIndex = -1;
+    if (lyricsOn) M.arrive([...el.lyriclines.children].slice(0, 12), { y: 30, stagger: 0.035, duration: 0.8 });
   }
 
   function highlightLyric(p) {
@@ -379,20 +415,27 @@
     let idx = -1;
     for (let i = 0; i < lines.length; i++) { if (lines[i][0] <= p) idx = i; else break; }
     if (idx === lyricIndex) return;
+    const prev = lyricIndex;
     lyricIndex = idx;
     const nodes = el.lyriclines.children;
     for (let i = 0; i < nodes.length; i++) nodes[i].classList.toggle("cur", i === idx);
     const target = idx >= 0 ? nodes[idx] : null;
     const y = target ? target.offsetTop - 300 : 0;
-    el.lyriclines.style.transform = `translateY(${-y}px)`;
+    M.gsap.to(el.lyriclines, { y: -y, duration: M.D(0.55), ease: "house", overwrite: true });
+    if (prev >= 0 && nodes[prev]) M.gsap.to(nodes[prev], { scale: 1, duration: M.D(0.4), ease: "house", overwrite: true });
+    if (target) M.gsap.to(target, { scale: 1.22, duration: M.D(0.5), ease: "back.out(1.4)", overwrite: true });
   }
 
+  const cornerTray = M.tray(el.corner);
+  function trayState() { cornerTray.to(sheetOpen ? el.btnInfo : (lyricsOn ? el.btnLyrics : null)); }
   function toggleLyrics(on) {
     lyricsOn = on == null ? !lyricsOn : on;
     el.btnLyrics.classList.toggle("on", lyricsOn);
     el.lyrics.classList.toggle("hidden", !lyricsOn);
     el.list.classList.toggle("hidden", lyricsOn);
-    if (lyricsOn && state) loadLyrics(state);
+    trayState();
+    if (lyricsOn && state) { loadLyrics(state); if (lyrics) M.arrive([...el.lyriclines.children].slice(0, 12), { y: 30, stagger: 0.035, duration: 0.8 }); }
+    else if (!lyricsOn) M.arrive(el.list, { y: 16, duration: 0.7 });
   }
 
   // ── info sheet ───────────────────────────────────────────────────────────
@@ -400,36 +443,38 @@
     if (!state || state.phase !== "playing") return;
     sheetOpen = true;
     el.btnInfo.classList.add("on");
+    trayState();
     el.body.classList.add("sheet-open");
     el.sheet.classList.remove("hidden");
     requestAnimationFrame(() => el.sheet.classList.add("open"));
-    await loadInfo();
+    await loadInfo(true);
   }
 
-  async function loadInfo() {
+  async function loadInfo(opening = false) {
     const albumKey = `${state.artist}|${state.album}`;
     const trackKey2 = `${state.artist}|${state.title}`;
     const needAlbum = albumKey !== infoFor, needTrack = trackKey2 !== trackFor;
-    if (!needAlbum && !needTrack) { renderInfo(); return; }
+    if (!needAlbum && !needTrack) { renderInfo(opening); return; }
     if (needAlbum) { infoFor = albumKey; info = null; }
     if (needTrack) { trackFor = trackKey2; trackInfo = null; }
-    renderInfo();
+    renderInfo(opening);
     const jobs = [];
     if (needAlbum) jobs.push(fetch(`/api/info?${new URLSearchParams({ artist: state.artist, album: state.album || "" })}`)
       .then((r) => r.json()).then((d) => { if (albumKey === infoFor) info = d; }).catch(() => {}));
     if (needTrack) jobs.push(fetch(`/api/track?${new URLSearchParams({ artist: state.artist, title: state.title })}`)
       .then((r) => r.json()).then((d) => { if (trackKey2 === trackFor) trackInfo = d; }).catch(() => {}));
     await Promise.all(jobs);
-    renderInfo();
+    renderInfo(false);
   }
 
   function closeSheet() {
     if (!sheetOpen) return;
     sheetOpen = false;
     el.btnInfo.classList.remove("on");
+    trayState();
     el.body.classList.remove("sheet-open");
     el.sheet.classList.remove("open");
-    setTimeout(() => { if (!sheetOpen) el.sheet.classList.add("hidden"); }, 520);
+    setTimeout(() => { if (!sheetOpen) el.sheet.classList.add("hidden"); }, 620);
   }
 
   const sec = (h, body) => `<div class="sec"><h2>${esc(h)}</h2>${body}</div>`;
@@ -471,7 +516,7 @@
     return `<div class="chip">${art}<div><div class="st">${esc(sm.title || "")}</div><div class="sb">${esc(sm.artist || "")}</div></div></div>`;
   }
 
-  function renderInfo() {
+  function renderInfo(opening) {
     const pr = info && info.pressing, g = trackInfo || {}, loading = !info;
     const art = (state && state.art) ? `/art/${state.art}.jpg` : "";
     const kick = (state && state.position) ? `The record · ${esc(state.position)}` : "The record";
@@ -513,6 +558,8 @@
       sec("Your history", hist) +
       (about ? sec("About the album", `<div class="story sm">${about}</div>`) : "") +
       `</div></div>`;
+    if (opening) M.arrive([el.tiles.querySelector(".mast"), ...el.tiles.querySelectorAll(".sec")], { y: 28, stagger: 0.06, delay: 0.15 });
+    else M.gsap.fromTo(el.tiles, { autoAlpha: 0.55 }, { autoAlpha: 1, duration: M.D(0.4), ease: "power1.inOut" });
   }
 
   // ── nothing on the platter: the controls ─────────────────────────────────
@@ -520,9 +567,10 @@
   let idleOpen = false, idleTimer = 0;
   function showIdle() {
     if (!state || state.phase !== "idle" || pickOpen || shelfOpen || recentOpen) return;
+    if (idleOpen) { armIdleTimer(); return; }
     idleOpen = true;
-    el.idle.classList.remove("hidden");
-    requestAnimationFrame(() => el.idle.classList.add("shown"));
+    show(el.idle);
+    M.arrive([el.idle.querySelector(".kicker"), el.btnPick, el.idle.querySelector(".quiet")], { y: 24, stagger: 0.09 });
     armIdleTimer();
   }
   function armIdleTimer() { clearTimeout(idleTimer); idleTimer = setTimeout(hideIdle, IDLE_CONTROLS_MS); }
@@ -530,8 +578,7 @@
     clearTimeout(idleTimer);
     if (!idleOpen) return;
     idleOpen = false;
-    el.idle.classList.remove("shown");
-    setTimeout(() => { if (!idleOpen) el.idle.classList.add("hidden"); }, 420);
+    M.leave(el.idle, { duration: 0.35, onComplete: () => { if (!idleOpen) hide(el.idle); } });
   }
 
   // ── the shelf data ───────────────────────────────────────────────────────
@@ -577,18 +624,19 @@
   ]);
 
   // ── the pick ─────────────────────────────────────────────────────────────
-  const WHEEL_TILE = 300 + 36;            // a cover plus the gap
-  let pickOpen = false, pickCard = null, lastPickId = 0, pickSerial = 0, pickFromShelf = false;
+  let pickOpen = false, pickCard = null, lastPickId = 0, pickSerial = 0, pickFromShelf = false, wheelTl = null;
   async function startPick() {
     hideIdle();
     const serial = ++pickSerial;
     pickOpen = true; pickFromShelf = false;
-    el.pick.classList.remove("hidden");
-    el.landed.classList.remove("shown"); el.landed.classList.add("hidden");
-    el.wheel.classList.remove("hidden");
+    if (wheelTl) { wheelTl.kill(); wheelTl = null; }
+    show(el.pick);
+    hide(el.landed);
+    show(el.wheel);
     el.wheelstrip.innerHTML = "";
     const col = await loadCollection();
     el.wheelKicker.textContent = col.length ? `Picking one of ${col.length}` : "Picking one";
+    M.arrive(el.wheelKicker, { y: 12, duration: 0.7 });
     let card = null;
     try { card = await (await fetch(`/api/collection/random?exclude=${lastPickId}`)).json(); } catch (e) { card = null; }
     if (serial !== pickSerial || !pickOpen) return;
@@ -600,27 +648,20 @@
     el.wheelstrip.innerHTML = tiles.map((r) => `<img src="${esc(r.cover || "")}" alt="">`).join("");
     await ready(tiles.map((r) => r.cover).filter(Boolean), 700);
     if (serial !== pickSerial || !pickOpen) return;
-    const centre = W() / 2 - 150;
-    el.wheelstrip.style.transition = "none";
-    el.wheelstrip.style.transform = `translateX(${centre}px)`;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      el.wheelstrip.style.transition = "";
-      el.wheelstrip.style.transform = `translateX(${centre - hit * WHEEL_TILE}px)`;
-    }));
-    setTimeout(() => { if (serial === pickSerial) el.wheelstrip.children[hit]?.classList.add("hit"); }, 1300);
-    setTimeout(() => { if (serial === pickSerial && pickOpen) land(card); }, 2000);
+    const imgs = [...el.wheelstrip.children];
+    wheelTl = M.wheel(el.wheelstrip, imgs, hit, {
+      onLand: () => { if (serial === pickSerial && pickOpen) land(card, false, imgs[hit]); },
+    });
   }
 
-  function land(card, fromShelf = false) {
+  function land(card, fromShelf = false, fromTile = null) {
     pickCard = card; lastPickId = card.id; pickFromShelf = fromShelf;
     pickOpen = true;
-    el.pick.classList.remove("hidden");
-    el.wheel.classList.add("hidden");
+    show(el.pick);
     el.pickArt.src = card.cover || "";
     setBackdrop(card.cover || "");
     el.pickKicker.textContent = fromShelf ? "On the shelf" : "From the shelf";
     el.pickTitle.textContent = card.title || "";
-    fitTitle(el.pickTitle, 108, 48);
     el.pickArtist.textContent = card.artist || "";
     const pr = card.pressing || {};
     const year = card.released || pr.year || card.year;
@@ -631,41 +672,68 @@
     const last = pl.last_played ? `last on ${fmtDay(pl.last_played)}` : "";
     el.pickPlays.textContent = [plays, last].filter(Boolean).join(" · ");
     el.pickHint.textContent = "Pull it off the shelf. The screen wakes when the needle drops.";
-    el.btnPickDone.querySelector("span, b")?.remove();
     el.btnPickDone.textContent = fromShelf ? "Back to the shelf" : "Done";
-    el.landed.classList.remove("hidden");
-    requestAnimationFrame(() => el.landed.classList.add("shown"));
+    show(el.landed);
+    fitTitle(el.pickTitle, 108, 48);
+    if (fromTile) {
+      // the hit cover on the wheel becomes the card's cover: one move, the kicker fades under it
+      M.fade(el.wheelKicker, 0, { duration: 0.3 });
+      M.handOver(fromTile, el.pickArt, { onDone: () => { if (pickOpen) hide(el.wheel); } });
+    } else {
+      hide(el.wheel);
+      M.arrive(el.pickArt, { y: 30, scale: 0.94, duration: 1.1 });
+    }
+    M.arrive(el.pickKicker, { y: 12, duration: 0.8, delay: 0.05 });
+    M.revealLines(el.pickTitle, { delay: 0.12 });
+    M.revealLines(el.pickArtist, { delay: 0.22 });
+    M.arrive([el.pickMeta, el.pickPlays], { y: 14, stagger: 0.07, delay: 0.38, duration: 0.8 });
+    M.arrive([el.btnAnother, el.btnPickDone], { y: 18, scale: 0.92, stagger: 0.08, delay: 0.5 });
+    M.arrive(el.pickHint, { y: 10, delay: 0.75, duration: 0.8 });
   }
 
   function closePick() {
     pickSerial++;
+    if (wheelTl) { wheelTl.kill(); wheelTl = null; }
     pickOpen = false; pickCard = null;
-    el.landed.classList.remove("shown");
-    el.pick.classList.add("hidden");
+    M.leave(el.pick, { duration: 0.3, onComplete: () => { if (!pickOpen) { hide(el.pick); hide(el.landed); hide(el.wheel); } } });
     if (!state || state.phase !== "playing") setBackdrop("");
   }
 
   // ── the shelf ────────────────────────────────────────────────────────────
   let shelfOpen = false, shelfSort = "recent";
+  const sortTray = M.tray(el.shelfSort);
+  const sorted = (col) => {
+    const out = col.slice();
+    const by = (f) => (a, b) => f(a).localeCompare(f(b), "en", { sensitivity: "base" });
+    if (shelfSort === "title") out.sort(by((r) => r.title));
+    else if (shelfSort === "artist") out.sort((a, b) => by((r) => r.artist)(a, b) || (a.released || a.year || 0) - (b.released || b.year || 0));
+    return out;
+  };
   async function openShelf() {
     hideIdle();
     shelfOpen = true;
-    el.shelf.classList.remove("hidden");
+    show(el.shelf);
     const col = await loadCollection();
     el.shelfCount.textContent = col.length ? `· ${col.length} records` : "";
-    renderShelf();
-  }
-  function renderShelf() {
-    const col = (collection || []).slice();
-    const by = (f) => (a, b) => f(a).localeCompare(f(b), "en", { sensitivity: "base" });
-    if (shelfSort === "title") col.sort(by((r) => r.title));
-    else if (shelfSort === "artist") col.sort((a, b) => by((r) => r.artist)(a, b) || (a.released || a.year || 0) - (b.released || b.year || 0));
+    el.shelfgrid.innerHTML = sorted(col).map((r) => `<img src="${esc(r.cover || "")}" data-id="${r.id}" alt="${esc(r.title)}">`).join("")
+      || `<div class="empty">Nothing on the shelf yet</div>`;
+    el.shelfgrid.scrollTop = 0;
+    M.arrive(el.shelf.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
+    M.waveIn(el.shelfgrid.children);
     [...el.shelfSort.children].forEach((b) => b.classList.toggle("on", b.dataset.sort === shelfSort));
-    el.shelfgrid.innerHTML = col.length
-      ? col.map((r) => `<img src="${esc(r.cover || "")}" data-id="${r.id}" alt="${esc(r.title)}">`).join("")
-      : `<div class="empty">Nothing on the shelf yet</div>`;
+    sortTray.place(el.shelfSort.querySelector(`[data-sort="${shelfSort}"]`));
   }
-  function closeShelf() { shelfOpen = false; el.shelf.classList.add("hidden"); }
+  function resortShelf(sort) {
+    if (sort === shelfSort || !collection) return;
+    shelfSort = sort;
+    [...el.shelfSort.children].forEach((b) => b.classList.toggle("on", b.dataset.sort === shelfSort));
+    sortTray.to(el.shelfSort.querySelector(`[data-sort="${shelfSort}"]`));
+    const byId = new Map([...el.shelfgrid.querySelectorAll("img[data-id]")].map((n) => [n.dataset.id, n]));
+    const order = sorted(collection).map((r) => byId.get(String(r.id))).filter(Boolean);
+    el.shelfgrid.scrollTop = 0;
+    M.flipGrid(el.shelfgrid, () => order.forEach((n) => el.shelfgrid.appendChild(n)));
+  }
+  function closeShelf() { shelfOpen = false; M.leave(el.shelf, { duration: 0.3, onComplete: () => { if (!shelfOpen) hide(el.shelf); } }); }
 
   async function openCard(id, fromShelf) {
     try {
@@ -679,7 +747,8 @@
   async function openRecent() {
     hideIdle();
     recentOpen = true;
-    el.recent.classList.remove("hidden");
+    show(el.recent);
+    M.arrive(el.recent.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
     el.recentlist.innerHTML = `<div class="empty">Looking back…</div>`;
     let rows = [];
     try { rows = await (await fetch("/api/history/albums?limit=12")).json(); } catch (e) { rows = []; }
@@ -691,8 +760,9 @@
       const n = `${r.tracks} track${r.tracks === 1 ? "" : "s"}`;
       return `<div class="rrow ${rel ? "" : "off"}" ${rel ? `data-id="${rel.id}"` : ""}>${art}<div><div class="rt">${esc(r.album)}</div><div class="ra">${esc(r.artist)}</div></div><div class="rw">${esc(fmtDay(r.last_played))}<br>${n}</div></div>`;
     }).join("");
+    M.arrive(el.recentlist.children, { x: -26, y: 0, stagger: 0.06, duration: 0.8 });
   }
-  function closeRecent() { recentOpen = false; el.recent.classList.add("hidden"); }
+  function closeRecent() { recentOpen = false; M.leave(el.recent, { duration: 0.3, onComplete: () => { if (!recentOpen) hide(el.recent); } }); }
 
   function closeOverlays() { hideIdle(); closePick(); closeShelf(); closeRecent(); }
 
@@ -708,13 +778,13 @@
     if (!down) return;
     const dx = e.clientX - down.x, dy = e.clientY - down.y;
     if (!down.drag) {
-      if (sheetOpen || Math.abs(dx) < 16 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+      if (sheetOpen || moving || Math.abs(dx) < 16 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
       down.drag = true;
-      el.pages.forEach((p) => p.classList.remove("anim"));
       showDots(0);
       if (pageIndex !== SPINDLE) showIdle();
     }
-    layoutPages(dx, false);
+    down.dx = dx;
+    dragTo(dx);
   }, { passive: true });
   document.addEventListener("pointerup", (e) => {
     if (!down) return;
@@ -722,8 +792,8 @@
     const start = down; down = null;
     if (start.drag) {
       const speed = Math.abs(dx) / Math.max(1, dt);                       // px per ms
-      if (Math.abs(dx) > W() * 0.22 || speed > 0.6) showPage((pageIndex + (dx < 0 ? 1 : 2)) % 3, dx < 0 ? 1 : -1);
-      else { layoutPages(0, true); showDots(1200); if (pageIndex !== SPINDLE) hideIdle(); }
+      if (Math.abs(dx) > W() * 0.22 || speed > 0.6) showPage(neighbour(dx < 0 ? 1 : -1), dx < 0 ? 1 : -1, Math.min(1, Math.abs(dx) / W()), speed);
+      else snapBack(dx);
       return;
     }
     if (Math.abs(dy) > 100 && Math.abs(dx) < 160 && dt < 1500) {
@@ -735,7 +805,7 @@
     if (Math.abs(dx) < 14 && Math.abs(dy) < 14) tap(start);
   }, { passive: true });
   document.addEventListener("pointercancel", () => {
-    if (down && down.drag) { layoutPages(0, true); showDots(1200); if (pageIndex !== SPINDLE) hideIdle(); }
+    if (down && down.drag) snapBack(down.dx || 0);
     down = null;
   });
   // The scroller owns vertical pans (touch-action: pan-y), so a pull-down on an open
@@ -771,7 +841,7 @@
     if (shelfOpen) {
       if (hit(target, el.btnShelfClose)) { closeShelf(); return; }
       const chip = target.closest("[data-sort]");
-      if (chip) { shelfSort = chip.dataset.sort; renderShelf(); return; }
+      if (chip) { resortShelf(chip.dataset.sort); return; }
       const cover = target.closest("[data-id]");
       if (cover) openCard(Number(cover.dataset.id), true);
       return;
@@ -797,7 +867,10 @@
   }
 
   document.addEventListener("contextmenu", (e) => e.preventDefault());
-  window.addEventListener("resize", () => layoutPages(0, false));
+  window.addEventListener("resize", rest);
+
+  // ── boot ─────────────────────────────────────────────────────────────────
+  document.fonts.ready.then(() => M.boot(el.boot, el.bootword));
 
   // ── stream ───────────────────────────────────────────────────────────────
   // After the engine restarts, its caches are fresh and ours are stale: drop the

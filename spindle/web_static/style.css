@@ -8,6 +8,7 @@
   --pad-x: 84px; --pad-y: 72px;
   --text-dim: rgba(255,255,255,.62);
   --ease: cubic-bezier(.2,.8,.2,1);
+  --ease-house: cubic-bezier(0.625, 0.05, 0, 1);   /* fast leap, long soft landing */
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -81,7 +82,10 @@ body.phase-playing .veil { opacity: 1; }
 .row .pos, .row .dur { color: rgba(255,255,255,.55); font-weight: 500; font-variant-numeric: tabular-nums; }
 .row .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row.done .name, .row.done .pos, .row.done .dur { color: rgba(255,255,255,.42); }
-.row.cur { background: rgba(255,255,255,.18); box-shadow: inset 0 1px 0 rgba(255,255,255,.28); }
+.row { position: relative; z-index: 1; }
+.row.cur { background: transparent; }
+.row-ind { position: absolute; left: 0; top: 0; border-radius: 22px; background: rgba(255,255,255,.18);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28); pointer-events: none; z-index: 0; opacity: 0; }
 .row.cur .name { font-weight: 700; }
 .list.compact .row { font-size: 27px; padding: 13px 22px; }
 .list.tiny .row { font-size: 23px; padding: 9px 20px; gap: 16px; }
@@ -89,20 +93,21 @@ body.phase-playing .veil { opacity: 1; }
 .lyrics { height: 760px; overflow: hidden; position: relative;
   -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 12%, #000 78%, transparent 100%);
   mask-image: linear-gradient(180deg, transparent 0, #000 12%, #000 78%, transparent 100%); }
-.lyriclines { transition: transform .55s var(--ease); padding-top: 300px; }
+.lyriclines { padding-top: 300px; will-change: transform; }
 /* The current line scales up 1.22x from its left edge; a transform does not
    reflow text, so the box is 1/1.22 of the column and the scaled line fills it
    exactly instead of running off the right edge. */
 .lyric { font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; font-size: 52px; color: rgba(255,255,255,.38);
-  width: 82%; margin: 0 0 30px; transform-origin: left center; transition: color .4s var(--ease), transform .4s var(--ease); }
-.lyric.cur { color: #fff; transform: scale(1.22); }
+  width: 82%; margin: 0 0 30px; transform-origin: left center; transition: color .4s var(--ease); }
+.lyric.cur { color: #fff; }
 .lyric.empty { font-weight: 500; color: var(--text-dim); font-size: 30px; }
 
 /* the two corner controls share one glass tray; the active one is a lighter inner pill */
 .corner { position: absolute; right: var(--pad-x); bottom: 56px; display: flex; gap: 4px; padding: 6px; border-radius: 999px; overflow: visible; }
 .corner .pill { height: 56px; padding: 0 24px; font-size: 26px; background: transparent; box-shadow: none; }
 .corner .pill::before { display: none; }
-.corner .pill.on { background: rgba(255,255,255,.22); }
+.corner .pill { position: relative; z-index: 1; }
+.corner .pill.on { background: transparent; }
 
 /* listening ----------------------------------------------------------------- */
 /* Just the word and a breathing dot on black: no box, no meter (the level is not
@@ -115,7 +120,7 @@ body.phase-playing .veil { opacity: 1; }
 /* info sheet: a full-height liner-notes page that slides up over home ---------- */
 /* The page sits straight on the blurred cover (the backdrop is already blurred,
    so no backdrop-filter is needed): a gradient veil for legibility, no slab. */
-.sheet { position: absolute; inset: 0; transform: translateY(104%); transition: transform .55s var(--ease); z-index: 5;
+.sheet { position: absolute; inset: 0; transform: translateY(104%); transition: transform .6s var(--ease-house); z-index: 5;
   overflow: hidden; will-change: transform;
   background: linear-gradient(180deg, rgba(7,6,10,.42) 0%, rgba(7,6,10,.62) 30%, rgba(7,6,10,.78) 100%); }
 .sheet-scroll { height: 100%; overflow-y: auto; touch-action: pan-y; padding: 34px 120px 72px;
@@ -163,6 +168,11 @@ body.phase-playing .veil { opacity: 1; }
 body.sheet-open #home { opacity: 0; transition: opacity .5s var(--ease); }
 body.sheet-open .corner { visibility: hidden; }
 
+/* boot: the wordmark once, then the screen ------------------------------------- */
+.boot { position: absolute; inset: 0; background: #000; z-index: 30; display: flex; align-items: center; justify-content: center; }
+.bootword { font-size: 148px; font-weight: 700; letter-spacing: -.035em; color: #fff; }
+.sl, .sw, .sc { display: inline-block; }
+
 /* end of side --------------------------------------------------------------- */
 /* End of side: type on the blurred cover, same veil as the Info page, no card. */
 .ended { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 6;
@@ -179,12 +189,10 @@ body.ended-open #home { opacity: 0; }
    them with the finger; a release commits or snaps back. Transforms only. */
 .pager { position: absolute; inset: 0; overflow: hidden; }
 .page { position: absolute; inset: 0; overflow: hidden; will-change: transform; }
-.page.anim { transition: transform .46s cubic-bezier(.2,.8,.2,1); }
+.page-dim { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 9; }
 .centre { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 34px; }
 .pageword { font-size: 132px; font-weight: 700; letter-spacing: -.03em; color: rgba(255,255,255,.82); }
-.pageword.faint { font-size: 30px; font-weight: 600; letter-spacing: 0; color: rgba(255,255,255,.45);
-  opacity: 0; transition: opacity .7s var(--ease); }
-#page-off.arrived .pageword.faint { opacity: 1; }
+.pageword.faint { font-size: 30px; font-weight: 600; letter-spacing: 0; color: rgba(255,255,255,.45); opacity: 0; }
 .dots { position: absolute; left: 0; right: 0; bottom: 44px; display: flex; justify-content: center; align-items: center; gap: 14px;
   opacity: 0; transition: opacity .35s var(--ease); pointer-events: none; z-index: 8; }
 .dots.show { opacity: .7; }
@@ -198,9 +206,7 @@ body.ended-open #home { opacity: 0; }
 .imuted { color: rgba(255,255,255,.45); font-weight: 500; }
 
 /* nothing on the platter: the controls a tap reveals -------------------------- */
-.idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 34px;
-  opacity: 0; transition: opacity .4s var(--ease); }
-.idle.shown { opacity: 1; }
+.idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 34px; }
 .quiet { display: flex; gap: 44px; }
 .quiet button { font-size: 26px; font-weight: 600; color: rgba(255,255,255,.55); padding: 12px 8px; }
 
@@ -208,15 +214,12 @@ body.ended-open #home { opacity: 0; }
 .pick { position: absolute; inset: 0; }
 .wheel { position: absolute; inset: 0; }
 .wheelkicker { position: absolute; left: 0; right: 0; top: 300px; text-align: center; }
-.wheelstrip { position: absolute; left: 0; top: 50%; margin-top: -150px; display: flex; align-items: center; gap: 36px;
-  will-change: transform; transition: transform 1.5s cubic-bezier(.12,.75,.15,1); }
-.wheelstrip img { width: 300px; height: 300px; flex: none; object-fit: cover; border-radius: 18px; opacity: .45;
-  background: rgba(255,255,255,.06); box-shadow: 0 30px 80px rgba(0,0,0,.6);
-  transition: transform .55s var(--ease), opacity .55s var(--ease); }
-.wheelstrip img.hit { transform: scale(1.4); opacity: 1; }
+/* the covers sit on a curve in depth; the motion layer places each one */
+.wheel3d { position: absolute; inset: 0; perspective: 1600px; transform-style: preserve-3d; }
+.wheel3d img { position: absolute; left: 50%; top: 50%; width: 300px; height: 300px; object-fit: cover; border-radius: 18px;
+  background: rgba(255,255,255,.06); box-shadow: 0 30px 80px rgba(0,0,0,.6); backface-visibility: hidden; will-change: transform; }
 .landed { position: absolute; inset: 0; padding: var(--pad-y) var(--pad-x); display: grid; grid-template-columns: 560px 1fr;
-  gap: 96px; align-items: center; opacity: 0; transition: opacity .6s var(--ease); }
-.landed.shown { opacity: 1; }
+  gap: 96px; align-items: center; }
 .pickart { width: 560px; height: 560px; object-fit: cover; border-radius: 32px; background: rgba(255,255,255,.06);
   box-shadow: 0 40px 100px rgba(0,0,0,.5), inset 0 0 0 1px rgba(255,255,255,.2); }
 .pickcopy .kicker { color: rgba(255,255,255,.55); }
@@ -235,7 +238,10 @@ body.ended-open #home { opacity: 0; }
 .tray { display: inline-flex; align-items: center; gap: 4px; padding: 6px; border-radius: 999px; overflow: visible; }
 .tray .pill { height: 52px; padding: 0 22px; font-size: 24px; background: transparent; box-shadow: none; }
 .tray .pill::before { display: none; }
-.tray .pill.on { background: rgba(255,255,255,.22); }
+.tray .pill { position: relative; z-index: 1; }
+.tray .pill.on { background: transparent; }
+.tray-ind, .corner .tray-ind { position: absolute; left: 0; top: 0; border-radius: 999px; background: rgba(255,255,255,.22);
+  transform-origin: 50% 50%; pointer-events: none; z-index: 0; opacity: 0; }
 .shelfhead > .pill { height: 56px; font-size: 24px; padding: 0 26px; }
 .shelfgrid { flex: 1; overflow-y: auto; touch-action: pan-y; scrollbar-width: none; display: grid; grid-template-columns: repeat(7, 216px);
   gap: 40px; justify-content: space-between; align-content: start; padding-bottom: 140px;

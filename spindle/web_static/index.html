@@ -13,6 +13,7 @@
 
 <section id="page-off" class="page">
   <div class="centre"><div id="offword" class="pageword faint">Off</div></div>
+  <div class="page-dim"></div>
 </section>
 
 <section id="page-spindle" class="page">
@@ -65,7 +66,7 @@
 <div id="pick" class="pick hidden">
   <div id="wheel" class="wheel">
     <div id="wheel-kicker" class="kicker wheelkicker">Picking one</div>
-    <div id="wheelstrip" class="wheelstrip"></div>
+    <div id="wheelstrip" class="wheel3d"></div>
   </div>
   <div id="landed" class="landed hidden">
     <img id="pick-art" class="pickart" alt="">
@@ -109,10 +110,12 @@
   </div>
   <div id="recentlist" class="recentlist"></div>
 </div>
+<div class="page-dim"></div>
 </section>
 
 <section id="page-claw" class="page">
   <div class="centre"><div class="pageword">Claw</div></div>
+  <div class="page-dim"></div>
 </section>
 
 </div>
@@ -133,6 +136,12 @@
 </div>
 
 <div id="dots" class="dots"><i></i><i class="on"></i><i></i></div>
+<div id="boot" class="boot"><div id="bootword" class="bootword">Spindle</div></div>
+<script src="/static/vendor/gsap.min.js"></script>
+<script src="/static/vendor/CustomEase.min.js"></script>
+<script src="/static/vendor/Flip.min.js"></script>
+<script src="/static/vendor/SplitText.min.js"></script>
+<script src="/static/motion.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
