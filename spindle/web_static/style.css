@@ -49,6 +49,8 @@ body.phase-playing .veil { opacity: 1; }
 .pill:active { transform: scale(.96); }
 .pill.big { font-size: 32px; height: 80px; padding: 0 38px; gap: 16px; }
 #sidepill { height: 56px; font-size: 24px; padding: 0 24px; gap: 12px; }
+#sidetext .odo { font-weight: 600; }
+.mast { will-change: transform, opacity; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: #fff; box-shadow: 0 0 12px #fff; }
 .dot.pulse { animation: breathe 2.6s ease-in-out infinite; }
 @keyframes breathe { 0%, 100% { opacity: .3; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
@@ -98,7 +100,7 @@ body.phase-playing .veil { opacity: 1; }
 /* The current line scales up 1.22x from its left edge; a transform does not
    reflow text, so the box is 1/1.22 of the column and the scaled line fills it
    exactly instead of running off the right edge. */
-.lyric { font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; font-size: 52px; color: rgba(255,255,255,.38);
+.lyric { font-weight: 700; font-variation-settings: "wght" 540; letter-spacing: -0.02em; line-height: 1.15; font-size: 52px; color: rgba(255,255,255,.38);
   width: 82%; margin: 0 0 30px; transform-origin: left center; transition: color .4s var(--ease); }
 .lyric.cur { color: #fff; }
 .lyric.empty { font-weight: 500; color: var(--text-dim); font-size: 30px; }
@@ -169,8 +171,22 @@ body.phase-playing .veil { opacity: 1; }
 body.sheet-open #home { opacity: 0; transition: opacity .5s var(--ease); }
 body.sheet-open .corner { visibility: hidden; }
 
+/* odometer digits: a masked column per digit -------------------------------------- */
+.odo { display: inline-block; height: 1em; line-height: 1; overflow: hidden; vertical-align: -0.1em; }
+.odo-col { display: inline-block; will-change: transform; }
+.odo-col b { display: block; height: 1em; line-height: 1; font-weight: inherit; font-variant-numeric: tabular-nums; }
+.odo-sym { display: inline-block; height: 1em; line-height: 1; font-weight: inherit; }
+/* a live level beside the word: five bars that follow what the Pi hears */
+.lvl { display: inline-flex; align-items: flex-end; gap: 5px; height: 26px; margin-left: 4px; }
+.lvl b { display: block; width: 5px; height: 26px; border-radius: 3px; background: rgba(255,255,255,.72); transform: scaleY(.15);
+  transform-origin: 50% 100%; will-change: transform; }
+
 /* boot: the wordmark once, then the screen ------------------------------------- */
 .boot { position: absolute; inset: 0; background: #000; z-index: 30; display: flex; align-items: center; justify-content: center; }
+.lockup { display: flex; align-items: center; gap: 44px; }
+.bootmark { width: 188px; height: 188px; display: block; }
+.bootmark .bm-disc, .bootmark .bm-label, .bootmark .bm-hole { opacity: 0; transform-origin: 512px 512px; }
+.bootmark .bm-groove { opacity: 0; }
 .bootword { font-size: 148px; font-weight: 700; letter-spacing: -.035em; color: #fff; }
 .sl, .sw, .sc { display: inline-block; }
 
@@ -249,9 +265,12 @@ body.ended-open #home { opacity: 0; }
 .tray-ind, .corner .tray-ind { position: absolute; left: 0; top: 0; border-radius: 999px; background: rgba(255,255,255,.22);
   transform-origin: 50% 50%; pointer-events: none; z-index: 0; opacity: 0; }
 .shelfhead > .pill { height: 56px; font-size: 24px; padding: 0 26px; }
+/* no mask on the scroller (a mask makes the Pi re-render the whole grid every frame it moves);
+   .shelffade is a plain gradient lying over the bottom edge instead */
 .shelfgrid { flex: 1; overflow-y: auto; touch-action: pan-y; scrollbar-width: none; display: grid; grid-template-columns: repeat(7, 216px);
-  gap: 40px; justify-content: space-between; align-content: start; padding-bottom: 140px;
-  -webkit-mask-image: linear-gradient(180deg, #000 86%, transparent 100%); mask-image: linear-gradient(180deg, #000 86%, transparent 100%); }
+  gap: 40px; justify-content: space-between; align-content: start; padding-bottom: 140px; }
+.shelffade { position: absolute; left: 0; right: 0; bottom: 0; height: 150px; pointer-events: none;
+  background: linear-gradient(180deg, transparent, #000 85%); }
 .shelfgrid::-webkit-scrollbar { display: none; }
 .shelfgrid { grid-auto-rows: 216px; }
 .shelfitem { position: relative; width: 216px; height: 216px; }
@@ -263,8 +282,7 @@ body.ended-open #home { opacity: 0; }
 .shelfgrid.priced .shelfitem .price { opacity: 1; }
 .shelfitem .price:empty { display: none; }
 .recentlist { flex: 1; overflow-y: auto; touch-action: pan-y; scrollbar-width: none; display: grid; grid-template-columns: 1fr 1fr;
-  gap: 14px 48px; align-content: start; padding-bottom: 140px;
-  -webkit-mask-image: linear-gradient(180deg, #000 86%, transparent 100%); mask-image: linear-gradient(180deg, #000 86%, transparent 100%); }
+  gap: 14px 48px; align-content: start; padding-bottom: 140px; }
 .recentlist::-webkit-scrollbar { display: none; }
 .rrow { display: grid; grid-template-columns: 120px 1fr auto; gap: 28px; align-items: center; padding: 14px 18px; border-radius: 24px; }
 .rrow img, .rrow .ph { width: 120px; height: 120px; border-radius: 14px; object-fit: cover; background: rgba(255,255,255,.06);

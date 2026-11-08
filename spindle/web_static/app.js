@@ -16,7 +16,7 @@
     artist: $("artist"), albumline: $("albumline"), sidetext: $("sidetext"), fill: $("fill"),
     feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
     lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"), corner: document.querySelector(".corner"),
-    listening: $("listening"), sheet: $("sheet"), tiles: $("tiles"),
+    listening: $("listening"), lvl: $("lvl"), sheet: $("sheet"), tiles: $("tiles"),
     ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"), endedSub: $("ended-sub"),
     pages: [$("page-off"), $("page-spindle"), $("page-claw")], pageOff: $("page-off"), offword: $("offword"), dots: $("dots"),
     idle: $("idle"), btnPick: $("btn-pick"), btnShelf: $("btn-shelf"), btnRecent: $("btn-recent"),
@@ -195,6 +195,7 @@
     const listen = st.phase === "listening" && !pickOpen && !shelfOpen && !recentOpen;
     if (listen && el.listening.classList.contains("hidden")) { show(el.listening); M.arrive(el.listening.firstElementChild, { y: 14, duration: 0.8 }); }
     else if (!listen) hide(el.listening);
+    if (listen) renderLevel(st.level_db);
     if (playing) renderHome(st);
     renderEnded(ended);
     if (!playing && !ended) {
@@ -204,6 +205,16 @@
       // (the end-of-side card keeps it; once that goes, so does the backdrop; a pick owns it)
       if (artKey && !pickOpen) { artKey = ""; el.art.removeAttribute("src"); setBackdrop(""); }
     }
+  }
+
+  // five bars that follow what the Pi hears: -60 dB is silence, -15 dB a loud record
+  const LVL_SHAPE = [0.55, 0.8, 1, 0.8, 0.55];
+  function renderLevel(db) {
+    const norm = M.gsap.utils.clamp(0, 1, ((db ?? -120) + 60) / 45);
+    [...el.lvl.children].forEach((b, i) => {
+      const target = 0.15 + norm * LVL_SHAPE[i] * (0.85 + (i % 2) * 0.1);
+      M.gsap.to(b, { scaleY: target, duration: M.D(1.4), ease: "house", overwrite: true });
+    });
   }
 
   function renderHome(st) {
@@ -326,10 +337,15 @@
         left += rows[i].duration;
       }
     }
-    const parts = [];
-    if (side) parts.push(`Side ${side}`);
-    if (left != null) parts.push(left >= 90 ? `${Math.round(left / 60)} min left` : `${Math.round(left)} s left`);
-    el.sidetext.textContent = parts.join(" · ") || "Now playing";
+    const head = side ? `Side ${side}` : "";
+    if (left == null) { el.sidetext.textContent = head || "Now playing"; delete el.sidetext.dataset.mode; return; }
+    const mins = left >= 90, n = mins ? Math.round(left / 60) : Math.round(left);
+    const mode = `${head}|${mins ? "m" : "s"}`;
+    if (el.sidetext.dataset.mode !== mode) {
+      el.sidetext.dataset.mode = mode;
+      el.sidetext.innerHTML = `${head ? esc(head) + " · " : ""}<span id="sideodo"></span> ${mins ? "min" : "s"} left`;
+    }
+    M.odometer(document.getElementById("sideodo"), n);
   }
 
   function renderEnded(e) {
@@ -438,8 +454,8 @@
     const target = idx >= 0 ? nodes[idx] : null;
     const y = target ? target.offsetTop - 300 : 0;
     M.gsap.to(el.lyriclines, { y: -y, duration: M.D(0.55), ease: "house", overwrite: true });
-    if (prev >= 0 && nodes[prev]) M.gsap.to(nodes[prev], { scale: 1, duration: M.D(0.4), ease: "house", overwrite: true });
-    if (target) M.gsap.to(target, { scale: 1.22, duration: M.D(0.5), ease: "back.out(1.4)", overwrite: true });
+    if (prev >= 0 && nodes[prev]) { M.gsap.to(nodes[prev], { scale: 1, duration: M.D(0.4), ease: "house", overwrite: true }); M.weight(nodes[prev], 540, 0.4); }
+    if (target) { M.gsap.to(target, { scale: 1.22, duration: M.D(0.5), ease: "back.out(1.4)", overwrite: true }); M.weight(target, 760, 0.5); }
   }
 
   const cornerTray = M.tray(el.corner);
@@ -486,6 +502,7 @@
   function closeSheet() {
     if (!sheetOpen) return;
     sheetOpen = false;
+    countedFor.clear();
     el.btnInfo.classList.remove("on");
     trayState();
     el.body.classList.remove("sheet-open");
@@ -494,6 +511,9 @@
   }
 
   const sec = (h, body) => `<div class="sec"><h2>${esc(h)}</h2>${body}</div>`;
+  const countedFor = new Set();
+  // one scroll listener for the sheet; the masthead it moves is whichever is rendered now
+  const sheetParallax = M.parallaxHead(document.getElementById("sheetscroll"), () => el.tiles.querySelector(".mast"));
 
   function fmtShort(formats) {
     const f = (formats || []).join(", ")
@@ -576,6 +596,10 @@
       `</div></div>`;
     if (opening) M.arrive([el.tiles.querySelector(".mast"), ...el.tiles.querySelectorAll(".sec")], { y: 28, stagger: 0.06, delay: 0.15 });
     else M.gsap.fromTo(el.tiles, { autoAlpha: 0.55 }, { autoAlpha: 1, duration: M.D(0.4), ease: "power1.inOut" });
+    sheetParallax();
+    const num = el.tiles.querySelector(".hist b");
+    // the plays roll up once per opening of the sheet (the prefetch renders while it is hidden)
+    if (num && info && sheetOpen && !countedFor.has(infoFor + "|" + trackFor)) { countedFor.add(infoFor + "|" + trackFor); M.countUp(num, num.textContent, { delay: 0.25 }); }
   }
 
   // ── nothing on the platter: the controls ─────────────────────────────────
@@ -762,7 +786,7 @@
     return out;
   };
   const priceTag = (r) => (r.price != null ? `$${Math.round(r.price)}` : "");
-  const tile = (r) => `<div class="shelfitem" data-id="${r.id}"><img src="${esc(tileUrl(r.cover))}" alt="${esc(r.title)}"><span class="price">${priceTag(r)}</span></div>`;
+  const tile = (r, i) => `<div class="shelfitem" data-id="${r.id}"><img src="${esc(tileUrl(r.cover))}" alt="${esc(r.title)}"${i >= 28 ? ' loading="lazy"' : ""} decoding="async"><span class="price">${priceTag(r)}</span></div>`;
   async function openShelf() {
     hideIdle();
     shelfOpen = true;
@@ -773,7 +797,7 @@
     el.shelfgrid.classList.toggle("priced", shelfSort === "price");
     el.shelfgrid.scrollTop = 0;
     M.arrive(el.shelf.querySelector(".shelfhead"), { y: -18, duration: 0.8 });
-    M.waveIn(el.shelfgrid.children);
+    M.waveIn(el.shelfgrid.children, { cap: 21 });
     [...el.shelfSort.children].forEach((b) => b.classList.toggle("on", b.dataset.sort === shelfSort));
     sortTray.place(el.shelfSort.querySelector(`[data-sort="${shelfSort}"]`));
   }

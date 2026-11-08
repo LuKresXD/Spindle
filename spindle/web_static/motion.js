@@ -194,9 +194,13 @@ window.Motion = (() => {
   // ── the shelf: a sort change is a Flip, not a re-render ───────────────────
   function flipGrid(grid, reorder) {
     const items = Array.from(grid.children);
+    const box = grid.getBoundingClientRect();
+    const onScreen = (el) => { const r = el.getBoundingClientRect(); return r.bottom > box.top - 60 && r.top < box.bottom + 60; };
+    const before = new Set(items.filter(onScreen));
     const state = Flip.getState(items);
     reorder();
-    return Flip.from(state, { duration: D(0.65), ease: "power4.inOut", absolute: true, prune: true, stagger: 0.003 });
+    const moving = items.filter((el) => before.has(el) || onScreen(el));
+    return Flip.from(state, { targets: moving, duration: D(0.65), ease: "power4.inOut", absolute: true, prune: true, stagger: 0.003 });
   }
   // Covers wave in from the top left.
   function waveIn(items, { cap = 35 } = {}) {
@@ -208,15 +212,78 @@ window.Motion = (() => {
       stagger: { each: 0.018, from: "start" }, clearProps: "transform" });
   }
 
-  // ── boot: the wordmark rises out of a mask once, then the screen fades in ─────
-  function boot(overlay, word, onDone) {
-    const split = SplitText.create(word, { type: "chars", mask: "chars", charsClass: "sc" });
-    gsap.timeline({ onComplete: () => { split.revert(); overlay.remove(); if (onDone) onDone(); } })
-      .from(split.chars, { yPercent: 110, duration: D(1.25), ease: BIG, stagger: 0.035 })
-      .to(word, { autoAlpha: 0, duration: D(0.5), ease: MICRO }, "+=0.45")
-      .to(overlay, { autoAlpha: 0, duration: D(0.6), ease: MICRO }, "<0.1");
+  // ── numbers roll like an odometer: each digit a column of 0-9 behind a mask ────────
+  function odometer(el, value) {
+    const text = String(value);
+    const cur = el.dataset.odo;
+    if (cur === text) return;
+    const was = cur == null;
+    el.dataset.odo = text;
+    const cols = [...text].map((ch, i) => {
+      let col = el.children[i];
+      if (!col || col.dataset.ch === undefined) {
+        col = document.createElement("span"); col.className = "odo";
+        col.innerHTML = /\d/.test(ch) ? `<span class="odo-col">${"0123456789".split("").map((d) => `<b>${d}</b>`).join("")}</span>` : `<b class="odo-sym">${ch}</b>`;
+        el.insertBefore(col, el.children[i] || null);
+      }
+      col.dataset.ch = ch;
+      return col;
+    });
+    while (el.children.length > cols.length) el.lastChild.remove();
+    cols.forEach((col, i) => {
+      const ch = text[i];
+      const inner = col.firstElementChild;
+      if (!/\d/.test(ch)) { inner.textContent = ch; return; }
+      const to = -Number(ch) * 10;           // the column is ten digits tall: one digit = 10 %
+      if (was) gsap.set(inner, { yPercent: to });
+      else gsap.to(inner, { yPercent: to, duration: D(0.9), ease: "house", overwrite: true });
+    });
+  }
+  // a count that rolls up to its value when it first appears
+  function countUp(el, value, { duration = 1.1, delay = 0 } = {}) {
+    const n = Number(value) || 0;
+    const proxy = { v: 0 };
+    el.textContent = "0";
+    return gsap.to(proxy, { v: n, duration: D(duration), ease: "power3.out", delay,
+      onUpdate: () => { el.textContent = String(Math.round(proxy.v)); } });
+  }
+  // the current line of lyrics gets heavier as well as bigger (Inter is variable)
+  function weight(el, w, duration = 0.5) {
+    gsap.to(el, { fontVariationSettings: `"wght" ${w}`, duration: D(duration), ease: "house", overwrite: "auto" });
+  }
+  // a scroller's head recedes as it scrolls: a little slower than the content, and fading.
+  // One listener per scroller; `head()` returns whatever element is the head right now.
+  function parallaxHead(scroller, head, { rate = 0.35, fadeBy = 420 } = {}) {
+    const apply = () => {
+      const el = head();
+      if (!el) return;
+      const y = scroller.scrollTop;
+      gsap.set(el, { y: y * rate, opacity: gsap.utils.clamp(0, 1, 1 - y / fadeBy) });
+    };
+    scroller.addEventListener("scroll", apply, { passive: true });
+    return apply;
   }
 
-  return { D, reduced, revealLines, revealWords, arrive, leave, fade, tray, rowGlide, handOver,
+  // ── boot: the record mark draws itself, the wordmark rises beside it, then the screen ──
+  function boot(overlay, word, onDone) {
+    const mark = overlay.querySelector(".bootmark");
+    const split = SplitText.create(word, { type: "chars", mask: "chars", charsClass: "sc" });
+    const tl = gsap.timeline({ onComplete: () => { split.revert(); overlay.remove(); if (onDone) onDone(); } });
+    if (mark) {
+      const disc = mark.querySelector(".bm-disc"), label = mark.querySelector(".bm-label"), hole = mark.querySelector(".bm-hole");
+      const grooves = [...mark.querySelectorAll(".bm-groove")];
+      grooves.forEach((g) => { const c = 2 * Math.PI * Number(g.getAttribute("r")); gsap.set(g, { strokeDasharray: c, strokeDashoffset: c, opacity: 1 }); });
+      tl.fromTo(disc, { scale: 0.6, opacity: 0 }, { scale: 1, opacity: 1, duration: D(0.9), ease: BIG }, 0)
+        .to(grooves, { strokeDashoffset: 0, duration: D(1.1), ease: "power2.inOut", stagger: { each: 0.06, from: "end" } }, 0.25)
+        .fromTo(label, { scale: 0.4, opacity: 0 }, { scale: 1, opacity: 1, duration: D(0.7), ease: "back.out(1.6)" }, 0.9)
+        .fromTo(hole, { scale: 0, opacity: 0 }, { scale: 1, opacity: 1, duration: D(0.4), ease: SETTLE }, 1.25);
+    }
+    tl.from(split.chars, { yPercent: 110, duration: D(1.1), ease: BIG, stagger: 0.035 }, 0.75)
+      .to([word, mark].filter(Boolean), { autoAlpha: 0, duration: D(0.5), ease: MICRO }, "+=0.5")
+      .to(overlay, { autoAlpha: 0, duration: D(0.6), ease: MICRO }, "<0.1");
+    return tl;
+  }
+
+  return { D, reduced, revealLines, revealWords, arrive, leave, fade, tray, rowGlide, handOver, odometer, countUp, weight, parallaxHead,
            pageLayout, pageCommit, pageCancel, pageRest, wheel, flipGrid, waveIn, boot, gsap };
 })();
