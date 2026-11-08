@@ -780,12 +780,17 @@
   // ── the shelf ────────────────────────────────────────────────────────────
   let shelfOpen = false, shelfSort = "recent";
   const sortTray = M.tray(el.shelfSort);
+  // Each order is worked out once per collection (localeCompare over 87 rows is real time on the Pi).
+  const orders = new Map();
   const sorted = (col) => {
+    const key = `${shelfSort}|${col.length}|${col[0] && col[0].id}`;
+    if (orders.has(key) && orders.get(key).col === col) return orders.get(key).out;
     const out = col.slice();
     const by = (f) => (a, b) => f(a).localeCompare(f(b), "en", { sensitivity: "base" });
     if (shelfSort === "title") out.sort(by((r) => r.title));
     else if (shelfSort === "artist") out.sort((a, b) => by((r) => r.artist)(a, b) || (a.released || a.year || 0) - (b.released || b.year || 0));
     else if (shelfSort === "price") out.sort((a, b) => (b.price ?? -1) - (a.price ?? -1) || by((r) => r.title)(a, b));
+    orders.set(key, { col, out });
     return out;
   };
   const priceTag = (r) => (r.price != null ? `$${Math.round(r.price)}` : "");
@@ -803,7 +808,11 @@
     if (key === shelfKey) return;
     shelfKey = key; placedSort = "recent";
     el.shelfgrid.innerHTML = col.map(tile).join("") || `<div class="empty">Nothing on the shelf yet</div>`;
+    if (col.length) M.gsap.set(el.shelfgrid.children, { x: 0, y: 0 });   // the motion layer meets every tile now, not mid-sort
   }
+  // Waiting, the shelf is drawn at a thousandth: invisible on black, but the compositor keeps
+  // its tiles decoded and rastered, so the opening is the wave and nothing else.
+  const WARM = 0.001;
   const slotPos = (i, step) => ({ x: (i % COLS) * step, y: Math.floor(i / COLS) * ROW });
   const slotRow = (n) => Math.floor((+n.dataset.slot || 0) / COLS);
   const rowsOnScreen = () => Math.ceil(el.shelfgrid.clientHeight / ROW) + 1;
@@ -844,7 +853,7 @@
     buildGrid(collection);
     el.shelf.classList.remove("hidden");
     el.shelf.classList.add("prepared");
-    M.gsap.set(el.shelf, { opacity: 0 });
+    M.gsap.set(el.shelf, { opacity: WARM });
   }
   function unprepareShelf() {
     if (shelfOpen || el.shelf.classList.contains("hidden")) return;
@@ -889,7 +898,7 @@
   function closeShelf() {
     shelfOpen = false;
     el.shelf.classList.add("prepared");
-    M.fade(el.shelf, 0, { duration: 0.3, keep: true }).then(() => { if (!shelfOpen && (!state || state.phase !== "idle")) unprepareShelf(); });
+    M.fade(el.shelf, WARM, { duration: 0.3, keep: true }).then(() => { if (!shelfOpen && (!state || state.phase !== "idle")) unprepareShelf(); });
   }
 
   async function openCard(id, fromShelf) {
