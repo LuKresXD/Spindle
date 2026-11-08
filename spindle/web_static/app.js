@@ -25,6 +25,12 @@
   let lyrics = null;                      // {synced: [[t, line]], plain}
   let lyricsFor = "";
   let lyricIndex = -1;
+  // A new track's start is a late guess until the engine's fingerprint offsets pin it
+  // (~15 s in). Lean the lyric clock forward over that window, decaying to a small
+  // steady-state cushion, so a fresh track is not read late while settled tracks stay put.
+  const LYRIC_BASE_LEAD = 0.3;        // karaoke convention: a line lands a touch early
+  const FRESH_LEAD = 2.6, FRESH_DECAY = 16;
+  let trackChangedAt = 0;             // performance.now() of the last track change
   let infoFor = "";
   let info = null;                        // album info (pressing, story, plays)
   let trackFor = "";
@@ -75,6 +81,7 @@
     const key = `${st.artist}|${st.title}|${st.album}`;
     if (key !== trackKey) {
       trackKey = key;
+      trackChangedAt = performance.now();
       el.title.textContent = st.title || "";
       fitTitle();
       el.artist.textContent = st.artist || "";
@@ -177,6 +184,12 @@
   // ── progress + lyrics clock ──────────────────────────────────────────────
   // The bar moves by transform (composited) ten times a second; the clock text
   // changes once a second; lyrics are checked every frame (cheap: an index compare).
+  function lyricLead() {
+    if (!trackChangedAt) return LYRIC_BASE_LEAD;
+    const age = (performance.now() - trackChangedAt) / 1000;
+    const fresh = age < FRESH_DECAY ? FRESH_LEAD * (1 - age / FRESH_DECAY) : 0;
+    return LYRIC_BASE_LEAD + fresh;
+  }
   let lastSide = 0, lastBar = 0, lastSec = -1;
   function frame() {
     if (state && state.phase === "playing") {
@@ -194,7 +207,7 @@
         }
       }
       if (now - lastSide > 5000) { lastSide = now; renderSide(state, state.tracklist || []); }
-      if (lyricsOn && lyrics && p != null) highlightLyric(p);   // on the clock: a fixed lead only moves the error around
+      if (lyricsOn && lyrics && p != null) highlightLyric(p + lyricLead());
     }
     requestAnimationFrame(frame);
   }
