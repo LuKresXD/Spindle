@@ -481,8 +481,9 @@
     // opacity inline (an arrive leaves opacity 1 behind, which beats any class), so the
     // outgoing one is hidden the same way, not by a class alone (both showed at once, 18:25).
     const show = lyricsOn ? el.lyrics : el.list, hide = lyricsOn ? el.list : el.lyrics;
-    M.gsap.killTweensOf([show, hide]);
-    M.gsap.set(hide, { autoAlpha: 0 });
+    // a short tween with overwrite:"auto", not a set after a kill: a running staggered arrive
+    // on the panel is a wrapper that killTweensOf cannot stop, overwrite can
+    M.gsap.to(hide, { autoAlpha: 0, duration: M.D(0.12), overwrite: "auto" });
     hide.classList.add("off"); show.classList.remove("off");
     trayState();
     if (lyricsOn && state) loadLyrics(state);
@@ -866,7 +867,7 @@
       else { still.push(n); at.push(target); }
     });
     M.gsap.killTweensOf(moving.concat(still), "x,y");                 // a tile whose slot is unchanged keeps its glide
-    if (still.length) M.gsap.set(still, { x: (i) => at[i].x, y: (i) => at[i].y });   // one call, not one per tile
+    if (still.length) M.gsap.set(still, { x: (i) => at[i].x, y: (i) => at[i].y, overwrite: "auto" });   // one call, not one per tile
     el.shelfgrid.scrollTop = 0;
     placedSort = shelfSort;
     return M.glide(moving, from, to);

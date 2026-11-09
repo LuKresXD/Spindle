@@ -53,24 +53,30 @@ window.Motion = (() => {
       onComplete: () => split.revert() });
   }
   // A set of elements arrives: a short rise and a fade, a beat apart.
+  // GSAP 3.15 on the kiosk: a tween with `stagger` (even for ONE target) is a wrapper around a
+  // timeline, and gsap.killTweensOf() does not reach it (full or property-scoped), so a running
+  // staggered arrive outlived every cancel and both views showed at once (2026-11-08). Rules:
+  // never pass a stagger for a single element, and let overwrite:"auto" settle conflicts (it
+  // does reach the wrappers' properties); kill a staggered tween only through its own handle.
   function arrive(els, { y = 24, x = 0, scale = 1, stagger = 0.08, delay = 0, duration = 0.9, ease = SETTLE } = {}) {
     const list = gsap.utils.toArray(els).filter(Boolean);
     if (!list.length) return null;
     gsap.killTweensOf(list);
-    return gsap.fromTo(list, { y, x, scale, autoAlpha: 0 },
-      { y: 0, x: 0, scale: 1, autoAlpha: 1, duration: D(duration), ease, stagger, delay, clearProps: "transform" });
+    const vars = { y: 0, x: 0, scale: 1, autoAlpha: 1, duration: D(duration), ease, delay, clearProps: "transform", overwrite: "auto" };
+    if (list.length > 1) vars.stagger = stagger;
+    return gsap.fromTo(list, { y, x, scale, autoAlpha: 0 }, vars);
   }
   function leave(els, { duration = 0.25, onComplete } = {}) {
     const list = gsap.utils.toArray(els).filter(Boolean);
     if (!list.length) { if (onComplete) onComplete(); return null; }
     gsap.killTweensOf(list);
-    return gsap.to(list, { autoAlpha: 0, duration: D(duration), ease: MICRO, onComplete });
+    return gsap.to(list, { autoAlpha: 0, duration: D(duration), ease: MICRO, onComplete, overwrite: "auto" });
   }
   // keep: opacity only, so the element stays painted (the shelf fades to nothing but is kept
   // laid out and rastered for its next opening)
   function fade(el, to, { duration = 0.5, ease = MICRO, delay = 0, keep = false } = {}) {
     gsap.killTweensOf(el);
-    return gsap.to(el, { [keep ? "opacity" : "autoAlpha"]: to, duration: D(duration), ease, delay });
+    return gsap.to(el, { [keep ? "opacity" : "autoAlpha"]: to, duration: D(duration), ease, delay, overwrite: "auto" });
   }
 
   // ── trays: one lighter pill that flies between the buttons ────────────────
@@ -215,8 +221,11 @@ window.Motion = (() => {
   // the transforms stay, they are the order.
   function glide(items, from, to) {
     if (!items.length) return null;
+    // a staggered tween is a wrapper killTweensOf cannot reach: overwrite:"auto" lets a new
+    // glide take a tile's x/y over from the one still running
     return gsap.fromTo(items, { x: (i) => from[i].x, y: (i) => from[i].y },
-      { x: (i) => to[i].x, y: (i) => to[i].y, duration: D(0.65), ease: "power4.inOut", stagger: 0.003 });
+      { x: (i) => to[i].x, y: (i) => to[i].y, duration: D(0.65), ease: "power4.inOut", stagger: 0.003,
+        overwrite: "auto" });
   }
   // Covers wave in from the top left: yPercent, so a sort's x/y offsets are left alone, and
   // plain opacity, so no tile changes visibility mid-wave (each such change re-layerizes).

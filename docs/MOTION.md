@@ -53,3 +53,14 @@ on every frame of its wave): anything the motion layer moves declares `will-chan
 Engine: GSAP 3.15 with CustomEase, Flip and SplitText (free under GSAP's standard license;
 see `web_static/vendor/LICENSE-GSAP.txt`). The motion layer is `web_static/motion.js`; the
 page logic in `app.js` calls it and never animates by hand.
+
+
+## GSAP on the kiosk: what a cancel can and cannot reach (2026-11-08)
+
+A tween created with `stagger` is a wrapper around a timeline, for ONE target too, and
+`gsap.killTweensOf()` does not reach it, whole or by property. A running staggered arrive on
+the lyrics panel survived every cancel and both views showed at once. Rules in the motion
+layer since: no stagger for a single element (`arrive` drops it), `overwrite: "auto"` on
+everything that must take a property over from whatever is running (`arrive`, `leave`,
+`fade`, `glide`, the view switch's hide), and a staggered tween is only ever stopped through
+its own handle. Plain `to`/`fromTo` tweens die to `killTweensOf` as expected.
