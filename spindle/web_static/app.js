@@ -71,7 +71,10 @@
     if (!flip) return st;
     if (st.current_index >= flip.index || serverNow() - flip.at > 10) { flip = null; return st; }
     const nxt = st.tracklist[flip.index];
-    return { ...st, title: nxt.title, position: nxt.position, current_index: flip.index, track_elapsed: 0,
+    // the whole identity of the next track, not just its title: the home renders the parsed
+    // `base`, so a flip that left the old base behind showed the previous track's name
+    return { ...st, title: nxt.title, base: nxt.base || "", featured: nxt.featured || [], version: nxt.version || "",
+             position: nxt.position, current_index: flip.index, track_elapsed: 0,
              track_duration: nxt.duration, updated_at: flip.at, scrobbled: !!nxt.scrobbled, start_exact: false };
   }
 
