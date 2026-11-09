@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # ── Timing constants ─────────────────────────────────────────────────────────
 VINYL_DRIFT          = 0.03  # ±3 % speed tolerance (wow/flutter/motor drift)
 NEEDLE_TOLERANCE     = 15    # seconds of needle-drop imprecision
-ADVANCE_BUFFER_MIN   = 3     # min seconds past duration before auto-advance
+ADVANCE_BUFFER_MIN   = 1.5   # seconds past duration before auto-advance once the start is pinned
 ADVANCE_BUFFER_EXACT = 0.5   # ... once the start is pinned AND the deck speed is measured
 ADVANCE_BUFFER_MAX   = 15    # max seconds past duration before auto-advance
 FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when nobody knows (4 min)
@@ -660,6 +660,12 @@ class ScrobbleSession:
         old = self._album.tracklist
         if old.owned and not new_tl.owned:
             return False
+        # One of his records, confirmed, while the lock is a stranger's streaming record that
+        # has not scrobbled a thing yet: the stranger was a confusion at the needle drop and
+        # his record is the session (the relock drops the stranger's track; 2026-11-08).
+        if (new_tl.owned and not old.owned and not self._album.scrobbled
+                and not same_artist(new_tl.artist, old.artist)):
+            return True
         if not same_artist(new_tl.artist, old.artist):
             return False
         cur = old.get_track_at(self._album.current_index)
@@ -685,8 +691,20 @@ class ScrobbleSession:
             return []
         cur = old.tracklist.get_track_at(old.current_index)
         same_track = cur is not None and new_tl.find_track_index(cur.title) == idx
-        # the same track keeps playing: keep its start; a new one: finish the old first
-        result = [] if same_track else self._finalize_album_current(now)
+        # the same track keeps playing: keep its start; a new one: finish the old first,
+        # unless the old lock was a stranger's streaming record giving way to one of his by
+        # another artist: that was a confusion at the needle drop, not a play (a stranger's
+        # upload was scrobbled this way over Ken Carson's X, 2026-11-08)
+        confusion = (not old.tracklist.owned and new_tl.owned
+                     and _artist_key(old.tracklist.artist) != _artist_key(new_tl.artist))
+        if same_track:
+            result: list[tuple[TrackInfo, float]] = []
+        elif confusion:
+            logger.info("Session: dropping %s — %s: a stranger's record displaced by %s",
+                        old.tracklist.artist, cur.title if cur else "?", new_tl.artist)
+            result = []
+        else:
+            result = self._finalize_album_current(now)
         if same_track:
             start = old.current_track_start
         else:

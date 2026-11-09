@@ -250,6 +250,7 @@ class Player:
         self._id_disagreed = False                 # last ID named a track the clock is not on
         self._held: tuple[str, float] | None = None   # (key, first seen) of a hit nobody knows
         self._runout_ticks = 0                     # consecutive ticks that sounded like a lead-out
+        self._first_hit: tuple[str, float] | None = None   # a session's first hit, unconfirmed
         self._recent_titles: set[str] = set()      # this artist's titles scrobbled recently
         self._recent_key = ""
         self._recent_at = 0.0
@@ -473,6 +474,7 @@ class Player:
         self.last_submit_at = 0.0
         self._id_disagreed = False
         self._held = None
+        self._first_hit = None
         # _runout_ticks is kept: the thumps that ended the side go on, and the idle gate
         # must know them for what they are from its first tick
         self._recent_at = 0.0                      # the side that just ended adds ticks
@@ -592,6 +594,20 @@ class Player:
         if self._hold_unresolved(resolved, at):
             return
         held_since = self._held[1] if self._held is not None else None
+        # A session's first hit that is not one of his records waits for a second identical
+        # one before it reaches the screen and Last.fm: Shazam's first answer at a needle
+        # drop can be a stranger's upload that resolves fine on Spotify ("TreyWayG - Ken Car"
+        # over Ken Carson's X, 2026-11-08). An owned record shows at once; the session still
+        # hears the first hit, so an album lock is not delayed.
+        unconfirmed = False
+        if (self.playing.track is None and not resolved.owned and not self.dry_run
+                and self._held is None):       # a hit that sat out the 90 s hold is confirmed
+            key = _key(track)
+            if self._first_hit is None or self._first_hit[0] != key:
+                self._first_hit = (key, at)
+                unconfirmed = True
+                logger.info("First hit %s — %s is not in the collection: waiting for a second",
+                            track.artist, track.title)
 
         if s and resolved.has_album and not self.dry_run:
             was_locked = s.is_locked()
@@ -599,10 +615,12 @@ class Player:
             out = s.on_identified(resolved, self.music_since or at, at=at)
             al = s.album_state if s.is_locked() else None
             if al is not None:
+                # a hit off the clock's track, or off the record entirely (a stranger's lock
+                # giving way to his record), hurries the next identification
                 idx = al.tracklist.find_track_index(track.title)
-                self._id_disagreed = idx is not None and idx != al.current_index
+                self._id_disagreed = idx is None or idx != al.current_index
             if s.is_locked() and not was_locked:
-                self._finalize_simple(at)             # a simple-mode track gave way to the lock
+                self._simple_gave_way(at, al.tracklist.artist if al else "")
             for t, ts in out:
                 self._scrobble(t, ts, backfill=True)
             if s.mode == SessionMode.COMPILATION and was_mode != SessionMode.COMPILATION:
@@ -617,6 +635,8 @@ class Player:
             self._set_playing(cur, at)
             self._take_art(art, track)
             return
+        if unconfirmed and not (s and s.is_locked()):
+            return                          # nothing on the screen yet; a lock would have counted
 
         if s and s.is_locked():
             predicted = s.get_current_track() or track
@@ -695,6 +715,19 @@ class Player:
     def _now_playing(self, t: TrackInfo) -> None:
         if self.scrobbler and not self.dry_run:
             self.scrobbler.update_now_playing(t)
+
+    def _simple_gave_way(self, now: float, locked_artist: str) -> None:
+        """A simple-mode track is displaced by an album lock. Same artist: it played, finish
+        it (a single before the album). Another artist: a confusion at the needle drop, not a
+        play; it is dropped (a stranger's Spotify track was scrobbled this way, 2026-11-08)."""
+        p = self.playing
+        if p.track and p.simple and not p.scrobbled and locked_artist \
+                and _artist_key(p.track.artist) != _artist_key(locked_artist):
+            logger.info("Dropped %s — %s: displaced by the lock on %s after %.0fs",
+                        p.track.artist, p.track.title, locked_artist, now - p.since)
+            p.scrobbled = True
+            return
+        self._finalize_simple(now)
 
     def _finalize_simple(self, now: float) -> None:
         """Scrobble a simple-mode track that is ending (silence, lock, next track)."""

@@ -83,7 +83,7 @@ def make_player(tmp_path, clock, identify, with_session=True, albums=None):
     cfg = SpindleConfig()
     cfg.silence.threshold_db = -45
     cfg.silence.min_silence_seconds = 8
-    albums = albums if albums is not None else [make_album([115, 72, 109])]
+    albums = albums if albums is not None else [make_album([115, 72, 109], owned=True)]
     resolver = FakeResolver(*albums) if with_session else None
     session = (ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
                if with_session else None)
@@ -533,3 +533,52 @@ def test_once_the_clock_ran_the_side_out_the_first_quiet_or_thump_tick_ends_it(t
     cap2.runout_value = (0.9, 0.05)
     player2.tick()
     assert player2.phase == Phase.IDLE and [s[0] for s in rec2.scrobbles] == ["Track 3"]
+
+
+def test_a_first_hit_not_in_the_collection_waits_for_a_second_one(tmp_path):
+    """Shazam's first answer at a needle drop can be a stranger's upload that Spotify
+    knows: a hit that is not one of his records reaches the screen only when it comes twice."""
+    clock = FakeClock()
+    def identify(path):
+        return TrackInfo(title="Track 2", artist="Madvillain", album="Madvillainy", duration=72)
+    streaming_only = make_album([115, 72, 109], owned=False)
+    player, cap, rec = make_player(tmp_path, clock, identify, albums=[streaming_only])
+    cap.level = -20
+    player.tick()
+    clock.advance(2)
+    st = player.tick()                                       # the first hit
+    assert st.phase == Phase.LISTENING and not st.title and not rec.now_playing
+    clock.advance(2)
+    st = player.tick()                                       # the second: shown (and locked)
+    assert st.phase == Phase.PLAYING and st.title == "Track 2" and player.session.is_locked()
+
+
+def test_a_stranger_displaced_by_the_lock_is_not_a_play(tmp_path):
+    """The needle drop reads as a stranger's Spotify track for a while, then the album locks:
+    the stranger is a confusion, not a play, and never reaches Last.fm."""
+    clock = FakeClock()
+    calls = {"n": 0}
+    def identify(path):
+        calls["n"] += 1
+        if calls["n"] <= 4:                                 # the first half minute: the stranger
+            return TrackInfo(title="Ken Car", artist="TreyWayG", duration=70)
+        return TrackInfo(title="Track 1", artist="Madvillain", album="Madvillainy", duration=115)
+    stranger = make_album([70], artist="TreyWayG", album="Ken Car", album_id="stranger",
+                          titles=["Ken Car"], owned=False)
+    his = make_album([115, 72, 109], owned=True)
+    player, cap, rec = make_player(tmp_path, clock, identify, albums=[stranger, his])
+    cap.level = -20
+    for _ in range(6):
+        player.tick()
+        clock.advance(2)
+    assert rec.now_playing and rec.now_playing[0] == "Ken Car"   # it did show, after its second hit
+    for _ in range(14):                                     # locked: one ID per 8 s, then hurried
+        player.tick()
+        clock.advance(2)
+    assert player.session.is_locked() and player.state.title == "Track 1"   # his record took over
+    assert "Ken Car" not in [s[0] for s in rec.scrobbles]
+    cap.level = -70
+    for _ in range(6):
+        player.tick()
+        clock.advance(2)
+    assert "Ken Car" not in [s[0] for s in rec.scrobbles]

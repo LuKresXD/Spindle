@@ -397,9 +397,13 @@
       const sideEvery = (el.sidetext.dataset.mode || "").endsWith("|s") ? 1000 : 5000;
       if (now - lastSide > sideEvery) { lastSide = now; renderSide(state, state.tracklist || []); }
       if (lyricsOn && lyrics && p != null) highlightLyric(p + lyricLead());
-      if (!flip && state.start_exact && state.deck_speed && state.track_duration && serverState) {
+      // the page flips to the next track on the clock, before the engine confirms it: at the
+      // end once the start is pinned (deck speed measured or assumed 1.0), a second past it
+      // otherwise. Vinyl has no gap; "-0:00" for three seconds read as a lag (Luka, 2026-11-08)
+      if (!flip && state.track_duration && serverState) {
         const raw = rawPosition();
-        if (raw != null && raw >= state.track_duration + 0.4 && nextRowOf(state)) {
+        const margin = state.start_exact ? 0.2 : 1.0;
+        if (raw != null && raw >= state.track_duration + margin && nextRowOf(state)) {
           flip = { index: state.current_index + 1, at: serverNow() };
           apply(serverState);
         }
