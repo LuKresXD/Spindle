@@ -211,15 +211,15 @@ def test_simple_mode_without_any_tracklist_source(tmp_path):
     assert st.track_elapsed is not None and st.track_elapsed > 30
 
 
-def test_unknown_track_then_silence_still_scrobbles_it(tmp_path):
-    """Spotify and Discogs know nothing about this record: simple mode, and the
-    needle lift finalises the track (this used to be lost when a session existed)."""
+def test_unknown_track_then_silence_is_not_scrobbled(tmp_path):
+    """Spotify and Discogs know nothing about this record: it is held, then shown in
+    simple mode, and the needle lift sends nothing to Last.fm (see the test above)."""
     clock = FakeClock()
     def identify(path):
         return TrackInfo(title="White Label", artist="Nobody", duration=200)
     player, cap, rec = make_player(tmp_path, clock, identify)   # session present, no album
     cap.level = -20
-    for _ in range(60):                            # 120 s: over half of 200 s
+    for _ in range(80):                            # 160 s: past the hold
         player.tick()
         clock.advance(2)
     assert player.phase == Phase.PLAYING and not player.session.is_locked()
@@ -228,7 +228,7 @@ def test_unknown_track_then_silence_still_scrobbles_it(tmp_path):
         player.tick()
         clock.advance(2)
     assert player.phase == Phase.IDLE
-    assert [t for t, _ in rec.scrobbles] == ["White Label"]
+    assert rec.scrobbles == []                     # unknown to every catalogue: never sent
 
 
 def test_capture_down_holds_the_session(tmp_path):
@@ -390,7 +390,7 @@ def test_hit_nobody_knows_is_held_off_the_screen_and_lastfm(tmp_path):
         clock.advance(2)
     assert st.phase == Phase.LISTENING and not st.title
     assert not rec.now_playing and not rec.scrobbles
-    assert calls["n"] <= 6                                        # ~every 8 s, not every tick
+    assert calls["n"] <= 12                                  # every 4 s while held, not each tick
     cap.level = -70                                               # needle lifted
     for _ in range(8):
         st = player.tick()
@@ -398,28 +398,31 @@ def test_hit_nobody_knows_is_held_off_the_screen_and_lastfm(tmp_path):
     assert st.phase == Phase.IDLE and not rec.scrobbles and not rec.now_playing
 
 
-def test_hit_nobody_knows_that_persists_is_a_real_record(tmp_path):
-    """The same unknown answer for long enough is an obscure record: it shows, and it
-    scrobbles from when it was first heard, not from when the hold ended."""
+def test_hit_nobody_knows_that_persists_shows_but_is_never_scrobbled(tmp_path):
+    """The same unknown answer for long enough reaches the screen (counted from the first
+    hearing), but a track that neither Spotify nor the collection knows never goes to
+    Last.fm: his records are all in Discogs, so such a hit is a stranger's upload that
+    happens to match the side (one matched three minutes of it, 2026-11-08)."""
     clock = FakeClock()
     def identify(path):
         return TrackInfo(title="White Label", artist="Nobody")
     player, cap, rec = make_player(tmp_path, clock, identify)
     cap.level = -20
-    for _ in range(50):                                           # 100 s
+    for _ in range(72):                                           # 144 s: still held
         st = player.tick()
         clock.advance(2)
-    assert st.phase == Phase.PLAYING and st.title == "White Label" and rec.now_playing
-    assert st.track_elapsed is not None and st.track_elapsed > 90   # counted from the first hearing
-    for _ in range(15):                                           # 130 s in all
-        player.tick()
+    assert st.phase == Phase.LISTENING and not st.title
+    for _ in range(8):                                            # 160 s: shown
+        st = player.tick()
         clock.advance(2)
+    assert st.phase == Phase.PLAYING and st.title == "White Label"
+    assert st.track_elapsed is not None and st.track_elapsed > 150   # from the first hearing
+    assert not rec.now_playing                                    # and not announced to Last.fm
     cap.level = -70
     for _ in range(8):
         player.tick()
         clock.advance(2)
-    assert [s[0] for s in rec.scrobbles] == ["White Label"]      # unknown length: two minutes count
-    assert rec.scrobbles[0][1] is not None and rec.scrobbles[0][1] <= 1_700_000_000.0 + 6
+    assert rec.scrobbles == []
 
 
 def test_known_album_is_not_held_and_clears_a_hold(tmp_path):
@@ -535,22 +538,25 @@ def test_once_the_clock_ran_the_side_out_the_first_quiet_or_thump_tick_ends_it(t
     assert player2.phase == Phase.IDLE and [s[0] for s in rec2.scrobbles] == ["Track 3"]
 
 
-def test_a_first_hit_not_in_the_collection_waits_for_a_second_one(tmp_path):
-    """Shazam's first answer at a needle drop can be a stranger's upload that Spotify
-    knows: a hit that is not one of his records reaches the screen only when it comes twice."""
+def test_a_first_hit_not_in_the_collection_waits_before_it_shows(tmp_path):
+    """Shazam's answer at a needle drop can be a stranger's upload that Spotify knows and
+    that keeps coming for half a minute: a hit that is not one of his records reaches the
+    screen only after 45 s of it. The session still locks on it underneath."""
     clock = FakeClock()
     def identify(path):
         return TrackInfo(title="Track 2", artist="Madvillain", album="Madvillainy", duration=72)
     streaming_only = make_album([115, 72, 109], owned=False)
     player, cap, rec = make_player(tmp_path, clock, identify, albums=[streaming_only])
     cap.level = -20
-    player.tick()
-    clock.advance(2)
-    st = player.tick()                                       # the first hit
+    for _ in range(22):                                      # 44 s
+        st = player.tick()
+        clock.advance(2)
     assert st.phase == Phase.LISTENING and not st.title and not rec.now_playing
-    clock.advance(2)
-    st = player.tick()                                       # the second: shown (and locked)
-    assert st.phase == Phase.PLAYING and st.title == "Track 2" and player.session.is_locked()
+    assert player.session.is_locked()                        # heard, locked, not shown
+    for _ in range(3):
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.PLAYING and st.title == "Track 2"
 
 
 def test_a_stranger_displaced_by_the_lock_is_not_a_play(tmp_path):
@@ -568,14 +574,11 @@ def test_a_stranger_displaced_by_the_lock_is_not_a_play(tmp_path):
     his = make_album([115, 72, 109], owned=True)
     player, cap, rec = make_player(tmp_path, clock, identify, albums=[stranger, his])
     cap.level = -20
-    for _ in range(6):
-        player.tick()
-        clock.advance(2)
-    assert rec.now_playing and rec.now_playing[0] == "Ken Car"   # it did show, after its second hit
-    for _ in range(14):                                     # locked: one ID per 8 s, then hurried
+    for _ in range(20):
         player.tick()
         clock.advance(2)
     assert player.session.is_locked() and player.state.title == "Track 1"   # his record took over
+    assert "Ken Car" not in rec.now_playing and rec.now_playing[0] == "Track 1"   # it never showed
     assert "Ken Car" not in [s[0] for s in rec.scrobbles]
     cap.level = -70
     for _ in range(6):

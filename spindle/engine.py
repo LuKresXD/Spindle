@@ -57,9 +57,11 @@ IdentifyFn = Callable[[Path], TrackInfo | None]
 # fingerprints only serve as anchors, so there is no need to hit AcoustID
 # (and Shazam on every miss) every 2 s.
 LOCKED_IDENTIFY_INTERVAL = 8.0
-UNRESOLVED_HOLD_S = 90.0      # a hit nobody knows must be the only answer this long before it shows
+UNRESOLVED_HOLD_S = 150.0     # a hit nobody knows must be the only answer this long before it shows
+HOLD_IDENTIFY_INTERVAL = 4.0  # while a stranger is held: ask often, his record may be the next answer
 RUNOUT_TICKS = 3              # consecutive ticks of once-a-revolution thumps that end a side
 RUNOUT_WINDOW_S = 45.0        # a lead-out is believed only this close to the last track's end
+UNOWNED_HOLD_S = 45.0         # a session's first hit that is not his record waits this long to show
 HOT_INPUT_DB = -6.0          # RMS this high means the capture is clipping
 
 # Loud is not enough to be music: an empty turntable (motor, preamp, mains) can
@@ -197,6 +199,7 @@ class _Playing:
     since: float = 0.0              # when this track (or the music, if unknown) started
     scrobbled: bool = False
     simple: bool = False            # came from simple mode (no album known)
+    scrobblable: bool = True        # False: a hit no catalogue knows; shown, never sent to Last.fm
     art: Art | None = None
     art_key: tuple = field(default_factory=lambda: ("", ""))
 
@@ -517,8 +520,9 @@ class Player:
         for t, ts in advanced:
             self._scrobble(t, ts)
         predicted = s.get_current_track()
-        if not predicted:
-            return
+        al = s.album_state
+        if not predicted or self._unowned_holding(self.clock(), owned_now=bool(al and al.tracklist.owned)):
+            return                          # a stranger's lock stays off the screen while held
         self._set_playing(predicted, s.current_track_start() or self.clock(), scrobbled=True)
         self._now_playing(predicted)
 
@@ -536,9 +540,15 @@ class Player:
         # A known album still waiting for its confirming ID keeps the fast cadence. One
         # hurried window right after a hit that disagreed with the clock (the record
         # skipped, the needle moved).
-        slow = settled or self._held is not None or self._side_over_by_clock()
-        if slow and not self._id_disagreed \
-                and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL:
+        holding = self._unowned_holding(now) or (
+            self._held is not None and now - self._held[1] < UNRESOLVED_HOLD_S)
+        if holding:
+            interval = HOLD_IDENTIFY_INTERVAL      # a stranger on hold: his record may be the next answer
+        elif settled or self._held is not None or self._side_over_by_clock():
+            interval = LOCKED_IDENTIFY_INTERVAL
+        else:
+            interval = 0.0
+        if interval and not self._id_disagreed and now - self.last_submit_at < interval:
             return False
         self._id_disagreed = False
         if self.capture.buffered_seconds() < self.capture.window_seconds:
@@ -567,6 +577,16 @@ class Player:
             return
         self._apply_identification(res.resolved, res.at, res.art)
 
+    def _unowned_holding(self, now: float, owned_now: bool = False) -> bool:
+        """A first hit that is not his record is still inside its UNOWNED_HOLD_S. `owned_now`:
+        what would be shown is one of his records (a lock on it, or an owned hit): the hold
+        is over, whatever the clock says."""
+        if owned_now:
+            self._first_hit = None
+            return False
+        return (self._first_hit is not None and self.playing.track is None
+                and now - self._first_hit[1] < UNOWNED_HOLD_S)
+
     def _hold_unresolved(self, resolved: Resolved, at: float) -> bool:
         """True while a hit that neither Spotify nor the collection knows is kept off the
         screen and Last.fm. Shazam's catalogue carries user uploads (mashups, "Air Max
@@ -594,20 +614,21 @@ class Player:
         if self._hold_unresolved(resolved, at):
             return
         held_since = self._held[1] if self._held is not None else None
-        # A session's first hit that is not one of his records waits for a second identical
-        # one before it reaches the screen and Last.fm: Shazam's first answer at a needle
-        # drop can be a stranger's upload that resolves fine on Spotify ("TreyWayG - Ken Car"
-        # over Ken Carson's X, 2026-11-08). An owned record shows at once; the session still
-        # hears the first hit, so an album lock is not delayed.
-        unconfirmed = False
-        if (self.playing.track is None and not resolved.owned and not self.dry_run
-                and self._held is None):       # a hit that sat out the 90 s hold is confirmed
-            key = _key(track)
+        # A session's first hit that is not one of his records stays off the screen until it
+        # has been the answer for UNOWNED_HOLD_S: Shazam's answer at a needle drop can be a
+        # stranger's upload that resolves fine on Spotify and keeps coming for half a minute
+        # ("TreyWayG - Ken Car" at the start of both sides of Ken Carson's X, 2026-11-08). An
+        # owned record shows at once; the session still hears every hit, so his record takes
+        # the lock the moment it is identified and the stranger never shows.
+        if (not resolved.owned and self.playing.track is None and not self.dry_run
+                and resolved.reason and self._held is None):   # reason "" = no catalogue asked;
+            key = _key(track)                                  # a held hit is confirmed enough
             if self._first_hit is None or self._first_hit[0] != key:
                 self._first_hit = (key, at)
-                unconfirmed = True
-                logger.info("First hit %s — %s is not in the collection: waiting for a second",
-                            track.artist, track.title)
+                logger.info("First hit %s — %s is not in the collection: shown after %.0fs of it",
+                            track.artist, track.title, UNOWNED_HOLD_S)
+        if held_since is None and self._first_hit is not None:
+            held_since = self._first_hit[1]   # once shown, its play counts from the first hearing
 
         if s and resolved.has_album and not self.dry_run:
             was_locked = s.is_locked()
@@ -635,8 +656,12 @@ class Player:
             self._set_playing(cur, at)
             self._take_art(art, track)
             return
-        if unconfirmed and not (s and s.is_locked()):
-            return                          # nothing on the screen yet; a lock would have counted
+        # what would reach the screen now: his record (a lock on it, or an owned hit) ends
+        # any hold; a stranger, held, stays off the screen (the session listens on)
+        locked = bool(s and s.is_locked() and s.album_state)
+        owned_now = s.album_state.tracklist.owned if locked else resolved.owned   # what the screen would show
+        if self._unowned_holding(at, owned_now=owned_now):
+            return
 
         if s and s.is_locked():
             predicted = s.get_current_track() or track
@@ -653,6 +678,12 @@ class Player:
             pass
         else:
             self._simple_mode(track, at, since=held_since)
+            if self._held is not None and self.playing.scrobblable:
+                # nobody knows this one: Spotify not, the collection not. It can be on the
+                # screen; it does not go to Last.fm (a stranger's upload that matched three
+                # minutes of a side went there as a 3-minute play, 2026-11-08)
+                self.playing.scrobblable = False
+                logger.info("Not scrobbling %s — %s: unknown to every catalogue", track.artist, track.title)
         self._take_art(art, track)
 
     def _take_art(self, art: Art | None, identified: TrackInfo) -> None:
@@ -680,18 +711,21 @@ class Player:
             self._finalize_simple(now)
             self._set_playing(track, now if since is None else since, scrobbled=False, simple=True)
             logger.info("Now playing: %s - %s", track.artist, track.title)
-            self._now_playing(track)
+            if self._held is None:                 # a hit nobody knows is not announced either
+                self._now_playing(track)
         else:
-            if not p.scrobbled and self._eligible(cur, p.since, now):
+            if not p.scrobbled and p.scrobblable and self._eligible(cur, p.since, now):
                 self._scrobble(cur, p.since)
                 p.scrobbled = True
-            self._now_playing(track)
+            if p.scrobblable:
+                self._now_playing(track)
 
     def _set_playing(self, track: TrackInfo, since: float, scrobbled: bool = False,
                      simple: bool = False) -> None:
         p = self.playing
         if p.track is None or _key(p.track) != _key(track):
             p.since = since
+            p.scrobblable = True
         p.track = track
         p.scrobbled = scrobbled
         p.simple = simple
@@ -732,7 +766,7 @@ class Player:
     def _finalize_simple(self, now: float) -> None:
         """Scrobble a simple-mode track that is ending (silence, lock, next track)."""
         p = self.playing
-        if self.dry_run or p.track is None or not p.simple or p.scrobbled:
+        if self.dry_run or p.track is None or not p.simple or p.scrobbled or not p.scrobblable:
             return
         if self.session and self.session.already_scrobbled(p.track):
             p.scrobbled = True                           # the album session counted it already
