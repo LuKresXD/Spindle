@@ -1095,8 +1095,10 @@
     const home = () => { if (pageIndex !== SPINDLE) toPage("spindle"); };
     switch (cmd) {
       case "page/off": case "page/spindle": case "page/claw": toPage(cmd.slice(5)); break;
+      case "page/toggle": toPage(pageIndex === CLAW ? "spindle" : "claw"); break;   // Off goes to Claw too
       case "view/tracks": if (playing) { home(); closeSheet(); toggleLyrics(false); } break;
       case "view/lyrics": if (playing) { home(); closeSheet(); toggleLyrics(true); } break;
+      case "view/toggle": if (playing) { home(); closeSheet(); toggleLyrics(); } break;
       case "view/info": if (playing) { home(); if (sheetOpen) closeSheet(); else openSheet(); } break;
       case "info/open": if (playing) { home(); openSheet(); } break;
       case "info/close": closeSheet(); break;

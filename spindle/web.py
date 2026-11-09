@@ -23,9 +23,10 @@ the rest on demand.
                                stretches to the whole screen as the backdrop (no CSS blur)
   GET /art/<key>.blur.jpg      the same backdrop copy for the cover on screen
   GET|POST /api/ui/<command>   the remote: a phone Shortcut steers the screen (?k=<remote_key>).
-                               page/off|spindle|claw · view/tracks|lyrics|info · info/open|close ·
-                               pick · shelf · recent · back · wake. The command rides the event
-                               stream to the page as an "ui" event.
+                               page/off|spindle|claw|toggle (toggle = Spindle <-> Claw) ·
+                               view/tracks|lyrics|toggle|info · info/open|close · pick · shelf ·
+                               recent · back · wake. The command rides the event stream to the
+                               page as an "ui" event; the page resolves the toggles.
   GET /api/debug/capture.wav   the last seconds the engine heard (?seconds=N, needs the key)
   GET /api/debug/pulse         the lead-out detector's live reading (needs the key)
 
@@ -1053,8 +1054,9 @@ def sse_event(name: str, payload: dict) -> bytes:
     return b"event: " + name.encode() + b"\ndata: " + json.dumps(payload).encode() + b"\n\n"
 
 
-UI_COMMANDS = ("page/off", "page/spindle", "page/claw", "view/tracks", "view/lyrics",
-               "view/info", "info/open", "info/close", "pick", "shelf", "recent", "back", "wake")
+UI_COMMANDS = ("page/off", "page/spindle", "page/claw", "page/toggle",
+               "view/tracks", "view/lyrics", "view/toggle", "view/info", "info/open", "info/close",
+               "pick", "shelf", "recent", "back", "wake")
 
 
 class WebServer(ThreadingHTTPServer):
