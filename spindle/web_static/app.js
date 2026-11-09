@@ -389,7 +389,10 @@
           el.remaining.textContent = state.track_duration ? "-" + mmss(state.track_duration - p) : "";
         }
       }
-      if (now - lastSide > 5000) { lastSide = now; renderSide(state, state.tracklist || []); }
+      // minutes refresh every 5 s; once the pill counts seconds (under 90 s left) it ticks every
+      // second, or it would jump five at a time (Luka, 2026-11-08)
+      const sideEvery = (el.sidetext.dataset.mode || "").endsWith("|s") ? 1000 : 5000;
+      if (now - lastSide > sideEvery) { lastSide = now; renderSide(state, state.tracklist || []); }
       if (lyricsOn && lyrics && p != null) highlightLyric(p + lyricLead());
       if (!flip && state.start_exact && state.deck_speed && state.track_duration && serverState) {
         const raw = rawPosition();
