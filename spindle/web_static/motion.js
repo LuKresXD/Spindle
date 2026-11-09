@@ -89,15 +89,15 @@ window.Motion = (() => {
     function to(btn) {
       if (!btn) { fade(ind, 0, { duration: 0.2 }); current = null; return; }
       if (!current || gsap.getProperty(ind, "opacity") === 0) { place(btn); return; }
-      const from = rect(current), r = rect(btn);
-      const dir = Math.sign(r.left - from.left) || 1;
+      const r = rect(btn);
       current = btn;
       gsap.killTweensOf(ind);
+      // one slide with a spring-like overshoot that settles ON the button (two x tweens used
+      // to overlap and the overshoot outlived the correction: the pill sat 10 px off)
       gsap.timeline()
-        .to(ind, { x: r.left + dir * 10, width: r.width, duration: D(0.35), ease: "house" }, 0)
-        .to(ind, { scaleY: 0.86, duration: D(0.15), ease: "power2.out" }, 0)
-        .to(ind, { x: r.left, duration: D(0.25), ease: "power2.out" }, ">-0.08")
-        .to(ind, { scaleY: 1, duration: D(0.45), ease: "elastic.out(1, 0.5)" }, "<");
+        .to(ind, { x: r.left, width: r.width, duration: D(0.55), ease: "back.out(1.6)" }, 0)
+        .to(ind, { scaleY: 0.86, duration: D(0.14), ease: "power2.out" }, 0)
+        .to(ind, { scaleY: 1, duration: D(0.5), ease: "elastic.out(1, 0.5)" }, 0.14);
     }
     return { place, to };
   }

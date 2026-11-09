@@ -413,7 +413,7 @@
 
   async function loadLyrics(st) {
     const key = `${st.artist}|${st.title}|${st.track_duration || ""}`;
-    if (key === lyricsFor && lyrics) { renderLyrics(); return; }
+    if (key === lyricsFor && lyrics) return;                  // rendered already: nothing to rebuild
     lyricsFor = key; lyrics = null; lyricIndex = -1;
     el.lyriclines.innerHTML = `<div class="lyric empty">Finding lyrics…</div>`;
     M.gsap.set(el.lyriclines, { y: 0 });
@@ -438,7 +438,6 @@
     }
     el.lyriclines.innerHTML = lyrics.synced.map(([, line]) => `<div class="lyric">${esc(line) || "♪"}</div>`).join("");
     lyricIndex = -1;
-    if (lyricsOn) M.arrive([...el.lyriclines.children].slice(0, 12), { y: 30, stagger: 0.035, duration: 0.8 });
   }
 
   function highlightLyric(p) {
@@ -474,10 +473,12 @@
     lyricsOn = on == null ? !lyricsOn : on;
     el.btnLyrics.classList.toggle("on", lyricsOn);
     el.btnTracklist.classList.toggle("on", !lyricsOn);
-    el.lyrics.classList.toggle("hidden", !lyricsOn);
-    el.list.classList.toggle("hidden", lyricsOn);
+    el.lyrics.classList.toggle("off", !lyricsOn);
+    el.list.classList.toggle("off", lyricsOn);
     trayState();
-    if (lyricsOn && state) { loadLyrics(state); if (lyrics) M.arrive([...el.lyriclines.children].slice(0, 12), { y: 30, stagger: 0.035, duration: 0.8 }); }
+    // the panels are layers: the switch is a rise and a fade of the whole panel, never a
+    // rebuild of its lines or a layout of the home
+    if (lyricsOn && state) { loadLyrics(state); M.arrive(el.lyrics, { y: 24, duration: 0.7 }); }
     else if (!lyricsOn) M.arrive(el.list, { y: 16, duration: 0.7 });
   }
 
@@ -488,8 +489,7 @@
     el.btnInfo.classList.add("on");
     trayState();
     el.body.classList.add("sheet-open");
-    el.sheet.classList.remove("hidden");
-    requestAnimationFrame(() => el.sheet.classList.add("open"));
+    el.sheet.classList.add("open");                         // parked below the screen, already laid out
     await loadInfo(true);
   }
 
@@ -518,7 +518,6 @@
     trayState();
     el.body.classList.remove("sheet-open");
     el.sheet.classList.remove("open");
-    setTimeout(() => { if (!sheetOpen) el.sheet.classList.add("hidden"); }, 620);
   }
 
   const sec = (h, body) => `<div class="sec"><h2>${esc(h)}</h2>${body}</div>`;
@@ -563,7 +562,20 @@
     return `<div class="chip">${art}<div><div class="st">${esc(sm.title || "")}</div><div class="sb">${esc(sm.artist || "")}</div></div></div>`;
   }
 
+  let infoRendered = "";
   function renderInfo(opening) {
+    // the sheet is rebuilt only when what it shows changed; opening it again is a slide and
+    // the arrival of the sections, never a parse of the tiles mid-slide (lag on the Pi)
+    const renderKey = [infoFor, trackFor, !!info, !!trackInfo, state && state.art, state && state.position,
+                       state && state.album, state && state.title].join("|");
+    const fresh = renderKey !== infoRendered;
+    infoRendered = renderKey;
+    if (!fresh) {
+      if (opening) M.arrive([el.tiles.querySelector(".mast"), ...el.tiles.querySelectorAll(".sec")], { y: 28, stagger: 0.06, delay: 0.15 });
+      const num0 = el.tiles.querySelector(".hist b");
+      if (num0 && info && sheetOpen && !countedFor.has(infoFor + "|" + trackFor)) { countedFor.add(infoFor + "|" + trackFor); M.countUp(num0, num0.textContent, { delay: 0.25 }); }
+      return;
+    }
     const pr = info && info.pressing, g = trackInfo || {}, loading = !info;
     const art = (state && state.art) ? `/art/${state.art}.jpg` : "";
     const kick = (state && state.position) ? `The record · ${esc(state.position)}` : "The record";
@@ -598,7 +610,7 @@
 
     const about = (info && info.story && info.story.text) ? esc(info.story.text) : "";
     el.tiles.innerHTML = mast + `<div class="cols"><div class="col">` +
-      sec(`On this track · ${state ? splitFeat(state.title).main : ""}`, `<div class="story">${story}</div>`) +
+      sec(`On this track · ${state ? (state.base || splitFeat(state.title).main) : ""}`, `<div class="story">${story}</div>`) +
       sec("Credits", `<div class="cred">${credits}</div>`) +
       `</div><div class="col">` +
       (samples ? sec("Samples", `<div class="samples">${samples}</div>`) : "") +

@@ -81,6 +81,11 @@ body.phase-playing .veil { opacity: 1; }
   transform: scaleX(0); transform-origin: left center; will-change: transform; }
 .times { display: flex; justify-content: space-between; margin-top: 18px; font-size: 24px; }
 
+/* the two views share one cell and swap by opacity (no display toggle: showing a panel
+   used to lay the whole home out again and ran the switch at 30 fps on the Pi) */
+.right { display: grid; align-items: center; }
+.right > .list, .right > .lyrics { grid-area: 1 / 1; will-change: transform, opacity; }
+.right > .off { visibility: hidden; opacity: 0; pointer-events: none; }
 .list { padding: 18px; display: flex; flex-direction: column; gap: 6px; }
 .row { display: grid; grid-template-columns: 64px 1fr auto; align-items: center; gap: 22px;
   padding: 18px 26px; border-radius: 22px; font-size: 32px; transition: background .35s var(--ease), color .35s var(--ease); }
@@ -132,6 +137,8 @@ body.phase-playing .veil { opacity: 1; }
   scrollbar-width: none; contain: content; }
 .sheet-scroll::-webkit-scrollbar { display: none; }
 .sheet.open { transform: translateY(0); }
+.sheet:not(.open) { pointer-events: none; }
+.sheet .mast, .sheet .sec { will-change: transform, opacity; }   /* the sections arrive as layers */   /* parked below the screen, never display:none (a show = a full layout) */
 .grab { width: 76px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.4); margin: 0 auto 34px; }
 
 /* masthead */
