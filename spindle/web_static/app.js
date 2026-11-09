@@ -76,6 +76,8 @@
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
+  // "A", "A and B", "A, B and C": never "A and B and C"
+  const listWords = (xs) => (xs.length <= 2 ? xs.join(" and ") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
   const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const serverNow = () => Date.now() / 1000 - clockOffset;
@@ -959,7 +961,7 @@
     el.recentlist.innerHTML = rows.map((r) => {
       const rel = r.release;
       const art = rel && rel.cover ? `<img src="${esc(tileUrl(rel.cover))}" alt="">` : `<div class="ph"></div>`;
-      const n = r.whole ? "Whole record" : (r.sides && r.sides.length) ? `Side${r.sides.length > 1 ? "s" : ""} ${r.sides.join(" and ")}`
+      const n = r.whole ? "Whole record" : (r.sides && r.sides.length) ? `Side${r.sides.length > 1 ? "s" : ""} ${listWords(r.sides)}`
         : `${r.tracks} track${r.tracks === 1 ? "" : "s"}`;
       return `<div class="rrow ${rel ? "" : "off"}" ${rel ? `data-id="${rel.id}"` : ""}>${art}<div><div class="rt">${esc(r.album)}</div><div class="ra">${esc(r.artist)}</div></div><div class="rw">${esc(fmtDay(r.last_played))}<br>${n}</div></div>`;
     }).join("");
