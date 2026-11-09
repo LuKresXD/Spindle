@@ -65,6 +65,7 @@ class SpotifyCandidate:
 
     def to_track(self) -> TrackInfo:
         return TrackInfo(title=self.name, artist=self.artist, album=self.album_name,
+                         artists=list(self.artists),
                          duration=self.duration, source="spotify_lookup", confidence=1.0)
 
 
@@ -217,6 +218,7 @@ class SpotifyClient:
             tracks.append(TrackInfo(
                 title=item.get("name", ""), artist=artist_name, album=album_name,
                 duration=duration_s, source="spotify_album", confidence=1.0,
+                artists=[a.get("name", "") for a in item.get("artists", []) or []],
             ))
         tl = AlbumTracklist(
             album_id=album_id, album_name=album_name, artist=album_artist, tracks=tracks,

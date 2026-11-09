@@ -26,6 +26,9 @@ class TrackRow:
     duration: int | None = None     # seconds
     position: str = ""              # vinyl position from Discogs, e.g. "A3"
     scrobbled: bool = False
+    base: str = ""                  # the song without credits or edition ("Demonz")
+    featured: list[str] = field(default_factory=list)
+    version: str = ""               # "Interlude", "2017 Remaster", ... or ""
 
 
 @dataclass
@@ -37,9 +40,14 @@ class ScreenState:
     deck_speed: float | None = None # measured turntable speed, 1.03 = 3 % fast (None = unknown)
 
     artist: str = ""
-    title: str = ""
+    title: str = ""                 # as scrobbled: credits and edition included
     album: str = ""
     year: str = ""
+    # for the screen: the song, its features and its edition taken apart (spindle.titles)
+    base: str = ""
+    featured: list[str] = field(default_factory=list)
+    version: str = ""
+    album_display: str = ""         # the album without its edition tag
     art: bytes | None = None        # cover image bytes (any format PIL reads)
     art_source: str = ""            # "itunes" / "spotify" / ""
 

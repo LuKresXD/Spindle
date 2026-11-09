@@ -72,6 +72,8 @@ body.phase-playing .veil { opacity: 1; }
 .artist { font-weight: 500; color: rgba(255,255,255,.80); letter-spacing: -0.01em; font-size: 50px; margin-top: 12px; }
 .feat { font-weight: 500; color: rgba(255,255,255,.55); font-size: 30px; margin-top: 8px; }
 .feat:empty { display: none; }
+/* a row's edition tag: small and quiet after the song */
+.row .ver { font-style: normal; font-weight: 500; font-size: .7em; color: rgba(255,255,255,.42); margin-left: 12px; }
 .meta { font-weight: 500; color: var(--text-dim); }
 .progress { margin-top: 62px; }
 .track { position: relative; height: 7px; border-radius: 4px; background: rgba(255,255,255,.26); overflow: hidden; }

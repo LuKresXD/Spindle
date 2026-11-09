@@ -126,9 +126,11 @@ window.Motion = (() => {
     };
   }
 
-  // ── pages: the incoming page slides over the outgoing one, which recedes ─────
+  // ── pages: three peers side by side, moving as one strip under the finger ────────
   // layout(prog, dir, outgoing, incoming): prog 0..1 of the way, dir +1 = incoming from the right.
-  const PARALLAX = 0.35, DIM = 0.6;
+  // Peer pages move at one speed and nothing dims (the home-screen way, Luka's pick 2026-11-08);
+  // the push look (incoming over a receding, dimming outgoing page) was PARALLAX 0.35 / DIM 0.6.
+  const PARALLAX = 1, DIM = 0;
   function pageLayout(W, prog, dir, outgoing, incoming, dims) {
     gsap.set(incoming, { x: dir * W * (1 - prog), zIndex: 2, visibility: "visible" });
     gsap.set(outgoing, { x: -dir * W * PARALLAX * prog, zIndex: 1, visibility: "visible" });

@@ -51,6 +51,7 @@ import requests
 from .config import WebConfig
 from .discogs import clean_artist
 from .state import ScreenState
+from .titles import clean_album, split_title
 from .tracklist import side_of, titles_match
 
 logger = logging.getLogger(__name__)
@@ -209,20 +210,25 @@ class Lyrics:
         return result
 
     def _fetch(self, artist: str, title: str, album: str, duration: float | None) -> dict:
-        params: dict[str, Any] = {"artist_name": artist, "track_name": title}
-        if album:
-            params["album_name"] = album
-        if duration:
-            params["duration"] = int(round(duration))
+        # the exact catalogue name first (LRCLIB is keyed on it), then the bare song, whose
+        # lyrics are the same whatever the edition tag or the credits in the title
+        base = split_title(title).base
         hit: dict | None = None
-        r = self._http.get(f"{LRCLIB}/get", params=params, timeout=HTTP_TIMEOUT)
-        if r.status_code == 200:
-            cand = r.json()
-            if cand.get("syncedLyrics"):
-                hit = cand
+        for name in dict.fromkeys([title, base]):
+            params: dict[str, Any] = {"artist_name": artist, "track_name": name}
+            if album:
+                params["album_name"] = album
+            if duration:
+                params["duration"] = int(round(duration))
+            r = self._http.get(f"{LRCLIB}/get", params=params, timeout=HTTP_TIMEOUT)
+            if r.status_code == 200:
+                cand = r.json()
+                if cand.get("syncedLyrics"):
+                    hit = cand
+                    break
         if hit is None:
             r = self._http.get(f"{LRCLIB}/search",
-                               params={"artist_name": artist, "track_name": title},
+                               params={"artist_name": artist, "track_name": base},
                                timeout=HTTP_TIMEOUT)
             r.raise_for_status()
             synced = [c for c in r.json() if c.get("syncedLyrics")]
@@ -384,9 +390,8 @@ _URL_RE = re.compile(r"https?://\S+")
 # Genius hosts fan translations ("… Türkçe Çeviriler", "… Traducciones") whose
 # full_title still names the real artist — never let one win the song match.
 _TRANSLATION_RE = re.compile(r"genius|[çc]eviri|traduc|translation|перевод", re.I)
-# Genius ranks a song under its bare title; searching the full "(feat. X)" title
-# surfaces only fan-translation pages. Strip the feature suffix for the search.
-_FEAT_RE = re.compile(r"\s*[\(\[]\s*(feat|ft|featuring|with|w/)\b.*$", re.I)
+# Genius ranks a song under its bare title; searching the full "(feat. X) - Interlude"
+# title surfaces only fan-translation pages. The search uses the song alone (spindle.titles).
 
 
 def _dom_text(node: Any) -> str:
@@ -437,7 +442,7 @@ class Genius:
         return result
 
     def _fetch(self, artist: str, title: str) -> dict:
-        search_title = _FEAT_RE.sub("", title).strip() or title
+        search_title = split_title(title).base or title
         r = self._http.get(f"{GENIUS}/search/multi", params={"q": f"{artist} {search_title}"},
                            timeout=HTTP_TIMEOUT)
         r.raise_for_status()
@@ -722,7 +727,7 @@ class Shelf:
             if self.collection is not None:
                 with contextlib.suppress(Exception):
                     rel = self.collection.find_release(entry.artist, album)
-            item = {"key": key, "artist": clean_artist(entry.artist), "album": album,
+            item = {"key": key, "artist": clean_artist(entry.artist), "album": clean_album(album),
                     "last_played": entry.timestamp, "titles": {entry.title.lower()}, "rel": rel}
             by_key[key] = item
             out.append(item)

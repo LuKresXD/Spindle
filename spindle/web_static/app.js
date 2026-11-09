@@ -216,20 +216,23 @@
     if (key !== trackKey) {
       trackKey = key;
       trackChangedAt = performance.now();
-      const { main, feat } = splitFeat(st.title);
-      el.title.textContent = main;
+      // the server takes the title apart (spindle.titles); the old splitter is the fallback
+      const parts = st.base ? { main: st.base, feat: (st.featured || []).join(", "), version: st.version || "" }
+                            : { ...splitFeat(st.title), version: "" };
+      el.title.textContent = parts.main;
       fitTitle(el.title);
       el.artist.textContent = st.artist || "";
-      el.feat.textContent = feat ? `feat. ${feat}` : "";
+      const sub = [parts.version, parts.feat ? `feat. ${parts.feat}` : ""].filter(Boolean).join(" · ");
+      el.feat.textContent = sub;
       M.revealLines(el.title);
       M.revealLines(el.artist, { delay: 0.08 });
-      if (feat) M.arrive(el.feat, { delay: 0.18, y: 14 });
+      if (sub) M.arrive(el.feat, { delay: 0.18, y: 14 });
       lyricIndex = -1;
       loadLyrics(st);      // into the hidden panels too, so Lyrics and Info open instantly
       loadInfo();
       warmNextLyrics(st);
     }
-    el.albumline.textContent = [st.album, st.year].filter(Boolean).join(" · ");
+    el.albumline.textContent = [st.album_display || st.album, st.year].filter(Boolean).join(" · ");
 
     if (st.art && st.art !== artKey) {
       artKey = st.art;
@@ -311,7 +314,9 @@
     el.list.innerHTML = shown.map(({ r, i }) => {
       const cls = i === cur ? "cur" : (r.scrobbled ? "done" : "");
       const pos = r.position || String(i + 1).padStart(2, "0");
-      return `<div class="row ${cls}"><span class="pos">${esc(pos)}</span><span class="name">${esc(splitFeat(r.title).main)}</span><span class="dur">${r.duration ? mmss(r.duration) : ""}</span></div>`;
+      const name = r.base || splitFeat(r.title).main;
+      const ver = r.version ? `<i class="ver">${esc(r.version)}</i>` : "";
+      return `<div class="row ${cls}"><span class="pos">${esc(pos)}</span><span class="name">${esc(name)}${ver}</span><span class="dur">${r.duration ? mmss(r.duration) : ""}</span></div>`;
     }).join("");
     if (ind) el.list.prepend(ind);
     const curRow = el.list.querySelector(".row.cur");
@@ -456,10 +461,15 @@
   // own button (lit while the sheet is up) and never moves the tray
   const cornerTray = M.tray(el.viewtray);
   let trayPlaced = false;
+  const viewBtn = () => (lyricsOn ? el.btnLyrics : el.btnTracklist);
   function trayState() {
-    const btn = lyricsOn ? el.btnLyrics : el.btnTracklist;
-    if (!trayPlaced) { trayPlaced = true; cornerTray.place(btn); } else cornerTray.to(btn);
+    if (!trayPlaced) { trayPlaced = true; cornerTray.place(viewBtn()); } else cornerTray.to(viewBtn());
   }
+  // the indicator is a snapshot of the button's box: seat it again once the real font is in
+  // (the first paint can run on the fallback font and leave it a few pixels off) and on resize
+  const reseatTray = () => { if (trayPlaced) cornerTray.place(viewBtn()); };
+  document.fonts.ready.then(reseatTray);
+  window.addEventListener("resize", reseatTray);
   function toggleLyrics(on) {
     lyricsOn = on == null ? !lyricsOn : on;
     el.btnLyrics.classList.toggle("on", lyricsOn);

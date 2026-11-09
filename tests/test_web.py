@@ -21,7 +21,7 @@ def test_state_payload_is_json_safe_and_drops_bytes():
     d = state_payload(_state(), now=1234.5)
     assert d["phase"] == "playing" and d["art"] is None and d["server_time"] == 1234.5
     assert d["tracklist"][0] == {"title": "Track 1", "duration": 100, "position": "A1",
-                                 "scrobbled": True}
+                                 "scrobbled": True, "base": "", "featured": [], "version": ""}
     json.dumps(d)
 
 

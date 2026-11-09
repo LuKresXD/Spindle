@@ -265,9 +265,10 @@ def test_forward_fill_scrobbles_a_cut_short_track_only_if_it_played_enough(clock
     assert s.album_state.current_index == 2 and s.album_state.scrobbled == set()
 
 
-def test_lagging_id_of_the_track_that_just_ended_keeps_its_start(clock, album):
-    """The capture window trails the audio: Track 1 is heard again right after
-    the clock moved on. Nothing re-scrobbles and no timestamp moves."""
+def test_id_of_the_track_that_just_ended_is_an_echo_when_the_window_straddled_it(clock, album):
+    """The capture window trails the audio: Track 1 is heard again right after the clock
+    moved on. The window began before Track 1's predicted end, so the clock is right:
+    nothing moves, nothing re-scrobbles (moving back for a tick showed the old track)."""
     s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
     music_start = clock.t
     clock.advance(4)
@@ -275,19 +276,34 @@ def test_lagging_id_of_the_track_that_just_ended_keeps_its_start(clock, album):
     clock.advance(115 + 5 - 4)
     assert [t.title for t, _ in s.check_advance()] == ["Track 1"]
     assert s.get_current_track().title == "Track 2"
-    clock.advance(3)
+    t2_start = s.album_state.current_track_start
+    clock.advance(3)                                               # a 6 s window that began at 117
+    assert confirmed(s, album, "Track 1", music_start) == []     # the echo
+    assert s.get_current_track().title == "Track 2"              # stays put
+    assert s.album_state.current_track_start == t2_start
+    assert s.check_advance() == []
+    clock.advance(72 + 3)
+    out = confirmed(s, album, "Track 3", music_start)
+    assert [(t.title, ts) for t, ts in out] == [("Track 2", t2_start)]  # in order, in the past
+    assert out[0][1] < clock.t
+
+
+def test_lagging_id_well_past_the_boundary_re_syncs_the_clock(clock, album):
+    """Heard again 20 s after the clock ended it, from a window that began well after that
+    end: the timing model ran fast, Track 1 is really still playing. The start is kept."""
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock)
+    music_start = clock.t
+    clock.advance(4)
+    confirmed(s, album, "Track 1", music_start)
+    clock.advance(115 + 5 - 4)
+    assert [t.title for t, _ in s.check_advance()] == ["Track 1"]
+    clock.advance(20)
     assert confirmed(s, album, "Track 1", music_start) == []     # the lagging ID
     assert s.get_current_track().title == "Track 1"
     assert s.album_state.current_track_start == music_start      # start kept, not "now"
     assert s.check_advance() == []                               # re-advances, no second scrobble
     assert s.get_current_track().title == "Track 2"
-    t2_start = s.album_state.current_track_start
-    assert t2_start == clock.t
-    clock.advance(72 + 6)
-    out = confirmed(s, album, "Track 3", music_start)
-    assert [(t.title, ts) for t, ts in out] == [("Track 2", t2_start)]  # in order, in the past
-    assert out[0][1] < clock.t
-
+    assert s.album_state.current_track_start == clock.t
 
 def test_restarting_the_side_scrobbles_it_again(clock, album):
     """Three tracks play, the needle goes back to the first: a second play."""

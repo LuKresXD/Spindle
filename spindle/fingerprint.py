@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import acoustid
@@ -37,6 +37,9 @@ class TrackInfo:
     # it; AcoustID does not). Two identifications whose offsets advance with the clock
     # pin the track's position; a repeated section can make a single one lie.
     offset: float | None = None
+    # the catalogue's own artist list for the track, primary first, when a streaming
+    # lookup supplied one ("Juice WRLD", "Brent Faiyaz"); empty for fingerprint hits
+    artists: list[str] = field(default_factory=list)
 
 
 # ── Corrections ──────────────────────────────────────────────────────────────

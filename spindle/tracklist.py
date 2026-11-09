@@ -137,7 +137,7 @@ def merge(streaming: AlbumTracklist, pressing: AlbumTracklist) -> AlbumTracklist
             tracks.append(TrackInfo(
                 title=match.title, artist=match.artist, album=streaming.album_name,
                 duration=match.duration or dt.duration, mbid=match.mbid,
-                source="spotify_album", confidence=1.0,
+                source="spotify_album", confidence=1.0, artists=list(match.artists),
             ))
         else:
             tracks.append(TrackInfo(

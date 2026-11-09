@@ -41,6 +41,7 @@ from .resolve import ResolveContext, Resolved, Resolver
 from .scrobbler import Scrobbler
 from .session import ScrobbleSession, SessionMode, _artist_key, normalize_title
 from .state import Phase, ScreenState, TrackRow
+from .titles import clean_album, split_title
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,13 @@ class _Playing:
     simple: bool = False            # came from simple mode (no album known)
     art: Art | None = None
     art_key: tuple = field(default_factory=lambda: ("", ""))
+
+
+
+def _track_row(tr: TrackInfo, position: str, scrobbled: bool) -> TrackRow:
+    parts = split_title(tr.title, tr.artists or [tr.artist])
+    return TrackRow(title=tr.title, duration=tr.duration, position=position, scrobbled=scrobbled,
+                    base=parts.base, featured=list(parts.featured), version=parts.version)
 
 
 class Player:
@@ -640,6 +648,8 @@ class Player:
             return st
 
         st.artist, st.title, st.album = t.artist, t.title, t.album or ""
+        parts = split_title(t.title, t.artists or [t.artist])
+        st.base, st.featured, st.version = parts.base, list(parts.featured), parts.version
         if self.playing.art:
             st.art, st.art_source = self.playing.art.data, self.playing.art.source
 
@@ -651,8 +661,8 @@ class Player:
             st.album = tl.album_name or st.album
             recent = self._recently_scrobbled(tl.artist, now)
             st.tracklist = [
-                TrackRow(title=tr.title, duration=tr.duration, position=tl.position_at(i),
-                         scrobbled=i in al.scrobbled or normalize_title(tr.title) in recent)
+                _track_row(tr, tl.position_at(i),
+                           i in al.scrobbled or normalize_title(tr.title) in recent)
                 for i, tr in enumerate(tl.tracks)
             ]
             st.current_index = al.current_index
@@ -676,6 +686,7 @@ class Player:
             st.session_scrobbles = s.comp_scrobbled_count if s else int(self.playing.scrobbled)
 
         self._enrich(st)
+        st.album_display = clean_album(st.album)
         return st
 
     def _announce_side_end(self, al: Any, scrobbled: int) -> None:

@@ -72,6 +72,7 @@ ADVANCE_BUFFER_EXACT = 0.5   # ... once the start is pinned AND the deck speed i
 ADVANCE_BUFFER_MAX   = 15    # max seconds past duration before auto-advance
 FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when nobody knows (4 min)
 REPLAY_SLACK         = 45    # s past a track's end: a backwards anchor is a replay, not lag
+BOUNDARY_ECHO_SLACK  = 2     # s: a window that began this close to a track's end still heard it
 OFFSET_TOLERANCE     = 5     # s: two offsets of one run must advance with the clock this closely
 START_SNAP           = 1.0   # s: adopt the offset start when it differs from the clock by more
 START_SAMPLES        = 5     # the start is the median of the newest this many offset estimates
@@ -795,9 +796,17 @@ class ScrobbleSession:
             self._set_current(track_index, start if start is not None else heard,
                               exact=start is not None)
         elif now - (prev_start + duration) <= REPLAY_SLACK and start is None:
-            logger.info("Session: lagging ID of track %d (clock is on %d), re-syncing",
-                        track_index + 1, al.current_index + 1)
-            self._set_current(track_index, prev_start)
+            ended = prev_start + duration
+            if now - self.window_seconds <= ended + BOUNDARY_ECHO_SLACK:
+                # the sample window began before (or right at) the end the clock predicted:
+                # it still carried the last seconds of that track. The clock is right and
+                # nothing moves (moving back for a tick showed the old track again, 2026-11-08)
+                logger.debug("Session: boundary echo of track %d (clock is on %d)",
+                             track_index + 1, al.current_index + 1)
+            else:
+                logger.info("Session: lagging ID of track %d (clock is on %d), re-syncing",
+                            track_index + 1, al.current_index + 1)
+                self._set_current(track_index, prev_start)
         else:
             result.extend(self._finalize_album_current(now))
             replayed = sorted(i for i in al.scrobbled if i >= track_index)
