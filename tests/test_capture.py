@@ -119,3 +119,35 @@ def test_set_capture_gain_runs_amixer_and_reads_back(monkeypatch):
     assert calls[1][:4] == ["amixer", "-D", "hw:CARD=Device", "sget"]
     assert rb and "20.00dB" in rb
     assert set_capture_gain("default", "Mic", 20) is None          # no card to address
+
+
+def _pcm(mono, sr=44100, ch=2):
+    return np.repeat((np.clip(mono, -1, 1) * 32767).astype(np.int16), ch).tobytes()
+
+
+def _noise(n, amp, seed):
+    return np.random.default_rng(seed).normal(0, amp, n)
+
+
+def test_revolution_pulse_hears_the_lead_out_and_not_music():
+    from spindle.capture import is_runout, revolution_pulse
+    sr = 44100
+    t = np.arange(int(10 * sr)) / sr
+    # the lead-out: surface noise with one thump every 1.8 s (33 rpm, a touch slow), 40 ms long
+    runout = _noise(len(t), 0.004, 1)
+    for k in range(6):
+        at = int((0.4 + k * 1.82) * sr)
+        runout[at:at + int(0.04 * sr)] += _noise(int(0.04 * sr), 0.25, 10 + k)
+    pulse, duty = revolution_pulse(_pcm(runout), sr, 2)
+    assert pulse > 0.6 and duty < 0.1 and is_runout(pulse, duty)
+    # music: a dense envelope with a beat every 0.5 s on top of sustained sound
+    music = _noise(len(t), 0.12, 2) * (0.7 + 0.3 * np.sin(2 * np.pi * t / 0.5))
+    pulse, duty = revolution_pulse(_pcm(music), sr, 2)
+    assert duty > 0.3 and not is_runout(pulse, duty)
+    # an empty turntable's steady hum: nothing repeats, nothing sparse
+    hum = 0.02 * np.sin(2 * np.pi * 50 * t) + _noise(len(t), 0.003, 3)
+    pulse, duty = revolution_pulse(_pcm(hum), sr, 2)
+    assert not is_runout(pulse, duty)
+    # too little audio: no verdict
+    assert revolution_pulse(_pcm(runout[: int(0.1 * sr)]), sr, 2) == (0.0, 0.0)
+    assert revolution_pulse(b"", sr, 2) == (0.0, 0.0)

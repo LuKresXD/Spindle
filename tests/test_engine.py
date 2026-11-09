@@ -25,6 +25,11 @@ class FakeCapture:
     def motion(self, seconds=None):
         return self.motion_value
 
+    runout_value = (0.0, 0.0)            # (pulse, duty): no lead-out thumps unless a test says so
+
+    def runout(self, seconds=None):
+        return self.runout_value
+
     def buffered_seconds(self):
         return 10.0
 
@@ -436,3 +441,57 @@ def test_known_album_is_not_held_and_clears_a_hold(tmp_path):
         clock.advance(2)
     assert st.phase == Phase.PLAYING and st.title == "Track 2" and st.album == "Madvillainy"
     assert player.session.is_locked() and player._held is None
+
+
+def test_lead_out_thumps_end_the_side_and_never_start_one(tmp_path):
+    """The needle reaches the lead-out: loud thumps once a revolution, never silence. The
+    side ends on them instead of waiting for the needle to be lifted, and the thumps that
+    follow do not start a session."""
+    clock = FakeClock()
+    def identify(path):
+        return TrackInfo(title="Track 3", artist="Madvillain", album="Madvillainy", duration=109)
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -20
+    for _ in range(6):                                                 # two IDs confirm the lock
+        player.tick()
+        clock.advance(2)
+    assert player.phase == Phase.PLAYING and player.session.is_locked()
+    assert player.session.get_current_track().title == "Track 3"       # the side's last track
+    ended = []
+    player.side_listeners.append(lambda summary: ended.append(summary))
+    cap.runout_value = (0.8, 0.05)                                     # thump, quiet, thump...
+    for _ in range(2):
+        player.tick()
+        clock.advance(2)
+    assert player.phase == Phase.PLAYING                               # two ticks: not yet
+    player.tick()
+    clock.advance(2)
+    assert player.phase == Phase.IDLE and not player.session.is_locked()
+    for _ in range(6):                                                 # the thumps go on
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.IDLE and st.steady_noise                  # no new session
+    cap.level = -70                                                    # needle lifted
+    for _ in range(5):
+        st = player.tick()
+        clock.advance(2)
+    assert st.phase == Phase.IDLE and not st.steady_noise
+
+
+def test_lead_out_thumps_mid_side_do_not_end_it(tmp_path):
+    """The clock is on the first track of the side: thumps there are a scratch or a loud
+    passage, not the lead-out; the side keeps going."""
+    clock = FakeClock()
+    def identify(path):
+        return TrackInfo(title="Track 1", artist="Madvillain", album="Madvillainy", duration=115)
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -20
+    for _ in range(6):
+        player.tick()
+        clock.advance(2)
+    assert player.session.is_locked() and player.session.get_current_track().title == "Track 1"
+    cap.runout_value = (0.9, 0.05)
+    for _ in range(5):
+        player.tick()
+        clock.advance(2)
+    assert player.phase == Phase.PLAYING and player.session.is_locked()

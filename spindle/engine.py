@@ -33,13 +33,19 @@ from pathlib import Path
 from typing import Any
 
 from .art import Art, ArtProvider
-from .capture import DEFAULT_STEP, ContinuousCapture
+from .capture import DEFAULT_STEP, ContinuousCapture, is_runout
 from .config import SpindleConfig
 from .fingerprint import TrackInfo
 from .history import ScrobbleHistory
 from .resolve import ResolveContext, Resolved, Resolver
 from .scrobbler import Scrobbler
-from .session import ScrobbleSession, SessionMode, _artist_key, normalize_title
+from .session import (
+    FALLBACK_TRACK_DURATION,
+    ScrobbleSession,
+    SessionMode,
+    _artist_key,
+    normalize_title,
+)
 from .state import Phase, ScreenState, TrackRow
 from .titles import clean_album, split_title
 
@@ -52,6 +58,7 @@ IdentifyFn = Callable[[Path], TrackInfo | None]
 # (and Shazam on every miss) every 2 s.
 LOCKED_IDENTIFY_INTERVAL = 8.0
 UNRESOLVED_HOLD_S = 90.0      # a hit nobody knows must be the only answer this long before it shows
+RUNOUT_TICKS = 3              # consecutive ticks of once-a-revolution thumps that end a side
 HOT_INPUT_DB = -6.0          # RMS this high means the capture is clipping
 
 # Loud is not enough to be music: an empty turntable (motor, preamp, mains) can
@@ -241,6 +248,7 @@ class Player:
         self._noise_identify_interval = NOISE_IDENTIFY_FIRST
         self._id_disagreed = False                 # last ID named a track the clock is not on
         self._held: tuple[str, float] | None = None   # (key, first seen) of a hit nobody knows
+        self._runout_ticks = 0                     # consecutive ticks that sounded like a lead-out
         self._recent_titles: set[str] = set()      # this artist's titles scrobbled recently
         self._recent_key = ""
         self._recent_at = 0.0
@@ -290,13 +298,19 @@ class Player:
             if self._loud_ticks < max(1, sil.start_ticks):
                 self._quiet_tick(now)
                 return self._publish(now)
-            # loud enough for long enough: music, or a turntable running empty?
-            if not self._music_like():
+            # loud enough for long enough: music, or a turntable running empty, or the
+            # needle thumping round the lead-out after a side?
+            if not self._music_like() or self._in_runout(now):
                 self._noise_tick(now)
                 return self._publish(now)
 
         if quiet:
             self._quiet_tick(now)
+        elif self.phase != Phase.IDLE and self._in_runout(now) and self._side_can_end():
+            # the needle reached the lead-out: the side is over now, not when it is lifted
+            logger.info("Run-out: side over (needle in the lead-out, %.1f dB)", self.level_db)
+            self._end_session(now)
+            self._noise_tick(now)                  # and the thumps that follow are not a session
         else:
             self._music_tick(now)
         return self._publish(now)
@@ -327,6 +341,42 @@ class Player:
         if now - self.silent_since < self.cfg.silence.min_silence_seconds:
             return                                   # a pause, not the end
         self._end_session(now)
+
+    def _in_runout(self, now: float) -> bool:
+        """RUNOUT_TICKS consecutive ticks whose loudness repeats once per revolution and is
+        quiet in between (see capture.revolution_pulse). A capture without the reading
+        never reports one."""
+        reader = getattr(self.capture, "runout", None)
+        if reader is None:
+            return False
+        pulse, duty = reader()
+        if is_runout(pulse, duty):
+            self._runout_ticks += 1
+            if self._runout_ticks == RUNOUT_TICKS:
+                logger.info("Input thumps once a revolution (pulse %.2f, duty %.2f): the lead-out",
+                            pulse, duty)
+        else:
+            self._runout_ticks = 0
+        return self._runout_ticks >= RUNOUT_TICKS
+
+    def _side_can_end(self) -> bool:
+        """A lead-out only comes at the end of a side. With a pressing the clock has to be
+        on the side's last track (or past it); with a streaming tracklist (no sides) the
+        current track must be at least half played, or the last one; without a lock any
+        time is plausible."""
+        s = self.session
+        al = s.album_state if s and s.mode == SessionMode.ALBUM else None
+        if al is None:
+            return True
+        if al.side_done or al.exhausted:
+            return True
+        tl = al.tracklist
+        if tl.has_sides:
+            return tl.is_side_end(al.current_index)
+        cur = tl.get_track_at(al.current_index)
+        dur = cur.duration if cur and cur.duration else FALLBACK_TRACK_DURATION
+        return (al.current_index >= len(tl.tracks) - 1
+                or self.clock() - al.current_track_start >= 0.5 * dur)
 
     def _music_like(self) -> bool:
         """Does the recent audio move like music? Fail open: with no reading
@@ -399,6 +449,8 @@ class Player:
         self.last_submit_at = 0.0
         self._id_disagreed = False
         self._held = None
+        # _runout_ticks is kept: the thumps that ended the side go on, and the idle gate
+        # must know them for what they are from its first tick
         self._recent_at = 0.0                      # the side that just ended adds ticks
 
     def _music_tick(self, now: float) -> None:

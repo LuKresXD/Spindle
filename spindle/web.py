@@ -31,12 +31,14 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import re
 import threading
 import time
 import urllib.parse
+import wave
 from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +50,7 @@ from typing import Any
 
 import requests
 
+from .capture import is_runout
 from .config import WebConfig
 from .discogs import clean_artist
 from .state import ScreenState
@@ -819,6 +822,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._info()
             elif path == "/api/track":
                 self._track()
+            elif path == "/api/debug/capture.wav":
+                self._debug_capture()
+            elif path == "/api/debug/pulse":
+                self._debug_pulse()
             elif path == "/healthz":
                 self._json({"ok": True})
             else:
@@ -900,6 +907,39 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(sse(payload))
             self.wfile.flush()
 
+    # the last seconds of audio as heard by the engine, for tuning the gates on real noise
+    def _debug_capture(self) -> None:
+        cap = self.server.capture
+        if cap is None:
+            self._json({"error": "no capture"}, HTTPStatus.NOT_FOUND)
+            return
+        seconds = float(self._query().get("seconds", "10") or 10)
+        pcm = cap.last_pcm(max(1.0, min(seconds, 30.0)))
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(cap.cfg.channels)
+            wf.setsampwidth(2)
+            wf.setframerate(cap.cfg.sample_rate)
+            wf.writeframes(pcm)
+        data = buf.getvalue()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def _debug_pulse(self) -> None:
+        cap = self.server.capture
+        if cap is None:
+            self._json({"error": "no capture"}, HTTPStatus.NOT_FOUND)
+            return
+        pulse, duty = cap.runout()
+        self._json({"pulse": round(pulse, 3), "duty": round(duty, 3),
+                    "runout": is_runout(pulse, duty), "level_db": round(cap.level_db(), 1),
+                    "motion": cap.motion(), "buffered_s": round(cap.buffered_seconds(), 1)})
+
     def _lyrics(self) -> None:
         q = self._query()
         artist, title = q.get("artist", ""), q.get("title", "")
@@ -938,9 +978,10 @@ class WebServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, cfg: WebConfig, collection: Any = None, scrobbler: Any = None,
-                 history: Any = None, hub: StateHub | None = None):
+                 history: Any = None, hub: StateHub | None = None, capture: Any = None):
         super().__init__((cfg.host, cfg.port), _Handler)
         self.cfg = cfg
+        self.capture = capture          # for /api/debug/*: what the Pi hears right now
         self.hub = hub or StateHub()
         self.lyrics = Lyrics()
         self.info = Info(collection, scrobbler, history)

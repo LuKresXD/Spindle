@@ -139,7 +139,8 @@ def main() -> None:
     display = Display(enabled=cfg.display.enabled, fb_path=cfg.display.fb_path)
     display.init()
 
-    capture = ContinuousCapture(cfg.audio)
+    # ~12 s buffered: the lead-out detector listens for whole revolutions
+    capture = ContinuousCapture(cfg.audio, slack_seconds=6.0)
     capture.start()
     logger.info("Listening on %s (window %ds, step %ds)",
                 cfg.audio.device, cfg.audio.chunk_duration, DEFAULT_STEP)
@@ -153,7 +154,8 @@ def main() -> None:
     web = None
     if cfg.web.enabled:
         from .web import WebServer
-        web = WebServer(cfg.web, collection=collection, scrobbler=scrobbler, history=history)
+        web = WebServer(cfg.web, collection=collection, scrobbler=scrobbler, history=history,
+                        capture=capture)
         web.start()
         player.side_listeners.append(web.hub.side_ended)
         logger.info("Touch display served at http://%s:%d/", cfg.web.host, cfg.web.port)

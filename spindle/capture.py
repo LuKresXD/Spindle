@@ -98,6 +98,68 @@ def spectral_motion(pcm: bytes, sample_rate: int, channels: int,
     return float(np.mean(moves))
 
 
+# ── the run-out groove ────────────────────────────────────────────────────────
+# At the end of a side the needle rides the lead-out and the label edge: one thump per
+# revolution (1.8 s at 33⅓ rpm, 1.33 s at 45) over surface noise, loud enough to pass the
+# silence gate and never silent, so the side would only end when the needle is lifted.
+REVOLUTION_S = (60.0 / (100.0 / 3.0), 60.0 / 45.0)   # 33⅓ and 45 rpm
+_ENV_FRAME_S = 0.025
+
+
+def _envelope(x: np.ndarray, sample_rate: int) -> np.ndarray:
+    """RMS per 25 ms frame, the median (the surface noise floor) taken off, negatives
+    clipped: what is left is the thumps."""
+    n = max(1, int(sample_rate * _ENV_FRAME_S))
+    m = len(x) // n
+    if m < 8:
+        return np.zeros(0)
+    frames = x[: m * n].reshape(m, n)
+    env = np.sqrt(np.mean(frames * frames, axis=1))
+    env = env - np.median(env)
+    return np.clip(env, 0.0, None)
+
+
+def revolution_pulse(pcm: bytes, sample_rate: int, channels: int,
+                     periods: tuple[float, ...] = REVOLUTION_S) -> tuple[float, float]:
+    """How much the loudness repeats once per revolution, and how sparse it is.
+
+    Returns (pulse, duty): pulse = the best normalised autocorrelation of the thump
+    envelope at a revolution's lag (±6 % for deck speed), 0..1; duty = the share of
+    frames carrying energy above a third of the loudest. Run-out thumps: pulse high,
+    duty low. Music: duty high (and the pulse is whatever the beat makes of it).
+    Needs about two revolutions of audio; returns (0, 0) with less.
+    """
+    x = _mono(pcm, channels)
+    env = _envelope(x, sample_rate)
+    if len(env) < 8:
+        return 0.0, 0.0
+    peak = float(env.max())
+    if peak <= 0:
+        return 0.0, 0.0
+    duty = float(np.mean(env > peak / 3))
+    frame_s = _ENV_FRAME_S
+    best = 0.0
+    for period in periods:
+        base = int(round(period / frame_s))
+        for lag in range(int(base * 0.94), int(base * 1.06) + 1):
+            if lag <= 0 or lag >= len(env) - 4:
+                continue
+            a, b = env[:-lag], env[lag:]
+            den = float(np.sqrt(np.sum(a * a) * np.sum(b * b)))
+            if den <= 0:
+                continue
+            best = max(best, float(np.sum(a * b) / den))
+    return best, duty
+
+
+RUNOUT_PULSE_MIN = 0.5     # the envelope repeats this well once per revolution...
+RUNOUT_DUTY_MAX = 0.25     # ...and is quiet between the thumps
+
+
+def is_runout(pulse: float, duty: float) -> bool:
+    return pulse >= RUNOUT_PULSE_MIN and duty <= RUNOUT_DUTY_MAX
+
+
 def mixer_device_for(capture_device: str) -> str | None:
     """The ALSA control device for a capture PCM name: plughw:CARD=Device,DEV=0
     -> hw:CARD=Device; hw:3,0 -> hw:3. None for "default" and other names that
@@ -228,6 +290,12 @@ class ContinuousCapture:
         """Spectral motion of the most recent `seconds` (default: the window)."""
         return spectral_motion(self.last_pcm(seconds or self.window_seconds),
                                self.cfg.sample_rate, self.cfg.channels)
+
+    def runout(self, seconds: float | None = None) -> tuple[float, float]:
+        """(pulse, duty) of the most recent `seconds` (default: all that is buffered);
+        see revolution_pulse."""
+        pcm = self.last_pcm(seconds or (self.window_seconds + 10))
+        return revolution_pulse(pcm, self.cfg.sample_rate, self.cfg.channels)
 
     def window_wav(self, seconds: float | None = None, min_seconds: float = 2.0) -> Path | None:
         """Write the last `seconds` (default: the full window) to a temp WAV.
