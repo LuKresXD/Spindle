@@ -58,7 +58,7 @@ IdentifyFn = Callable[[Path], TrackInfo | None]
 # (and Shazam on every miss) every 2 s.
 LOCKED_IDENTIFY_INTERVAL = 8.0
 UNRESOLVED_HOLD_S = 150.0     # a hit nobody knows must be the only answer this long before it shows
-HOLD_IDENTIFY_INTERVAL = 4.0  # while a stranger is held: ask often, his record may be the next answer
+HOLD_IDENTIFY_INTERVAL = 4.0  # while a stranger is held: ask often, his record may be next
 RUNOUT_TICKS = 3              # consecutive ticks of once-a-revolution thumps that end a side
 RUNOUT_WINDOW_S = 45.0        # a lead-out is believed only this close to the last track's end
 UNOWNED_HOLD_S = 45.0         # a session's first hit that is not his record waits this long to show
@@ -521,7 +521,8 @@ class Player:
             self._scrobble(t, ts)
         predicted = s.get_current_track()
         al = s.album_state
-        if not predicted or self._unowned_holding(self.clock(), owned_now=bool(al and al.tracklist.owned)):
+        owned_now = bool(al and al.tracklist.owned)
+        if not predicted or self._unowned_holding(self.clock(), owned_now=owned_now):
             return                          # a stranger's lock stays off the screen while held
         self._set_playing(predicted, s.current_track_start() or self.clock(), scrobbled=True)
         self._now_playing(predicted)
@@ -543,7 +544,7 @@ class Player:
         holding = self._unowned_holding(now) or (
             self._held is not None and now - self._held[1] < UNRESOLVED_HOLD_S)
         if holding:
-            interval = HOLD_IDENTIFY_INTERVAL      # a stranger on hold: his record may be the next answer
+            interval = HOLD_IDENTIFY_INTERVAL      # a stranger on hold: his record may be next
         elif settled or self._held is not None or self._side_over_by_clock():
             interval = LOCKED_IDENTIFY_INTERVAL
         else:
@@ -658,8 +659,9 @@ class Player:
             return
         # what would reach the screen now: his record (a lock on it, or an owned hit) ends
         # any hold; a stranger, held, stays off the screen (the session listens on)
-        locked = bool(s and s.is_locked() and s.album_state)
-        owned_now = s.album_state.tracklist.owned if locked else resolved.owned   # what the screen would show
+        locked_album = s.album_state if (s is not None and s.is_locked()) else None
+        # what the screen would show: the locked record, or the hit itself
+        owned_now = locked_album.tracklist.owned if locked_album is not None else resolved.owned
         if self._unowned_holding(at, owned_now=owned_now):
             return
 
@@ -683,7 +685,8 @@ class Player:
                 # screen; it does not go to Last.fm (a stranger's upload that matched three
                 # minutes of a side went there as a 3-minute play, 2026-11-08)
                 self.playing.scrobblable = False
-                logger.info("Not scrobbling %s — %s: unknown to every catalogue", track.artist, track.title)
+                logger.info("Not scrobbling %s — %s: unknown to every catalogue",
+                            track.artist, track.title)
         self._take_art(art, track)
 
     def _take_art(self, art: Art | None, identified: TrackInfo) -> None:
