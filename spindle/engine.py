@@ -338,8 +338,12 @@ class Player:
                 logger.info("Steady noise stopped after %.0fs", now - self.noise_since)
                 self._end_noise_run()
             return
-        if now - self.silent_since < self.cfg.silence.min_silence_seconds:
-            return                                   # a pause, not the end
+        # a pause, not the end: unless the clock already ran the side's last track out, in
+        # which case the first quiet tick is the end (Luka, 2026-11-08: "it knows the track
+        # ended and hears it, switch instantly")
+        if now - self.silent_since < self.cfg.silence.min_silence_seconds \
+                and not self._side_over_by_clock():
+            return
         self._end_session(now)
 
     def _in_runout(self, now: float) -> bool:
@@ -352,12 +356,20 @@ class Player:
         pulse, duty = reader()
         if is_runout(pulse, duty):
             self._runout_ticks += 1
-            if self._runout_ticks == RUNOUT_TICKS:
+            if self._runout_ticks == 1:
                 logger.info("Input thumps once a revolution (pulse %.2f, duty %.2f): the lead-out",
                             pulse, duty)
         else:
             self._runout_ticks = 0
-        return self._runout_ticks >= RUNOUT_TICKS
+        # one tick is enough once the clock has run the side's last track out
+        need = 1 if self._side_over_by_clock() else RUNOUT_TICKS
+        return self._runout_ticks >= need
+
+    def _side_over_by_clock(self) -> bool:
+        """The timing model has already run the side's last track to its end."""
+        s = self.session
+        al = s.album_state if s and s.mode == SessionMode.ALBUM else None
+        return bool(al and (al.side_done or al.exhausted))
 
     def _side_can_end(self) -> bool:
         """A lead-out only comes at the end of a side. With a pressing the clock has to be

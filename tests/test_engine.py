@@ -495,3 +495,38 @@ def test_lead_out_thumps_mid_side_do_not_end_it(tmp_path):
         player.tick()
         clock.advance(2)
     assert player.phase == Phase.PLAYING and player.session.is_locked()
+
+
+def test_once_the_clock_ran_the_side_out_the_first_quiet_or_thump_tick_ends_it(tmp_path):
+    """The last track's duration has elapsed: the side is over as soon as the input goes
+    quiet or thumps, not eight seconds later."""
+    clock = FakeClock()
+    def identify(path):
+        return TrackInfo(title="Track 3", artist="Madvillain", album="Madvillainy", duration=109)
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -20
+    for _ in range(6):
+        player.tick()
+        clock.advance(2)
+    assert player.session.is_locked() and player.session.get_current_track().title == "Track 3"
+    clock.advance(109 + 15)                                            # the clock runs Track 3 out
+    player.tick()
+    al = player.session.album_state
+    assert (al.side_done or al.exhausted) and player.phase == Phase.PLAYING
+    cap.level = -70                                                    # quiet: the end, now
+    player.tick()
+    assert player.phase == Phase.IDLE and [s[0] for s in rec.scrobbles] == ["Track 3"]
+    # and the same with the lead-out thumps instead of quiet
+    clock2 = FakeClock()
+    player2, cap2, rec2 = make_player(tmp_path, clock2, identify)
+    cap2.level = -20
+    for _ in range(6):
+        player2.tick()
+        clock2.advance(2)
+    clock2.advance(109 + 15)
+    player2.tick()
+    al2 = player2.session.album_state
+    assert al2.side_done or al2.exhausted
+    cap2.runout_value = (0.9, 0.05)
+    player2.tick()
+    assert player2.phase == Phase.IDLE and [s[0] for s in rec2.scrobbles] == ["Track 3"]
