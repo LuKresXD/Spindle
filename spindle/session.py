@@ -518,6 +518,11 @@ class ScrobbleSession:
     def _already_scrobbled(self, track: TrackInfo) -> bool:
         return self._dedup_key(track) in self._session_scrobbled
 
+    def already_scrobbled(self, track: TrackInfo) -> bool:
+        """Did this session scrobble this track already (any mode)? The engine asks before
+        letting a late identification of it start a simple-mode play."""
+        return self._already_scrobbled(track)
+
     def _mark_scrobbled(self, track: TrackInfo) -> None:
         self._session_scrobbled.add(self._dedup_key(track))
 

@@ -522,7 +522,7 @@ class Player:
         # A known album still waiting for its confirming ID keeps the fast cadence. One
         # hurried window right after a hit that disagreed with the clock (the record
         # skipped, the needle moved).
-        slow = settled or self._held is not None
+        slow = settled or self._held is not None or self._side_over_by_clock()
         if slow and not self._id_disagreed \
                 and now - self.last_submit_at < LOCKED_IDENTIFY_INTERVAL:
             return False
@@ -614,6 +614,11 @@ class Player:
             cur = s.get_current_track() or track
             self._set_playing(cur, s.current_track_start() or at, scrobbled=True)
             self._now_playing(cur)
+        elif s and s.already_scrobbled(track):
+            # the album ran this track out and scrobbled it already (the side is in its
+            # lead-out, or the clock ran the record out): a late ID of its tail is not a
+            # new play, so no simple-mode track and no second scrobble at the end
+            pass
         else:
             self._simple_mode(track, at, since=held_since)
         self._take_art(art, track)
@@ -683,6 +688,9 @@ class Player:
         """Scrobble a simple-mode track that is ending (silence, lock, next track)."""
         p = self.playing
         if self.dry_run or p.track is None or not p.simple or p.scrobbled:
+            return
+        if self.session and self.session.already_scrobbled(p.track):
+            p.scrobbled = True                           # the album session counted it already
             return
         if self._eligible(p.track, p.since, now):
             self._scrobble(p.track, p.since)
