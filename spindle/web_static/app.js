@@ -1075,6 +1075,33 @@
   document.addEventListener("contextmenu", (e) => e.preventDefault());
   window.addEventListener("resize", rest);
 
+  // ── the remote: a phone Shortcut's command, arriving on the event stream ─────
+  // The same moves a finger makes, so every guard the taps have applies here too.
+  function runUi(cmd) {
+    const playing = !!(state && state.phase === "playing");
+    const toPage = (name) => {
+      const next = PAGE_NAMES.indexOf(name);
+      if (next < 0 || next === pageIndex) return;
+      closeOverlays(); closeSheet();
+      showPage(next, neighbour(1) === next ? 1 : -1);
+    };
+    const home = () => { if (pageIndex !== SPINDLE) toPage("spindle"); };
+    switch (cmd) {
+      case "page/off": case "page/spindle": case "page/claw": toPage(cmd.slice(5)); break;
+      case "view/tracks": if (playing) { home(); closeSheet(); toggleLyrics(false); } break;
+      case "view/lyrics": if (playing) { home(); closeSheet(); toggleLyrics(true); } break;
+      case "view/info": if (playing) { home(); if (sheetOpen) closeSheet(); else openSheet(); } break;
+      case "info/open": if (playing) { home(); openSheet(); } break;
+      case "info/close": closeSheet(); break;
+      case "pick": if (!playing) { home(); closeOverlays(); startPick(); } break;
+      case "shelf": if (!playing) { home(); closeOverlays(); openShelf(); } break;
+      case "recent": if (!playing) { home(); closeOverlays(); openRecent(); } break;
+      case "back": closeSheet(); closeOverlays(); if (!playing) showIdle(); break;
+      case "wake": home(); if (!playing) showIdle(); break;
+      default: break;
+    }
+  }
+
   // ── boot ─────────────────────────────────────────────────────────────────
   // The needle-down screen carries the same record mark: cloned here, before boot removes its overlay.
   const bootMark = el.boot && el.boot.querySelector(".bootmark");
@@ -1087,6 +1114,7 @@
   let reconnected = false;
   function connect() {
     const es = new EventSource("/events");
+    es.addEventListener("ui", (e) => { try { runUi(JSON.parse(e.data).command); } catch (err) { console.error("ui", err); } });
     es.onmessage = (e) => {
       try {
         if (reconnected) { reconnected = false; infoFor = ""; trackFor = ""; info = null; trackInfo = null; collection = null; }

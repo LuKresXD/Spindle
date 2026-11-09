@@ -375,3 +375,71 @@ def test_shelf_rows_carry_prices_and_recent_says_how_much_was_played(tmp_path):
 class _Entry2:
     def __init__(self, artist, album, title, ts):
         self.artist, self.album, self.title, self.timestamp = artist, album, title, ts
+
+
+def test_hub_queues_remote_commands_and_numbers_them():
+    hub = StateHub(clock=lambda: 1000.0)
+    v0, _ = hub.snapshot()
+    assert hub.ui_seq() == 0 and hub.ui_since(0) == []
+    assert hub.ui("view/lyrics") == 1 and hub.ui("page/off") == 2
+    assert hub.ui_since(0) == [(1, "view/lyrics"), (2, "page/off")]
+    assert hub.ui_since(1) == [(2, "page/off")]
+    v1, _ = hub.snapshot()
+    assert v1 > v0                                   # a command wakes the event streams
+
+
+def test_remote_endpoint_needs_the_key_and_rides_the_event_stream():
+    srv = WebServer(WebConfig(host="127.0.0.1", port=0, remote_key="s3cret"))
+    srv.start()
+    port = srv.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    try:
+        srv.hub.publish(_state())
+        for url in (f"{base}/api/ui/view/lyrics", f"{base}/api/ui/view/lyrics?k=wrong",
+                    f"{base}/api/debug/pulse"):
+            try:
+                urllib.request.urlopen(url)
+            except urllib.error.HTTPError as e:
+                assert e.code == 403
+            else:
+                raise AssertionError("no key must be refused: " + url)
+        try:
+            urllib.request.urlopen(f"{base}/api/ui/dance?k=s3cret")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400 and "commands" in e.read().decode()
+        with urllib.request.urlopen(f"{base}/events") as es:
+            assert es.readline().startswith(b"data: ") and es.readline() == b"\n"
+            req = urllib.request.Request(f"{base}/api/ui/view/lyrics?k=s3cret", method="POST")
+            threading.Timer(0.2, lambda: urllib.request.urlopen(req).read()).start()
+            assert es.readline() == b"event: ui\n"
+            frame = json.loads(es.readline()[6:])
+            assert frame["command"] == "view/lyrics" and frame["seq"] == 1
+        req2 = urllib.request.Request(f"{base}/api/ui/page/off",
+                                      headers={"X-Spindle-Key": "s3cret"})
+        r = json.loads(urllib.request.urlopen(req2).read())
+        assert r["ok"] and r["command"] == "page/off" and r["phase"] == "playing"
+        assert r["now"] == "Madvillain – Track 2"
+        # a stream opened now does not replay the two commands already sent
+        with urllib.request.urlopen(f"{base}/events") as es2:
+            es2.readline()
+            es2.readline()
+            threading.Timer(0.2, lambda: srv.hub.ui("back")).start()
+            assert es2.readline() == b"event: ui\n"
+            assert json.loads(es2.readline()[6:])["command"] == "back"
+    finally:
+        srv.stop()
+
+
+def test_remote_is_off_without_a_key():
+    srv = WebServer(WebConfig(host="127.0.0.1", port=0))
+    srv.start()
+    port = srv.server_address[1]
+    try:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ui/back?k=anything")
+        except urllib.error.HTTPError as e:
+            assert e.code == 403 and "not configured" in e.read().decode()
+        else:
+            raise AssertionError("must be off")
+    finally:
+        srv.stop()

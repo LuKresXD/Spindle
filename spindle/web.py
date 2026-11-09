@@ -22,6 +22,12 @@ the rest on demand.
                                tiles, <id>.blur.jpg a 32 px pre-blurred, darkened copy the page
                                stretches to the whole screen as the backdrop (no CSS blur)
   GET /art/<key>.blur.jpg      the same backdrop copy for the cover on screen
+  GET|POST /api/ui/<command>   the remote: a phone Shortcut steers the screen (?k=<remote_key>).
+                               page/off|spindle|claw · view/tracks|lyrics|info · info/open|close ·
+                               pick · shelf · recent · back · wake. The command rides the event
+                               stream to the page as an "ui" event.
+  GET /api/debug/capture.wav   the last seconds the engine heard (?seconds=N, needs the key)
+  GET /api/debug/pulse         the lead-out detector's live reading (needs the key)
 
 Everything that goes to the network is cached per track or per album and
 runs on the request thread, never on the tick.
@@ -31,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import io
 import json
 import logging
@@ -91,6 +98,28 @@ class StateHub:
         self.on_track: Callable[[str, str, str, float | None], None] | None = None
         self._album_seen: tuple[str, str] | None = None
         self._track_seen: tuple[str, str] | None = None
+        self._ui_seq = 0                          # the remote's commands, numbered
+        self._ui: list[tuple[int, str]] = []
+
+    # the remote (request threads) ---------------------------------------------
+
+    def ui(self, command: str) -> int:
+        """Queue a command for the page; wakes the event streams. Returns its number."""
+        with self._cond:
+            self._ui_seq += 1
+            self._ui.append((self._ui_seq, command))
+            del self._ui[:-50]
+            self._version += 1
+            self._cond.notify_all()
+            return self._ui_seq
+
+    def ui_seq(self) -> int:
+        with self._cond:
+            return self._ui_seq
+
+    def ui_since(self, seen: int) -> list[tuple[int, str]]:
+        with self._cond:
+            return [(n, c) for n, c in self._ui if n > seen]
 
     # publishing (tick thread) ------------------------------------------------
 
@@ -792,6 +821,14 @@ class _Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self.do_GET()
 
+    def do_POST(self) -> None:
+        # the remote only; a Shortcut's "Get Contents of URL" may POST or GET
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/ui" or path.startswith("/api/ui/"):
+            self.do_GET()
+        else:
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
     def do_GET(self) -> None:
         path = urllib.parse.urlparse(self.path).path
         try:
@@ -822,10 +859,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._info()
             elif path == "/api/track":
                 self._track()
+            elif path == "/api/ui" or path.startswith("/api/ui/"):
+                self._ui(path[len("/api/ui/"):] if path.startswith("/api/ui/") else "")
             elif path == "/api/debug/capture.wav":
-                self._debug_capture()
+                if self._remote_ok():
+                    self._debug_capture()
             elif path == "/api/debug/pulse":
-                self._debug_pulse()
+                if self._remote_ok():
+                    self._debug_pulse()
             elif path == "/healthz":
                 self._json({"ok": True})
             else:
@@ -895,17 +936,52 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
-        version, payload = self.server.hub.snapshot()
+        hub = self.server.hub
+        version, payload = hub.snapshot()
+        ui_seen = hub.ui_seq()            # commands from before this stream opened are not replayed
         self.wfile.write(sse(payload))
         self.wfile.flush()
         while not self.server.stopping:
-            nxt = self.server.hub.wait(version, SSE_KEEPALIVE_SECONDS)
+            nxt = hub.wait(version, SSE_KEEPALIVE_SECONDS)
             if nxt is None:
                 self.wfile.write(b": keepalive\n\n")
             else:
-                version, payload = nxt
-                self.wfile.write(sse(payload))
+                version, fresh = nxt
+                if fresh is not payload:   # a remote command bumps the version, no new state
+                    payload = fresh
+                    self.wfile.write(sse(payload))
+                for seq, command in hub.ui_since(ui_seen):
+                    self.wfile.write(sse_event("ui", {"command": command, "seq": seq}))
+                    ui_seen = seq
             self.wfile.flush()
+
+    # the remote: a phone Shortcut steers the screen -----------------------------
+    def _remote_ok(self) -> bool:
+        """The shared key, in ?k= or X-Spindle-Key. No key configured = the remote is off."""
+        key = self.server.cfg.remote_key
+        if not key:
+            self._json({"error": "remote not configured (web.remote_key)"},
+                       HTTPStatus.FORBIDDEN)
+            return False
+        given = self._query().get("k") or self.headers.get("X-Spindle-Key") or ""
+        if not hmac.compare_digest(given.encode(), key.encode()):
+            self._json({"error": "bad key"}, HTTPStatus.FORBIDDEN)
+            return False
+        return True
+
+    def _ui(self, command: str) -> None:
+        if not self._remote_ok():
+            return
+        command = command.strip("/")
+        if command not in UI_COMMANDS:
+            self._json({"error": "unknown command", "commands": list(UI_COMMANDS)},
+                       HTTPStatus.BAD_REQUEST)
+            return
+        seq = self.server.hub.ui(command)
+        _, st = self.server.hub.snapshot()
+        now = " – ".join(x for x in (st.get("artist"), st.get("base") or st.get("title")) if x)
+        self._json({"ok": True, "command": command, "seq": seq, "phase": st.get("phase"),
+                    "now": now})
 
     # the last seconds of audio as heard by the engine, for tuning the gates on real noise
     def _debug_capture(self) -> None:
@@ -971,6 +1047,14 @@ class _Handler(BaseHTTPRequestHandler):
 
 def sse(payload: dict) -> bytes:
     return b"data: " + json.dumps(payload).encode() + b"\n\n"
+
+
+def sse_event(name: str, payload: dict) -> bytes:
+    return b"event: " + name.encode() + b"\ndata: " + json.dumps(payload).encode() + b"\n\n"
+
+
+UI_COMMANDS = ("page/off", "page/spindle", "page/claw", "view/tracks", "view/lyrics",
+               "view/info", "info/open", "info/close", "pick", "shelf", "recent", "back", "wake")
 
 
 class WebServer(ThreadingHTTPServer):

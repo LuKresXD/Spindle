@@ -94,8 +94,11 @@ class DiscogsConfig:
 class WebConfig:
     """The touch display: a local web UI served by Spindle, shown by a kiosk browser."""
     enabled: bool = False
-    host: str = "127.0.0.1"
+    host: str = "127.0.0.1"         # 0.0.0.0 to reach the remote (/api/ui) from the phone
     port: int = 8787
+    # the key a phone Shortcut sends with a /api/ui command (?k=... or X-Spindle-Key); empty =
+    # the remote and the /api/debug endpoints are off. Random, long, shared with nobody else.
+    remote_key: str = ""
 
 
 @dataclass
