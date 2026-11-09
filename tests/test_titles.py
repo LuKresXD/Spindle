@@ -53,7 +53,7 @@ def test_the_catalogue_list_names_the_features_and_survives_commas():
         ("Demonz", ["Brent Faiyaz"], "Interlude")
     assert t("Yonkers (feat. Tyler, The Creator)", ["Hodgy", "Tyler, The Creator"]) == \
         ("Yonkers", ["Tyler, The Creator"], "")
-    assert t("Solo (feat. Juice WRLD)", ["Juice WRLD"]) == ("Solo", [], "")   # the primary is no feature
+    assert t("Solo (feat. Juice WRLD)", ["Juice WRLD"]) == ("Solo", [], "")   # primary, no feature
     assert t("Praise God", ["Kanye West", "Travis Scott", "Baby Keem"]) == \
         ("Praise God", ["Travis Scott", "Baby Keem"], "")
     assert TitleParts("x", ("A", "B")).feat_line == "feat. A, B"
