@@ -105,12 +105,11 @@ body.phase-playing .veil { opacity: 1; }
 .lyric.cur { color: #fff; }
 .lyric.empty { font-weight: 500; color: var(--text-dim); font-size: 30px; }
 
-/* the two corner controls share one glass tray; the active one is a lighter inner pill */
-.corner { position: absolute; right: var(--pad-x); bottom: 56px; display: flex; gap: 4px; padding: 6px; border-radius: 999px; overflow: visible; }
-.corner .pill { height: 56px; padding: 0 24px; font-size: 26px; background: transparent; box-shadow: none; }
-.corner .pill::before { display: none; }
-.corner .pill { position: relative; z-index: 1; }
-.corner .pill.on { background: transparent; }
+/* corner: one glass tray for the two views (Tracklist | Lyrics, the active one a lighter
+   inner pill) and Info as its own glass button: a view and an action never share a control */
+.corner { position: absolute; right: var(--pad-x); bottom: 56px; display: flex; align-items: center; gap: 14px; overflow: visible; }
+.corner .tray .pill { height: 56px; padding: 0 24px; font-size: 26px; }
+.corner > .pill { height: 68px; padding: 0 28px; font-size: 26px; }
 
 /* listening ----------------------------------------------------------------- */
 /* Needle down: the lockup draws itself and stays (the mark is cloned from the boot one at
@@ -177,10 +176,6 @@ body.sheet-open .corner { visibility: hidden; }
 .odo-col { display: inline-block; will-change: transform; }
 .odo-col b { display: block; height: 1em; line-height: 1; font-weight: inherit; font-variant-numeric: tabular-nums; }
 .odo-sym { display: inline-block; height: 1em; line-height: 1; font-weight: inherit; }
-/* a live level beside the word: five bars that follow what the Pi hears */
-.lvl { display: inline-flex; align-items: flex-end; gap: 5px; height: 26px; margin-left: 4px; }
-.lvl b { display: block; width: 5px; height: 26px; border-radius: 3px; background: rgba(255,255,255,.72); transform: scaleY(.15);
-  transform-origin: 50% 100%; will-change: transform; }
 
 /* boot: the wordmark once, then the screen ------------------------------------- */
 .boot { position: absolute; inset: 0; background: #000; z-index: 30; display: flex; align-items: center; justify-content: center; }

@@ -15,8 +15,8 @@
     body: document.body, bgs: [$("bg-a"), $("bg-b")], home: $("home"), art: $("art"), title: $("title"),
     artist: $("artist"), albumline: $("albumline"), sidetext: $("sidetext"), fill: $("fill"),
     feat: $("feat"), elapsed: $("elapsed"), remaining: $("remaining"), list: $("list"), lyrics: $("lyrics"),
-    lyriclines: $("lyriclines"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"), corner: document.querySelector(".corner"),
-    listening: $("listening"), listenlockup: $("listenlockup"), listenword: $("listenword"), listenrow: $("listenrow"), lvl: $("lvl"), sheet: $("sheet"), tiles: $("tiles"),
+    lyriclines: $("lyriclines"), btnTracklist: $("btn-tracklist"), btnLyrics: $("btn-lyrics"), btnInfo: $("btn-info"), viewtray: $("viewtray"),
+    listening: $("listening"), listenlockup: $("listenlockup"), listenword: $("listenword"), listenrow: $("listenrow"), sheet: $("sheet"), tiles: $("tiles"),
     ended: $("ended"), endedKicker: $("ended-kicker"), endedTitle: $("ended-title"), endedSub: $("ended-sub"),
     pages: [$("page-off"), $("page-spindle"), $("page-claw")], pageOff: $("page-off"), offword: $("offword"), dots: $("dots"),
     idle: $("idle"), btnPick: $("btn-pick"), btnShelf: $("btn-shelf"), btnRecent: $("btn-recent"),
@@ -196,7 +196,6 @@
     const listen = st.phase === "listening" && !pickOpen && !shelfOpen && !recentOpen;
     if (listen && el.listening.classList.contains("hidden")) { show(el.listening); M.listenIn(el.listenlockup.querySelector(".bootmark"), el.listenword, el.listenrow); }
     else if (!listen) hide(el.listening);
-    if (listen) renderLevel(st.level_db);
     if (playing) renderHome(st);
     renderEnded(ended);
     if (!playing && !ended) {
@@ -210,17 +209,9 @@
     }
   }
 
-  // five bars that follow what the Pi hears: -60 dB is silence, -15 dB a loud record
-  const LVL_SHAPE = [0.55, 0.8, 1, 0.8, 0.55];
-  function renderLevel(db) {
-    const norm = M.gsap.utils.clamp(0, 1, ((db ?? -120) + 60) / 45);
-    [...el.lvl.children].forEach((b, i) => {
-      const target = 0.15 + norm * LVL_SHAPE[i] * (0.85 + (i % 2) * 0.1);
-      M.gsap.to(b, { scaleY: target, duration: M.D(1.4), ease: "house", overwrite: true });
-    });
-  }
 
   function renderHome(st) {
+    if (!trayPlaced) trayState();                 // the home is on screen now: seat the indicator
     const key = `${st.artist}|${st.title}|${st.album}`;
     if (key !== trackKey) {
       trackKey = key;
@@ -461,11 +452,18 @@
     if (target) { M.gsap.to(target, { scale: 1.22, duration: M.D(0.5), ease: "back.out(1.4)", overwrite: true }); M.weight(target, 760, 0.5); }
   }
 
-  const cornerTray = M.tray(el.corner);
-  function trayState() { cornerTray.to(sheetOpen ? el.btnInfo : (lyricsOn ? el.btnLyrics : null)); }
+  // the view tray: Tracklist | Lyrics, the indicator pill behind the one showing; Info is its
+  // own button (lit while the sheet is up) and never moves the tray
+  const cornerTray = M.tray(el.viewtray);
+  let trayPlaced = false;
+  function trayState() {
+    const btn = lyricsOn ? el.btnLyrics : el.btnTracklist;
+    if (!trayPlaced) { trayPlaced = true; cornerTray.place(btn); } else cornerTray.to(btn);
+  }
   function toggleLyrics(on) {
     lyricsOn = on == null ? !lyricsOn : on;
     el.btnLyrics.classList.toggle("on", lyricsOn);
+    el.btnTracklist.classList.toggle("on", !lyricsOn);
     el.lyrics.classList.toggle("hidden", !lyricsOn);
     el.list.classList.toggle("hidden", lyricsOn);
     trayState();
@@ -1036,6 +1034,7 @@
     if (state && state.phase === "idle") { showIdle(); return; }
     if (!state || state.phase !== "playing") return;
     if (hit(target, el.btnLyrics) || hit(target, el.title) || hit(target, el.artist)) { toggleLyrics(); return; }
+    if (hit(target, el.btnTracklist)) { toggleLyrics(false); return; }
     if (hit(target, el.btnInfo)) { openSheet(); return; }
     if (el.lyrics.contains(target)) { toggleLyrics(false); }
   }
