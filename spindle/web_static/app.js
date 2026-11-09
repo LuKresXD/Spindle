@@ -199,6 +199,7 @@
     if (playing) renderHome(st);
     renderEnded(ended);
     if (!playing && !ended) {
+      trackKey = "";                                 // the next session renders its title fresh
       closeSheet();
       if (st.phase !== "idle") hideIdle();
       // idle and listening are black: no blurred cover may linger, whoever put it there

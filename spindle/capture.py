@@ -119,15 +119,32 @@ def _envelope(x: np.ndarray, sample_rate: int) -> np.ndarray:
     return np.clip(env, 0.0, None)
 
 
+def _acf(env: np.ndarray, lag: int) -> float:
+    if lag <= 0 or lag >= len(env) - 4:
+        return 0.0
+    a, b = env[:-lag], env[lag:]
+    den = float(np.sqrt(np.sum(a * a) * np.sum(b * b)))
+    return float(np.sum(a * b) / den) if den > 0 else 0.0
+
+
+def _acf_near(env: np.ndarray, seconds: float, spread: float = 0.06) -> float:
+    """The best autocorrelation of the envelope within ±spread of a lag (deck speed)."""
+    base = int(round(seconds / _ENV_FRAME_S))
+    lags = range(int(base * (1 - spread)), int(base * (1 + spread)) + 1)
+    return max((_acf(env, lag) for lag in lags), default=0.0)
+
+
 def revolution_pulse(pcm: bytes, sample_rate: int, channels: int,
                      periods: tuple[float, ...] = REVOLUTION_S) -> tuple[float, float]:
-    """How much the loudness repeats once per revolution, and how sparse it is.
+    """How much the loudness repeats once per revolution AND nowhere else, and how sparse it is.
 
-    Returns (pulse, duty): pulse = the best normalised autocorrelation of the thump
-    envelope at a revolution's lag (±6 % for deck speed), 0..1; duty = the share of
-    frames carrying energy above a third of the loudest. Run-out thumps: pulse high,
-    duty low. Music: duty high (and the pulse is whatever the beat makes of it).
-    Needs about two revolutions of audio; returns (0, 0) with less.
+    Returns (pulse, duty). pulse = the envelope's autocorrelation at a revolution's lag
+    (±6 % for deck speed) MINUS its best autocorrelation at the lags a beat would fill
+    (the revolution's half, third, quarter, two thirds and three quarters, and the other
+    speed's revolution): a thump once a turn correlates at the turn and nowhere else; a
+    sparse beat correlates at the turn too, but just as well at its own period ("Make
+    Believe" read 0.66 at 1.8 s and 0.59 at 1.33 s, 2026-11-08). duty = the share of
+    frames above a third of the loudest. Needs about two revolutions; (0, 0) with less.
     """
     x = _mono(pcm, channels)
     env = _envelope(x, sample_rate)
@@ -137,23 +154,18 @@ def revolution_pulse(pcm: bytes, sample_rate: int, channels: int,
     if peak <= 0:
         return 0.0, 0.0
     duty = float(np.mean(env > peak / 3))
-    frame_s = _ENV_FRAME_S
     best = 0.0
     for period in periods:
-        base = int(round(period / frame_s))
-        for lag in range(int(base * 0.94), int(base * 1.06) + 1):
-            if lag <= 0 or lag >= len(env) - 4:
-                continue
-            a, b = env[:-lag], env[lag:]
-            den = float(np.sqrt(np.sum(a * a) * np.sum(b * b)))
-            if den <= 0:
-                continue
-            best = max(best, float(np.sum(a * b) / den))
+        at_turn = _acf_near(env, period)
+        side_lags = [period / 4, period / 3, period / 2, period * 2 / 3, period * 3 / 4]
+        side_lags += [p for p in periods if p != period]
+        elsewhere = max(_acf_near(env, lag) for lag in side_lags)
+        best = max(best, at_turn - elsewhere)
     return best, duty
 
 
-RUNOUT_PULSE_MIN = 0.5     # the envelope repeats this well once per revolution...
-RUNOUT_DUTY_MAX = 0.25     # ...and is quiet between the thumps
+RUNOUT_PULSE_MIN = 0.4     # the revolution stands this far above every beat-like lag...
+RUNOUT_DUTY_MAX = 0.12     # ...and the record is quiet between the thumps
 
 
 def is_runout(pulse: float, duty: float) -> bool:

@@ -459,6 +459,8 @@ def test_lead_out_thumps_end_the_side_and_never_start_one(tmp_path):
     assert player.session.get_current_track().title == "Track 3"       # the side's last track
     ended = []
     player.side_listeners.append(lambda summary: ended.append(summary))
+    clock.advance(109 - 40 - 12)                                 # into the last 40 s of Track 3
+    player.tick()
     cap.runout_value = (0.8, 0.05)                                     # thump, quiet, thump...
     for _ in range(2):
         player.tick()
@@ -480,7 +482,8 @@ def test_lead_out_thumps_end_the_side_and_never_start_one(tmp_path):
 
 def test_lead_out_thumps_mid_side_do_not_end_it(tmp_path):
     """The clock is on the first track of the side: thumps there are a scratch or a loud
-    passage, not the lead-out; the side keeps going."""
+    passage, not the lead-out; the side keeps going. (The last track's own early minutes
+    are covered the same way: only its final stretch may end the side.)"""
     clock = FakeClock()
     def identify(path):
         return TrackInfo(title="Track 1", artist="Madvillain", album="Madvillainy", duration=115)

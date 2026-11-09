@@ -59,6 +59,7 @@ IdentifyFn = Callable[[Path], TrackInfo | None]
 LOCKED_IDENTIFY_INTERVAL = 8.0
 UNRESOLVED_HOLD_S = 90.0      # a hit nobody knows must be the only answer this long before it shows
 RUNOUT_TICKS = 3              # consecutive ticks of once-a-revolution thumps that end a side
+RUNOUT_WINDOW_S = 45.0        # a lead-out is believed only this close to the last track's end
 HOT_INPUT_DB = -6.0          # RMS this high means the capture is clipping
 
 # Loud is not enough to be music: an empty turntable (motor, preamp, mains) can
@@ -300,8 +301,11 @@ class Player:
                 return self._publish(now)
             # loud enough for long enough: music, or a turntable running empty, or the
             # needle thumping round the lead-out after a side?
-            if not self._music_like() or self._in_runout(now):
+            if not self._music_like():
                 self._noise_tick(now)
+                return self._publish(now)
+            if self._in_runout(now):
+                self._noise_tick(now, reason="the lead-out")
                 return self._publish(now)
 
         if quiet:
@@ -310,7 +314,8 @@ class Player:
             # the needle reached the lead-out: the side is over now, not when it is lifted
             logger.info("Run-out: side over (needle in the lead-out, %.1f dB)", self.level_db)
             self._end_session(now)
-            self._noise_tick(now)                  # and the thumps that follow are not a session
+            # the thumps that follow are not a session
+            self._noise_tick(now, reason="the lead-out")
         else:
             self._music_tick(now)
         return self._publish(now)
@@ -383,12 +388,15 @@ class Player:
         if al.side_done or al.exhausted:
             return True
         tl = al.tracklist
-        if tl.has_sides:
-            return tl.is_side_end(al.current_index)
         cur = tl.get_track_at(al.current_index)
         dur = cur.duration if cur and cur.duration else FALLBACK_TRACK_DURATION
-        return (al.current_index >= len(tl.tracks) - 1
-                or self.clock() - al.current_track_start >= 0.5 * dur)
+        elapsed = self.clock() - al.current_track_start
+        last = (tl.is_side_end(al.current_index) if tl.has_sides
+                else al.current_index >= len(tl.tracks) - 1)
+        # the lead-out comes AFTER the last track: within its final stretch the clock may be
+        # a little fast or slow, earlier than that a thumping passage is just the song
+        # ("Make Believe", 54 s in, ended the record on 2026-11-08)
+        return last and elapsed >= dur - RUNOUT_WINDOW_S
 
     def _music_like(self) -> bool:
         """Does the recent audio move like music? Fail open: with no reading
@@ -396,7 +404,7 @@ class Player:
         self.motion = self.capture.motion()
         return self.motion is None or self.motion >= MUSIC_MOTION_MIN
 
-    def _noise_tick(self, now: float) -> None:
+    def _noise_tick(self, now: float, reason: str = "") -> None:
         """Loud, but the spectrum stands still: the turntable is running with
         nothing on it (or something equally steady). The screen stays black and
         no session starts; a slow lookup keeps running in case it is a record
@@ -407,9 +415,13 @@ class Player:
             self.noise_since = now - self.step * max(1, self._loud_ticks)
             self._noise_identify_interval = NOISE_IDENTIFY_FIRST
             self._noise_identify_at = self.noise_since + NOISE_IDENTIFY_FIRST
-            logger.info("Input is steady noise (%.1f dB RMS, motion %.2f < %.2f): "
-                        "not music, staying idle", self.level_db, self.motion or 0.0,
-                        MUSIC_MOTION_MIN)
+            if reason:
+                logger.info("Input is %s (%.1f dB RMS): not music, staying idle",
+                            reason, self.level_db)
+            else:
+                logger.info("Input is steady noise (%.1f dB RMS, motion %.2f < %.2f): "
+                            "not music, staying idle", self.level_db, self.motion or 0.0,
+                            MUSIC_MOTION_MIN)
         for res in self.worker.results():
             if res.resolved is not None:
                 logger.info("Steady input identified as %s — %s: music after all",

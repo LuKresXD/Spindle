@@ -144,6 +144,14 @@ def test_revolution_pulse_hears_the_lead_out_and_not_music():
     music = _noise(len(t), 0.12, 2) * (0.7 + 0.3 * np.sin(2 * np.pi * t / 0.5))
     pulse, duty = revolution_pulse(_pcm(music), sr, 2)
     assert duty > 0.3 and not is_runout(pulse, duty)
+    # a sparse beat: one hit every 0.6 s over near silence (a third of a revolution, so it
+    # correlates at the revolution too) must not read as the lead-out
+    sparse = _noise(len(t), 0.003, 4)
+    for k in range(16):
+        at = int((0.3 + k * 0.6) * sr)
+        sparse[at:at + int(0.05 * sr)] += _noise(int(0.05 * sr), 0.3, 20 + k)
+    pulse, duty = revolution_pulse(_pcm(sparse), sr, 2)
+    assert pulse < 0.3 and not is_runout(pulse, duty)
     # an empty turntable's steady hum: nothing repeats, nothing sparse
     hum = 0.02 * np.sin(2 * np.pi * 50 * t) + _noise(len(t), 0.003, 3)
     pulse, duty = revolution_pulse(_pcm(hum), sr, 2)
