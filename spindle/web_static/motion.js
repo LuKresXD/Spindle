@@ -262,9 +262,11 @@ window.Motion = (() => {
     return gsap.to(proxy, { v: n, duration: D(duration), ease: "power3.out", delay,
       onUpdate: () => { el.textContent = String(Math.round(proxy.v)); } });
   }
-  // the current line of lyrics gets heavier as well as bigger (Inter is variable)
-  function weight(el, w, duration = 0.5) {
-    gsap.to(el, { fontVariationSettings: `"wght" ${w}`, duration: D(duration), ease: "house", overwrite: "auto" });
+  // the current line of lyrics gets heavier as well as bigger (Inter is variable). Set, not
+  // tweened: every intermediate weight re-lays the whole lyrics column out (a frame of layout
+  // per frame of animation on the Pi); the scale tween carries the motion.
+  function weight(el, w, _duration = 0.5) {
+    gsap.set(el, { fontVariationSettings: `"wght" ${w}` });
   }
   // a scroller's head recedes as it scrolls: a little slower than the content, and fading.
   // One listener per scroller; `head()` returns whatever element is the head right now.

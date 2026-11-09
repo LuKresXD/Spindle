@@ -473,13 +473,17 @@
     lyricsOn = on == null ? !lyricsOn : on;
     el.btnLyrics.classList.toggle("on", lyricsOn);
     el.btnTracklist.classList.toggle("on", !lyricsOn);
-    el.lyrics.classList.toggle("off", !lyricsOn);
-    el.list.classList.toggle("off", lyricsOn);
-    trayState();
     // the panels are layers: the switch is a rise and a fade of the whole panel, never a
-    // rebuild of its lines or a layout of the home
-    if (lyricsOn && state) { loadLyrics(state); M.arrive(el.lyrics, { y: 24, duration: 0.7 }); }
-    else if (!lyricsOn) M.arrive(el.list, { y: 16, duration: 0.7 });
+    // rebuild of its lines or a layout of the home. The motion layer owns both panels'
+    // opacity inline (an arrive leaves opacity 1 behind, which beats any class), so the
+    // outgoing one is hidden the same way, not by a class alone (both showed at once, 18:25).
+    const show = lyricsOn ? el.lyrics : el.list, hide = lyricsOn ? el.list : el.lyrics;
+    M.gsap.killTweensOf([show, hide]);
+    M.gsap.set(hide, { autoAlpha: 0 });
+    hide.classList.add("off"); show.classList.remove("off");
+    trayState();
+    if (lyricsOn && state) loadLyrics(state);
+    M.arrive(show, { y: lyricsOn ? 24 : 16, duration: 0.7 });
   }
 
   // ── info sheet ───────────────────────────────────────────────────────────
