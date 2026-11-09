@@ -18,7 +18,7 @@ def test_features_come_off_the_title_in_every_spelling():
     assert t("Wake Up featuring Someone") == ("Wake Up", ["Someone"], "")
     assert t("Lose You To Love Me (with Selena Gomez)") == \
         ("Lose You To Love Me", ["Selena Gomez"], "")
-    assert t("Stay (With Me)") == ("Stay (With Me)", [], "")          # a title's own Title-Case bracket
+    assert t("Stay (With Me)") == ("Stay (With Me)", [], "")   # a title's own Title-Case bracket
     assert t("Dance (With Tears In My Eyes)") == \
         ("Dance (With Tears In My Eyes)", [], "")
 
