@@ -18,6 +18,7 @@ import requests
 
 from .config import SpotifyConfig
 from .fingerprint import TrackInfo
+from .names import same_artist
 from .tracklist import AlbumTracklist, titles_match
 
 __all__ = ["AlbumTracklist", "SpotifyCandidate", "SpotifyClient", "SpotifyTrack", "EDITION_RE"]
@@ -139,8 +140,11 @@ class SpotifyClient:
 
     # ── search ───────────────────────────────────────────────────────────────
 
-    def search_tracks(self, artist: str, title: str) -> list[SpotifyCandidate]:
+    def search_tracks(self, artist: str, title: str,
+                      also: tuple[str, ...] = ()) -> list[SpotifyCandidate]:
         """All plausible candidates for a fingerprinted artist + title, Spotify order.
+        (`also`, the artist's other names, is the resolver's to apply: nothing is filtered
+        by artist here.)
 
         Field-filtered search first (`track: artist:`); when that finds nothing
         (feat. tracks whose primary artist differs, odd spellings) a plain
@@ -269,25 +273,7 @@ def _candidate(t: dict, rank: int) -> SpotifyCandidate:
     )
 
 
-def _norm_name(s: str) -> str:
-    s = s.lower().replace("$", "s").replace("'", "").replace("’", "")
-    s = re.sub(r"\s*\(\d+\)$", "", s)
-    s = re.sub(r"[^a-z0-9Ѐ-ӿ]+", " ", s)
-    return " ".join(s.split())
-
-
 def artist_matches(candidates: list[str], wanted: str) -> bool:
-    """Fingerprint artists come as "A", "A & B", "A feat. B"; Spotify lists them separately."""
-    w = _norm_name(wanted)
-    if not w:
-        return False
-    parts = [p for p in re.split(r"\b(?:and|feat|ft|featuring|x|with)\b|[&,/+]", w) if p.strip()]
-    for c in candidates:
-        n = _norm_name(c)
-        if not n:
-            continue
-        if n == w or n in w or w in n:
-            return True
-        if any(p.strip() == n for p in parts):
-            return True
-    return False
+    """Fingerprint artists come as "A", "A & B", "A feat. B"; a catalogue lists them
+    separately. One whole name in common is a match ("Ye" is not "Yeat")."""
+    return any(same_artist(c, wanted) for c in candidates if c)

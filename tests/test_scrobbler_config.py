@@ -185,3 +185,20 @@ def test_the_raw_scrobble_reads_the_verdict(monkeypatch):
         raise AssertionError("an ignored play must raise")
     except mod.Ignored as e:
         assert e.code == "1"
+
+
+def test_the_keepalive_reaches_systemd_and_is_silent_without_it(tmp_path, monkeypatch):
+    import socket
+
+    from spindle.cli import _sd_notify
+    monkeypatch.delenv("NOTIFY_SOCKET", raising=False)
+    _sd_notify("WATCHDOG=1")                                  # not under systemd: nothing
+    path = str(tmp_path / "notify")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as server:
+        server.bind(path)
+        server.settimeout(2)
+        monkeypatch.setenv("NOTIFY_SOCKET", path)
+        _sd_notify("WATCHDOG=1")
+        assert server.recv(64) == b"WATCHDOG=1"
+    monkeypatch.setenv("NOTIFY_SOCKET", str(tmp_path / "gone"))
+    _sd_notify("WATCHDOG=1")                                  # a dead socket never raises

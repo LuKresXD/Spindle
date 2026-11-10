@@ -58,7 +58,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
+from . import names
 from .fingerprint import TrackInfo
+from .names import artist_key, is_various
 from .resolve import Resolved
 from .tracklist import AlbumTracklist
 
@@ -123,18 +125,16 @@ def normalize_title(title: str) -> str:
 
 
 def _artist_key(name: str) -> str:
-    s = (name or "").lower().replace("$", "s").replace("'", "").replace("’", "")
-    s = re.sub(r"\s*\(\d+\)$", "", s)
-    return " ".join(re.sub(r"[^a-z0-9Ѐ-ӿ]+", " ", s).split())
+    return artist_key(name)
 
 
 def same_artist(a: str, b: str) -> bool:
-    ka, kb = _artist_key(a), _artist_key(b)
-    if not ka or not kb:
+    """One whole name in common; a Various Artists record is anybody's."""
+    if not a or not b:
         return False
-    if "various" in (ka, kb) or "various artists" in (ka, kb):
+    if is_various(a) or is_various(b):
         return True
-    return ka == kb or ka in kb or kb in ka
+    return names.same_artist(a, b)
 
 
 class SessionMode(Enum):
@@ -251,6 +251,11 @@ class ScrobbleSession:
     @property
     def locked_artist(self) -> str:
         return self._album.tracklist.artist if self._album else ""
+
+    @property
+    def locked_release_id(self) -> int | None:
+        """The Discogs release the lock is a pressing of (None: not one of the user's)."""
+        return self._album.tracklist.discogs_release_id if self._album else None
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -683,8 +688,9 @@ class ScrobbleSession:
         # Not on the locked album. Same artist, or a title that names the locked
         # artist (their remix of someone else's track): catalogue confusion, ignore.
         # Different artist: maybe a compilation, but only once it has persisted.
+        locked_key = _artist_key(al.tracklist.artist)
         if same_artist(resolved.track.artist, al.tracklist.artist) or \
-                _artist_key(al.tracklist.artist) in _artist_key(resolved.track.title):
+                (locked_key and locked_key in _artist_key(resolved.track.title)):
             logger.info("Session: '%s — %s' is not on '%s' (same artist) — ignoring",
                         resolved.track.artist, resolved.track.title, al.tracklist.album_name)
             return []
@@ -726,7 +732,8 @@ class ScrobbleSession:
         if not self._album:
             return None
         tl = self._album.tracklist
-        idx = tl.find_track_index(resolved.track.title)
+        # a title that is on the record twice is the copy on the side the needle is on
+        idx = tl.find_track_index(resolved.track.title, near=self._album.current_index)
         if idx is None or resolved.album_id == self._album.album_id:
             return idx
         # another album's hit: the title alone would let a stranger's "Intro" or "Interlude"
@@ -755,7 +762,11 @@ class ScrobbleSession:
         old = self._album.tracklist
         if old.owned and not new_tl.owned:
             return False
-        if not same_artist(new_tl.artist, old.artist):
+        # the same pressing is the same record whatever each list calls its artist (Discogs
+        # files it under "Ye", the catalogue under "Kanye West")
+        same_pressing = (new_tl.discogs_release_id is not None
+                         and new_tl.discogs_release_id == old.discogs_release_id)
+        if not same_pressing and not same_artist(new_tl.artist, old.artist):
             return False
         cur = old.get_track_at(self._album.current_index)
         if cur is None or new_tl.find_track_index(cur.title) is None:
@@ -771,9 +782,9 @@ class ScrobbleSession:
         # the same pressing with more on it: a lock made from Discogs alone (no catalogue had
         # the first track: no lengths, no canonical names) moves to the merged tracklist as
         # soon as a later track brings one
-        if (old.source == "discogs" and new_tl.source == "merged"
-                and new_tl.discogs_release_id is not None
-                and new_tl.discogs_release_id == old.discogs_release_id):
+        # ... and the resolver's edition for a pressing only ever changes to one that agrees
+        # with it better (the album itself, after a hit that only a best-of carried)
+        if same_pressing and new_tl.source == "merged":
             return True
         return len(new_tl.tracks) > len(old.tracks)
 

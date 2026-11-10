@@ -32,6 +32,7 @@ from pathlib import Path
 import requests
 
 from .fingerprint import TrackInfo
+from .names import artist_keys, fold, words
 from .tracklist import AlbumTracklist, norm_title, side_of, titles_match
 
 logger = logging.getLogger(__name__)
@@ -45,25 +46,28 @@ _MIN_GAP = 1.1          # seconds between API calls (stay well under 60/min)
 _RETRY_IN = 600         # seconds before retrying a failed collection refresh
 
 
+VARIOUS_ID = 194        # Discogs' "Various": nobody, so nothing to look up
+
+
 def clean_artist(name: str) -> str:
-    """"Travis Scott (2)" -> "Travis Scott"; "Various" -> "Various Artists"."""
-    s = re.sub(r"\s*\(\d+\)$", "", name or "").strip()
+    """"Travis Scott (2)" -> "Travis Scott"; "Future (4), Metro Boomin" -> "Future, Metro
+    Boomin"; "Various" -> "Various Artists"."""
+    s = re.sub(r"\s*\(\d+\)(?=\s*(?:$|[,&/+;]))", "", name or "").strip()
     return "Various Artists" if s.lower() == "various" else s
 
 
 def _norm(s: str) -> str:
-    # "$" reads as "s": Discogs files A$AP Rocky under "ASAP Rocky", and without this none of his
-    # A$AP records was recognised as his (2026-11-09)
-    s = s.lower().replace("$", "s").replace("'", "").replace("’", "")
+    """An album title as a comparison key."""
+    s = fold(s).replace("$", "s").replace("'", "").replace("’", "")
     s = re.sub(r"\s*\(\d+\)$", "", s)                       # Discogs "Artist (2)" disambiguation
     s = re.sub(r"[\(\[].*?[\)\]]", " ", s)
     s = re.sub(r"\b(deluxe|edition|remaster(?:ed)?|expanded|anniversary|version|lp|ep)\b", " ", s)
     s = re.sub(r"\b(feat|ft|featuring)\b.*$", " ", s)
-    s = re.sub(r"[^a-z0-9Ѐ-ӿ]+", " ", s)
-    return " ".join(s.split())
+    return words(s)
 
 
 def _same(a: str, b: str) -> bool:
+    """Loose album-title test (one contains the other): "Blond" / "Blonde"."""
     a, b = _norm(a), _norm(b)
     return bool(a) and bool(b) and (a == b or a in b or b in a)
 
@@ -106,6 +110,8 @@ class Release:
     typical_usd: float | None = None   # Discogs' suggested price for a VG+ copy (sales history)
     for_sale: int | None = None        # copies for sale
     priced_at: float = 0.0             # when the prices were last asked (0 = never)
+    artists: list = field(default_factory=list)      # the credited names, one each (Discogs' list)
+    artist_ids: list = field(default_factory=list)   # their Discogs artist ids, parallel
 
     @property
     def positions(self) -> list[tuple[str, str]]:
@@ -115,13 +121,18 @@ class Release:
     def vinyl(self) -> bool:
         return not self.formats or any("vinyl" in f.lower() for f in self.formats)
 
+    @property
+    def has_sides(self) -> bool:
+        return any(side_of(t.get("position", "")) for t in self.tracks)
+
     def to_dict(self) -> dict:
         return {"id": self.id, "artist": self.artist, "title": self.title, "year": self.year,
                 "formats": self.formats, "tracks": self.tracks, "loaded": self.loaded,
                 "added": self.added, "cover": self.cover, "master_id": self.master_id,
                 "released": self.released, "price_usd": self.price_usd,
                 "typical_usd": self.typical_usd, "for_sale": self.for_sale,
-                "priced_at": self.priced_at}
+                "priced_at": self.priced_at, "artists": self.artists,
+                "artist_ids": self.artist_ids}
 
     @staticmethod
     def from_dict(r: dict) -> Release:
@@ -138,7 +149,9 @@ class Release:
                        None if released is None else int(released),
                        num(r.get("price_usd")), num(r.get("typical_usd")),
                        None if r.get("for_sale") is None else int(r["for_sale"]),
-                       float(r.get("priced_at") or 0))
+                       float(r.get("priced_at") or 0),
+                       [str(a) for a in r.get("artists") or []],
+                       [int(a) for a in r.get("artist_ids") or []])
 
 
 class DiscogsCollection:
@@ -148,6 +161,12 @@ class DiscogsCollection:
         self.username = username
         self.cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._details: dict[int, dict] = {}
+        # what else an artist is called, by Discogs artist id: name variations ("Kino" for
+        # Кино) and aliases ("Kanye West" for Ye). None = asked, Discogs has no such artist.
+        self._aka: dict[int, list[str]] = {}
+        self._keys: dict[int, set[str]] = {}        # release id -> every key its artists answer to
+        self._track_keys: dict[int, set[str]] = {}  # release id -> its tracks' own artists' keys
+        self._names: dict[str, list[str]] = {}      # names_for() answers
         self._http = session or requests.Session()
         self._http.headers.update({"User-Agent": _UA,
                                    "Authorization": f"Discogs token={token}"})
@@ -203,6 +222,7 @@ class DiscogsCollection:
             try:
                 self._refresh_if_stale()
                 self._prefetch_tracklists()
+                self._prefetch_artists()
                 self._prefetch_masters()
                 self._prefetch_prices()
             except Exception as e:  # the thread must survive anything
@@ -216,6 +236,7 @@ class DiscogsCollection:
         """Blocking refresh + prefetch (tests, one-off scripts)."""
         self._refresh_if_stale()
         self._prefetch_tracklists()
+        self._prefetch_artists()
         self._prefetch_masters()
         self._prefetch_prices()
 
@@ -238,9 +259,48 @@ class DiscogsCollection:
         fresh = [r for r in pool if r.id not in (exclude or set())] or pool
         return random.choice(fresh) if fresh else None
 
-    def releases_for_artist(self, artist: str) -> list[Release]:
+    def _artist_keys(self, rel: Release) -> set[str]:
+        """Every key this record's artists answer to: the credit as Discogs prints it, each
+        credited name, and what Discogs says each is also called."""
+        keys = self._keys.get(rel.id)
+        if keys is None:
+            keys = set(artist_keys(rel.artist))
+            for name in rel.artists:
+                keys |= artist_keys(name)
+            for aid in rel.artist_ids:
+                for name in self._aka.get(aid) or []:
+                    keys |= artist_keys(name)
+            self._keys[rel.id] = keys
+        return keys
+
+    def _forget_keys(self) -> None:
+        self._keys.clear()
+        self._track_keys.clear()
+        self._names.clear()
+
+    def names_for(self, artist: str) -> list[str]:
+        """Every name the shelf knows this artist by: for each credited artist who answers
+        to `artist`, the credited name and what Discogs says they are also called. Empty
+        when the artist is on none of the user's records."""
+        known = self._names.get(artist)
+        if known is not None:
+            return known
+        want = artist_keys(artist)
+        out: list[str] = []
         with self._lock:
-            return [r for r in self._releases if _same(r.artist, artist)]
+            for r in self._releases:
+                for name, aid in zip(r.artists, r.artist_ids, strict=False):
+                    group = [name, *(self._aka.get(aid) or [])]
+                    if name in out or not any(want & artist_keys(n) for n in group):
+                        continue
+                    out.extend(n for n in group if n and n not in out)
+            self._names[artist] = out
+        return out
+
+    def releases_for_artist(self, artist: str) -> list[Release]:
+        want = artist_keys(artist)
+        with self._lock:
+            return [r for r in self._releases if want & self._artist_keys(r)]
 
     def find_release(self, artist: str, album: str) -> Release | None:
         """The owned pressing of an album, exact title first, vinyl first."""
@@ -251,18 +311,35 @@ class DiscogsCollection:
         loose = exact or [r for r in cands if _same(r.title, album)]
         if not loose:
             return None
-        loose.sort(key=lambda r: (not r.vinyl, not r.loaded, r.id))
+        loose.sort(key=lambda r: (not r.vinyl, not r.loaded, not r.has_sides, r.id))
         return loose[0]
 
     def releases_with_track(self, artist: str, title: str) -> list[Release]:
-        """Owned releases (tracklist known) that carry this track; vinyl first."""
+        """Owned releases (tracklist known) that carry this track by this artist: the record
+        is the artist's, or the track on it is (a Various Artists compilation, a guest's
+        track on a label sampler). Vinyl first, then the copy that knows its sides."""
+        want = artist_keys(artist)
         out = []
-        for r in self.releases_for_artist(artist):
-            if not r.loaded:
-                continue
-            if any(titles_match(t.get("title", ""), title) for t in r.tracks):
-                out.append(r)
-        out.sort(key=lambda r: (not r.vinyl, r.id))
+        with self._lock:
+            for r in self._releases:
+                if not r.loaded:
+                    continue
+                whole = bool(want & self._artist_keys(r))
+                if not whole:
+                    theirs = self._track_keys.get(r.id)
+                    if theirs is None:
+                        theirs = self._track_keys[r.id] = {
+                            k for t in r.tracks if t.get("artist")
+                            for k in artist_keys(t["artist"])}
+                    if not want & theirs:
+                        continue                # nobody on this record answers to the name
+                for t in r.tracks:
+                    if not whole and not (t.get("artist") and want & artist_keys(t["artist"])):
+                        continue
+                    if titles_match(t.get("title", ""), title):
+                        out.append(r)
+                        break
+        out.sort(key=lambda r: (not r.vinyl, not r.has_sides, r.id))
         return out
 
     def owned_album_titles(self, artist: str) -> list[str]:
@@ -328,6 +405,7 @@ class DiscogsCollection:
             self._releases = releases
             self._fetched_at = time.time()
             self.last_error = None
+            self._forget_keys()
             self._save_cache()
         logger.info("Discogs: %d releases in collection", len(releases))
 
@@ -346,9 +424,12 @@ class DiscogsCollection:
                 if rid in seen:                         # a second copy is still one record
                     continue
                 seen.add(rid)
-                artists = ", ".join(a.get("name", "") for a in info.get("artists", []))
+                credited = info.get("artists", []) or []
+                artists = ", ".join(a.get("name", "") for a in credited)
                 rel = by_id.get(rid) or Release(rid, artists, info.get("title", ""))
                 rel.artist, rel.title = artists, info.get("title", rel.title)
+                rel.artists = [a.get("name", "") for a in credited]
+                rel.artist_ids = [int(a.get("id") or 0) for a in credited]
                 rel.year = int(info.get("year") or rel.year or 0)
                 rel.formats = [f.get("name", "") for f in info.get("formats", [])] or rel.formats
                 rel.added = str(item.get("date_added") or rel.added or "")[:10]
@@ -398,6 +479,7 @@ class DiscogsCollection:
         primary = next((i.get("uri", "") for i in images if i.get("type") == "primary"),
                        images[0].get("uri", "") if images else "")
         with self._lock:
+            self._track_keys.pop(rel.id, None)
             rel.tracks = tracks
             rel.loaded = True
             if not rel.year:
@@ -410,6 +492,38 @@ class DiscogsCollection:
                     rel.released = rel.year
             self._save_cache()
         logger.debug("Discogs: loaded %s — %s (%d tracks)", rel.artist, rel.title, len(tracks))
+
+    def _prefetch_artists(self) -> None:
+        """What each artist on the shelf is also called, one call per artist, once: Discogs
+        lists name variations (Кино: "Kino", "КИНО") and aliases (Ye: "Kanye West"). A
+        fingerprint that names the artist the other way is then still this record's."""
+        while not self._stop.is_set():
+            with self._lock:
+                pending = [aid for r in self._releases for aid in r.artist_ids
+                           if aid and aid != VARIOUS_ID and aid not in self._aka]
+            if not pending:
+                return
+            aid = pending[0]
+            names: list[str] = []
+            try:
+                data = self._get(f"/artists/{aid}")
+                names = [str(n) for n in data.get("namevariations") or []]
+                names += [str(a.get("name", "")) for a in data.get("aliases") or []]
+            except requests.HTTPError as e:
+                if e.response is None or e.response.status_code != 404:
+                    self.last_error = str(e)
+                    logger.warning("Discogs: artist %s failed: %s", aid, e)
+                    return
+            except requests.RequestException as e:
+                self.last_error = str(e)
+                logger.warning("Discogs: artist %s failed: %s", aid, e)
+                return
+            with self._lock:
+                self._aka[aid] = [n for n in names if n]
+                self._forget_keys()
+                self._save_cache()
+            if len(set(pending)) == 1:
+                logger.info("Discogs: other names known for %d artists", len(self._aka))
 
     def _prefetch_masters(self) -> None:
         """The original release year lives on the master: one call per record whose
@@ -562,6 +676,9 @@ class DiscogsCollection:
             d = json.loads(self._cache_file().read_text())
             self._fetched_at = float(d.get("fetched_at", 0))
             self._releases = [Release.from_dict(r) for r in d.get("releases", [])]
+            self._aka = {int(k): list(v) for k, v in (d.get("aka") or {}).items()}
+            if any(not r.artist_ids for r in self._releases):
+                self._fetched_at = 0.0      # a cache from before artist ids: ask the list again
         except (OSError, ValueError, KeyError):
             pass
 
@@ -571,6 +688,7 @@ class DiscogsCollection:
             tmp.write_text(json.dumps({
                 "fetched_at": self._fetched_at,
                 "releases": [r.to_dict() for r in self._releases],
+                "aka": {str(k): v for k, v in self._aka.items()},
             }))
             tmp.replace(self._cache_file())
         except OSError as e:

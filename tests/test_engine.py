@@ -774,3 +774,35 @@ def test_a_quiet_passage_in_the_middle_of_the_last_track_does_not_end_the_side(t
     cap.level = -40                                           # a breakdown a minute before the end
     st = run(player, clock, 6)
     assert st.phase == Phase.PLAYING
+
+
+def test_a_record_nothing_recognises_is_not_asked_about_every_two_seconds(tmp_path):
+    """Music no service knows: one lookup per tick, 600 a side, against the one recogniser
+    there is. After a few misses in a row the pace eases to the locked one; the first hit
+    brings the fast pace back."""
+    clock = FakeClock()
+    known = {"on": False}
+
+    def identify(path):
+        if known["on"]:
+            return TrackInfo(title="Track 2", artist="Madvillain", album="Madvillainy",
+                             duration=72)
+        return None
+
+    player, cap, rec = make_player(tmp_path, clock, identify)
+    cap.level = -20
+    for _ in range(2):
+        player.tick()
+        clock.advance(2)
+    before = cap.windows
+    for _ in range(150):                        # five minutes of it
+        player.tick()
+        clock.advance(2)
+    asked = cap.windows - before
+    assert 30 <= asked <= 50                    # about one in four ticks, not 150
+    assert player.phase == Phase.LISTENING
+    known["on"] = True                          # the next record is one the services know
+    for _ in range(6):
+        player.tick()
+        clock.advance(2)
+    assert player.phase == Phase.PLAYING and player._misses == 0

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import os
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -55,6 +57,23 @@ def _setup_logging(cfg: SpindleConfig, verbose: bool) -> None:
     for noisy in ("httpcore", "httpx", "urllib3", "pylast", "asyncio", "aiohttp_retry",
                   "aiohttp", "shazamio", "shazamio_core", "shazamio.request", "PIL"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def _sd_notify(message: str) -> None:
+    """One line to systemd's notification socket; nothing when not run by systemd. The unit
+    asks for a keep-alive (WatchdogSec): a tick loop that hangs without dying (a blocked
+    read, a deadlock) is then restarted instead of leaving a deaf service "active"."""
+    path = os.environ.get("NOTIFY_SOCKET")
+    if not path:
+        return
+    if path.startswith("@"):
+        path = "\0" + path[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(path)
+            sock.sendall(message.encode())
+    except OSError:
+        pass
 
 
 def main() -> None:
@@ -199,6 +218,7 @@ def main() -> None:
             logger.error("Error in tick: %s", e, exc_info=True)
             notifier.error("A tick failed", str(e))
             time.sleep(5)
+        _sd_notify("WATCHDOG=1")      # the loop is alive (spindle.service: WatchdogSec)
         next_tick += DEFAULT_STEP
         delay = next_tick - time.monotonic()
         if delay > 0:

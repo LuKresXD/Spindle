@@ -74,28 +74,72 @@ on the Spotify app once left every record that was not in memory without names, 
 covers or scrobbles). Deezer album ids carry a `dz:` prefix; the same pressing reached
 through either catalogue is the same record to the session.
 
-## Resolution: which album?
+Until something is recognised the engine asks as fast as answers come. After five misses
+in a row each further one waits 2 s longer, up to the locked pace of one lookup in 8 s: a
+record no service knows costs about 150 lookups a side instead of 600, against an
+unofficial API that is the only recogniser there is. The first hit brings the fast pace
+back.
+
+## Resolution: which record?
 
 A fingerprint says *artist, title*. The same recording is on the album, a
-single, a few compilations and a deluxe edition. The `Resolver` ranks the
-Spotify candidates by:
+single, a few compilations and a deluxe edition, and a catalogue search lists
+them in an order of its own. The `Resolver` decides with what it knows about
+the shelf, by rules that hold for any collection (there is no list of special
+albums anywhere):
 
-1. title and artist actually match
-2. **the album is in the Discogs collection** (the record on the platter)
-3. the album the session is already locked onto
-4. album > single > compilation; standard edition > deluxe / remaster
-5. Spotify's own order
+1. **The record comes first.** A hit whose title is on a pressing in the
+   Discogs collection *is* that pressing: its order and its sides are the
+   truth. A track counts as the collection's when the release is by the
+   hit's artist, or that one track on it is (a Various Artists compilation, a
+   guest's track on a label sampler).
+2. **The catalogue dresses the record.** The streaming edition that lends it
+   names, lengths and a cover is chosen by how well the two lists agree, both
+   ways: how much of the pressing the edition contains, and how much of the
+   edition is on the pressing. Never by its name ("Blond" on the sleeve is
+   "Blonde" in the catalogue), and not by coverage alone (a 40-track
+   anthology contains a whole album; an album contains a whole 7"). An
+   edition must contain half the pressing and agree with it at least 50%.
+3. **One record, one edition.** When the hit's own albums fit loosely or not
+   at all (a bonus track that only came out as a single, a remix closing side
+   D), the catalogue is asked about the tracks next to it on the side, and
+   the best edition found is remembered for the whole record.
+4. **No edition at all**: the pressing itself is the album (Discogs' list),
+   and each track takes its catalogue name and length the first time it is
+   heard; lengths the list lacks are asked for a couple per identification,
+   the tracks after the needle first.
+5. **A title on two owned records** is the one the session is locked on, else
+   the one the fingerprint names as its album, else the one the catalogue
+   lists first for that track. (The session can still change its mind: see
+   Re-lock.)
+6. **Nothing owned**: a streaming album. The one the session is locked on,
+   album > single > compilation, standard > deluxe / remaster, then the
+   catalogue's order.
 
-If the chosen album is owned, the tracklist is **merged** with the pressing:
-Discogs order and positions (`A1 … D3`), Spotify names and durations. If
-Spotify has nothing but the collection has a release with that track, the
-**Discogs tracklist alone** carries the album lock (white labels, local
-pressings, anything streaming never got).
-A box set is one Discogs release (Sade's *This Far*: six records, sides A to L),
-so against a nine-track album the whole box never reaches the coverage bar; the
-resolver then cuts the box to the run of sides that hold the album's tracks
+A merged list keeps Discogs' order and positions (`A1 … D3`) with the
+catalogue's names and durations. A box set is one Discogs release (Sade's
+*This Far*: six records, sides A to L), so no album ever contains half of it;
+the resolver cuts the box to the run of sides that hold the album's tracks
 (`box_part`) and merges with that, so the side map and the flips still work.
-One record is never cut this way: a half-matched single LP is another edition.
+One record is never cut this way.
+
+The resolver hands out **one list object per pressing and edition** for the
+life of the process, so what it learns later (a length, a canonical name)
+reaches a session that locked earlier.
+
+### Names
+
+Artists are compared as whole names, never as substrings: "Ye" is not "Yeat"
+and "Che" is not "Cher". A credit line is taken apart ("A, B & C feat. D"),
+case, accents and Discogs' "(2)" numbering are folded, "$" between letters
+reads as "s" (A$AP, Ty Dolla $ign), and letters of every script are kept: a
+Greek, Japanese or Korean title has a key like any other. What two strings
+cannot say comes from data: for every artist on the shelf the collection asks
+Discogs once for its **name variations and aliases** (Кино is also "Kino";
+Ye is also "Kanye West") and a record answers to all of them.
+
+A title that is on a record twice (the album cut on side B, its remix closing
+side D) is the copy on the side the needle is on.
 
 The collection loads on its own thread at start, refreshes daily, and
 prefetches every release's tracklist once (cached on disk). Lookups from the
@@ -151,7 +195,8 @@ engine are memory-only.
   side boundary.
 * **Re-lock**: the session moves to a better tracklist when one appears
   (the owned pressing once the collection loaded, the album after a lock on
-  a single, the edition that actually has the track playing). What was
+  a single, the edition that actually has the track playing, a better
+  edition of the same pressing when the resolver finds one). What was
   scrobbled carries over by title. An owned pressing is never traded for a
   streaming edition. A stranger's lock that his record displaces before
   anything was scrobbled restarts the session on his record, with the
@@ -189,10 +234,11 @@ send flushes the queue; otherwise it is retried every 10 minutes.
 |---|---|
 | `capture.py` | continuous arecord → ring buffer, levels, WAV windows |
 | `fingerprint.py` | Shazam, optional AcoustID (`Identifier`), corrections.yaml |
-| `resolve.py` | fingerprint → album (catalogue + collection) |
+| `resolve.py` | fingerprint → record: the owned pressing first, dressed by the best-agreeing edition |
+| `names.py` | names compared as names: keys, credit lines, any script |
 | `spotify.py` | candidates, canonical names, album tracklists |
 | `deezer.py` | the second catalogue and `Catalogue`, which asks Spotify first |
-| `discogs.py` | the collection: releases, tracklists, positions |
+| `discogs.py` | the collection: releases, tracklists, positions, artists' other names |
 | `tracklist.py` | `AlbumTracklist`, sides, Discogs ↔ Spotify merge |
 | `session.py` | album lock, re-lock, compilation, backfill, timing |
 | `engine.py` | the tick, `IdentifyWorker`, `ScreenState` |
@@ -220,3 +266,15 @@ The cover follows the track the session believes is playing, not the last
 identification: a sample at the end of a song identifies as its source (the
 O'Jays inside Drake's Middle of the Ocean, 2026-11-06) and must change neither
 the track nor the cover.
+
+### Panel wear and a silent engine
+
+An OLED remembers what stays lit in one place. The layers that do (the home for a whole
+side, the Listening mark, a page word) follow two CSS variables that the page walks a pixel
+or two every 150 s, on a path that takes hours to repeat and stays inside a 12 x 8 px box;
+the blurred backdrop stays put, so no edge ever shows. The Listening mark settles to 40%
+after two minutes (a record nothing identifies would leave it at full white for a side).
+The engine speaks every 2 s: after 30 s of nothing the page drops to the black idle
+screen instead of leaving a frozen "now playing" lit, and picks up again with the next
+event.
+

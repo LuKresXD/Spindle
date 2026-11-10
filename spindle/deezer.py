@@ -85,10 +85,13 @@ class DeezerClient:
 
     # ── search ───────────────────────────────────────────────────────────────
 
-    def search_tracks(self, artist: str, title: str) -> list[SpotifyCandidate]:
+    def search_tracks(self, artist: str, title: str,
+                      also: tuple[str, ...] = ()) -> list[SpotifyCandidate]:
         """Candidates for a fingerprinted artist + title, Deezer's order, already filtered
-        to the ones whose title and artist match (its plain search is generous)."""
-        key = f"{artist.lower()}|||{title.lower()}"
+        to the ones whose title and artist match (its plain search is generous). `also`:
+        other names the artist goes by (Ye's tracks are filed under Kanye West)."""
+        key = f"{artist.lower()}|||{title.lower()}|||{len(also)}"
+        names = (artist, *also)
         if key in self._search_cache:
             return self._search_cache[key]
         clean_title = _FEAT_RE.sub("", title).strip() or title
@@ -111,9 +114,9 @@ class DeezerClient:
             album_artist = ((meta.get("artist") or {}).get("name", "") or "") if meta else ""
             # the track is his when its artist is, or when it sits on his album (a guest's name
             # in the artist field must not hide it)
-            if not artist_matches([who], artist) and not (
+            if not any(artist_matches([who], n) for n in names) and not (
                     album_artist and album_artist.lower() not in _VARIOUS
-                    and artist_matches([album_artist], artist)):
+                    and any(artist_matches([album_artist], n) for n in names)):
                 continue
             who = _primary(album_artist, who, name)
             cands.append(SpotifyCandidate(
@@ -189,13 +192,14 @@ class Catalogue:
         self.fallback = fallback
         self._fallback_logged = 0.0
 
-    def search_tracks(self, artist: str, title: str) -> list[SpotifyCandidate]:
+    def search_tracks(self, artist: str, title: str,
+                      also: tuple[str, ...] = ()) -> list[SpotifyCandidate]:
         cands: list[SpotifyCandidate] = []
         primary_up = self.primary is not None and getattr(self.primary, "available", True)
         if primary_up:
             cands = self.primary.search_tracks(artist, title)
         if not cands and self.fallback is not None:
-            cands = self.fallback.search_tracks(artist, title)
+            cands = self.fallback.search_tracks(artist, title, also)
             if cands and not primary_up and time.time() - self._fallback_logged > 1800:
                 self._fallback_logged = time.time()
                 logger.warning("Spotify is unavailable: names and track lengths come from "

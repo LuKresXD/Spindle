@@ -764,3 +764,69 @@ def test_a_track_of_unknown_length_that_is_still_playing_is_not_its_own_tail(clo
         clock.t = base + 8 * k
         identified(s, album, "1Train", t0, at=clock.t, offset=(clock.t - 6) - t0)
     assert s.album_state.current_index == 0                    # back on the track that is playing
+
+
+def test_the_same_pressing_is_the_same_record_whatever_each_list_calls_the_artist(clock):
+    """Discogs files Bully under "Ye", the catalogue under "Kanye West": the lock made from
+    Discogs alone never moved to the full data, because the artists "differed"."""
+    bare = make_album([None, None], titles=["Preacher Man", "Circles"], artist="Ye",
+                      positions=["A1", "A2"], owned=True, source="discogs", album_id="dg:9")
+    bare.discogs_release_id = 9
+    full = make_album([200, 180], titles=["PREACHER MAN", "CIRCLES"], artist="Kanye West",
+                      positions=["A1", "A2"], owned=True, source="merged", album_id="dz:6")
+    full.discogs_release_id = 9
+    s = ScrobbleSession(clock=clock)
+    t0 = clock.t
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(bare, "Preacher Man"), t0, at=clock.t)
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(full, "PREACHER MAN"), t0, at=clock.t)
+    assert s.album_state.tracklist is full and s.locked_release_id == 9
+
+
+def test_a_better_edition_of_the_same_pressing_replaces_the_first_one(clock):
+    """The first hit of a side was only on a best-of; the album itself came with the second
+    track. Same pressing, same length of list: the session stayed on the best-of's names."""
+    titles = ["Smooth Operator", "Your Love Is King", "Hang On To Your Love"]
+    poor = make_album([240, None, None], titles=titles, album="The Best of Sade",
+                      positions=["A1", "A2", "A3"], owned=True, source="merged", album_id="best")
+    poor.discogs_release_id = 4
+    good = make_album([298, 221, 353], titles=titles, album="Diamond Life",
+                      positions=["A1", "A2", "A3"], owned=True, source="merged", album_id="dl")
+    good.discogs_release_id = 4
+    s = ScrobbleSession(clock=clock)
+    t0 = clock.t
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(poor, "Smooth Operator"), t0, at=clock.t)
+    assert s.album_state.tracklist is poor
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(good, "Smooth Operator"), t0, at=clock.t)
+    al = s.album_state
+    assert al.tracklist is good and al.current_index == 0
+    assert al.tracklist.tracks[1].duration == 221
+
+
+def test_a_remix_closing_side_d_is_not_the_album_cut_on_side_b(clock):
+    """Graduation's 2LP: D2 is a remix of B2 under the same title. Heard on side D it
+    anchored to B2 and the screen jumped two sides back."""
+    titles = ["Good Morning", "Champion", "I Wonder", "Can't Tell Me Nothing",
+              "Homecoming", "Big Brother", "Stronger (A-Trak Remix)",
+              "Can't Tell Me Nothing (Featuring Young Jeezy)"]
+    album = make_album([200, 170, 240, 270, 200, 280, 300, 250], titles=titles, owned=True,
+                       positions=["A1", "A2", "B1", "B2", "C1", "C2", "D1", "D2"])
+    s = ScrobbleSession(clock=clock)
+    t0 = clock.t
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(album, "Stronger (A-Trak Remix)"), t0, at=clock.t)
+    assert s.album_state.current_index == 6
+    clock.advance(300)
+    for _ in range(3):
+        clock.advance(8)
+        # the resolver names the album cut (the better spelling); the needle is on side D
+        s.on_identified(resolved_for(album, "Can't Tell Me Nothing"), t0, at=clock.t)
+    assert s.album_state.current_index == 7

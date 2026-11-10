@@ -59,6 +59,11 @@ IdentifyFn = Callable[[Path], TrackInfo | None]
 LOCKED_IDENTIFY_INTERVAL = 8.0
 UNRESOLVED_HOLD_S = 150.0     # a hit nobody knows must be the only answer this long before it shows
 HOLD_IDENTIFY_INTERVAL = 4.0  # while a stranger is held: ask often, his record may be next
+# Nothing recognised yet: ask as fast as answers come, for a while. A record no service knows
+# (a test pressing, a tape, a friend's demo) would otherwise be asked about every 2 s for a
+# whole side, 600 lookups against an unofficial API that is the only recogniser there is.
+MISS_FREE = 5                 # misses in a row that keep the fast cadence
+MISS_STEP_S = 2.0             # ... each further one waits this much longer
 RUNOUT_TICKS = 3              # consecutive ticks of once-a-revolution thumps that end a side
 RUNOUT_WINDOW_S = 45.0        # a lead-out is believed only this close to the last track's end
 UNOWNED_HOLD_S = 45.0         # a session's first hit that is not his record waits this long to show
@@ -265,6 +270,7 @@ class Player:
         self._noise_identify_at = 0.0
         self._noise_identify_interval = NOISE_IDENTIFY_FIRST
         self._id_disagreed = False                 # last ID named a track the clock is not on
+        self._misses = 0                           # identifications in a row that named nothing
         self._last_disagreed = False               # ... and so did the one before (no second hurry)
         self._post_side = False                    # a side just ended and the needle is not up yet
         self._needle_up_since: float | None = None
@@ -573,6 +579,7 @@ class Player:
         self._loud_ticks = 0
         self._hot_warned = False
         self.music_since = None
+        self._misses = 0
         self._end_noise_run()
         self.playing = _Playing()
         self.last_submit_at = 0.0
@@ -652,7 +659,8 @@ class Player:
         elif settled or self._held is not None or self._side_over_by_clock():
             interval = LOCKED_IDENTIFY_INTERVAL
         else:
-            interval = 0.0
+            interval = min(LOCKED_IDENTIFY_INTERVAL,
+                           MISS_STEP_S * max(0, self._misses - MISS_FREE))
         if interval and not self._id_disagreed and now - self.last_submit_at < interval:
             return False
         self._id_disagreed = False
@@ -664,6 +672,7 @@ class Player:
         ctx = ResolveContext(
             locked_album_id=self.session.locked_album_id if self.session else "",
             locked_artist=self.session.locked_artist if self.session else "",
+            locked_release_id=self.session.locked_release_id if self.session else None,
         )
         if self.worker.submit(IdentifyJob(wav, ctx, now)):
             self.last_submit_at = now
@@ -675,11 +684,13 @@ class Player:
         if res.took > 15:
             logger.warning("Identification took %.0fs", res.took)
         if res.resolved is None:
+            self._misses += 1
             if self.session and self.session.is_locked():
                 predicted = self.session.get_current_track()
                 if predicted:
                     self._now_playing(predicted)
             return
+        self._misses = 0
         self._apply_identification(res.resolved, res.at, res.art)
 
     def _unowned_holding(self, now: float, owned_now: bool = False) -> bool:
@@ -743,7 +754,7 @@ class Player:
             if al is not None:
                 # a hit off the clock's track, or off the record entirely (a stranger's lock
                 # giving way to his record), hurries the next identification
-                idx = al.tracklist.find_track_index(track.title)
+                idx = al.tracklist.find_track_index(track.title, near=al.current_index)
                 disagreed = idx is None or idx != al.current_index
                 # the first disagreement hurries one lookup; a streak of them (a stranger's
                 # answer repeating over his locked record) does not turn 8 s into 2 s for good

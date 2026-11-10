@@ -18,7 +18,7 @@ jobs:
         run: |
           pip install ruff
       - name: Lint
-        run: ruff check spindle/
+        run: ruff check spindle/ tests/ tools/
 
   typecheck:
     runs-on: ubuntu-latest
@@ -36,11 +36,14 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]    # 3.13 is what Raspberry Pi OS (trixie) runs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install
         run: |
           sudo apt-get update && sudo apt-get install -y libchromaprint-tools fonts-dejavu-core

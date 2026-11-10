@@ -60,8 +60,28 @@ def test_merge_keeps_pressing_order_and_spotify_durations():
     assert m.find_track_index("Pretty") == 0       # fuzzy lookup still finds Spotify's spelling
 
 
+def test_a_title_that_is_on_the_record_twice_is_the_copy_on_the_needles_side():
+    """A 2LP whose side D closes on a remix of a side B track: heard on side D, the title
+    anchored to B2 and the screen jumped two sides back."""
+    titles = ["Good Morning", "Champion", "I Wonder", "Can't Tell Me Nothing",
+              "Homecoming", "Big Brother", "Stronger (A-Trak Remix)",
+              "Can't Tell Me Nothing (Featuring Young Jeezy)"]
+    al = make_album([200] * 8, titles=titles,
+                    positions=["A1", "A2", "B1", "B2", "C1", "C2", "D1", "D2"])
+    assert al.find_track_index("Can't Tell Me Nothing") == 3            # no needle: best spelling
+    assert al.find_track_index("Can't Tell Me Nothing", near=3) == 3
+    assert al.find_track_index("Can't Tell Me Nothing", near=6) == 7    # on side D: the remix
+    assert al.find_track_index("Can't Tell Me Nothing", near=7) == 7
+    assert al.find_track_index("Can't Tell Me Nothing", near=4) == 3    # side C has neither
+    assert al.find_track_index("Champion", near=7) == 1                 # one copy: that one
+    assert al.find_track_index("Nope", near=2) is None
+    plain = make_album([100] * 4, titles=["Intro", "Song", "Intro", "Outro"])
+    assert plain.find_track_index("Intro", near=3) == 2                 # no sides: the nearer
+
+
 def test_discogs_helpers():
     assert clean_artist("Travis Scott (2)") == "Travis Scott"
+    assert clean_artist("Future (4), Metro Boomin") == "Future, Metro Boomin"
     assert clean_artist("Various") == "Various Artists"
     assert parse_duration("3:45") == 225 and parse_duration("1:02:03") == 3723
     assert parse_duration("") is None and parse_duration("abc") is None
@@ -91,11 +111,16 @@ def cand(name, artist, album_id, album, kind, rank, total=10):
 
 
 class FakeSpotify:
-    def __init__(self, cands, albums):
+    def __init__(self, cands, albums, by_title=None):
         self.cands = cands
         self.albums = albums          # album_id -> AlbumTracklist
+        self.by_title = by_title      # title -> candidates; None = `cands` whatever is asked
+        self.asked = []
 
     def search_tracks(self, artist, title):
+        self.asked.append(title)
+        if self.by_title is not None:
+            return list(self.by_title.get(title, []))
         return list(self.cands)
 
     def get_album_tracklist(self, album_id):
@@ -151,7 +176,7 @@ def test_resolver_prefers_the_owned_album_over_singles_and_compilations():
     assert out.album_id == "album" and out.owned
     assert out.tracklist.source == "merged" and out.tracklist.positions == ["A1", "A2", "A3", "A4"]
     assert [t.duration for t in out.tracklist.tracks] == [418, 250, 269, 162]
-    assert out.track.title == "the BLACK seminole." and out.track.source == "spotify_lookup"
+    assert out.track.title == "the BLACK seminole." and out.track.source == "spotify_album"
     assert out.art_url == "https://img/album"
 
 
@@ -272,3 +297,200 @@ def test_edition_marker_is_a_qualifier_not_a_word_in_the_title():
              "Stronger Than Pride", "Special Edition Of You", "1999", "2 Alivë (Geëk Pack)"]
     assert [bool(EDITION_RE.search(x)) for x in editions] == [True] * len(editions)
     assert [bool(EDITION_RE.search(x)) for x in plain] == [False] * len(plain)
+
+
+# ── the record first: editions chosen by how well they agree with the pressing ───────────
+
+def _release(rid, artist, title, titles, sides=("A", "B"), durations=None):
+    """A loaded vinyl release whose tracks are split evenly over `sides`."""
+    per = -(-len(titles) // len(sides))
+    tracks = [{"position": f"{sides[i // per]}{i % per + 1}", "title": t,
+               "duration": durations[i] if durations else None, "artist": ""}
+              for i, t in enumerate(titles)]
+    return Release(rid, artist, title, 2020, ["Vinyl"], tracks, True)
+
+
+BAD = ["Bad", "The Way You Make Me Feel", "Speed Demon", "Liberian Girl", "Just Good Friends",
+       "Another Part of Me", "Man in the Mirror", "I Just Can't Stop Loving You",
+       "Dirty Diana", "Smooth Criminal"]
+
+
+def test_the_edition_is_the_album_that_contains_the_record_not_the_one_listed_first():
+    """Deezer lists "Smooth Criminal" on a soundtrack first; the old pick went by the list's
+    order and the album's name, and the side ran on a list with 4 of the record's 10 tracks."""
+    cands = [cand("Smooth Criminal", "Michael Jackson", "thisisit", "This Is It", "album", 0),
+             cand("Smooth Criminal - 2012 Remaster", "Michael Jackson", "bad", "Bad (Remastered)",
+                  "album", 1)]
+    albums = {
+        "thisisit": make_album([250] * 8, artist="Michael Jackson", album="This Is It",
+                               album_id="thisisit",
+                               titles=["Wanna Be Startin' Somethin'", "Jam", "Human Nature",
+                                       "Smooth Criminal", "The Way You Make Me Feel",
+                                       "Man in the Mirror", "Thriller", "Bad"]),
+        "bad": make_album(list(range(200, 210)), artist="Michael Jackson",
+                          album="Bad (Remastered)", album_id="bad",
+                          titles=[f"{t} - 2012 Remaster" for t in BAD]),
+    }
+    r = Resolver(FakeSpotify(cands, albums), FakeCollection([_release(7, "Michael Jackson",
+                                                                      "Bad", BAD)]))
+    out = r.resolve(TrackInfo(title="Smooth Criminal", artist="Michael Jackson"))
+    assert out.album_id == "bad" and out.owned and out.tracklist.source == "merged"
+    assert out.reason == "spotify+discogs (100% of pressing)"
+    assert out.track.title == "Smooth Criminal - 2012 Remaster" and out.track.duration == 209
+    assert out.tracklist.position_at(9) == "B5"
+
+
+def test_an_anthology_that_contains_the_album_and_thirty_more_is_not_its_edition():
+    """Кино's "Группа крови" was dressed as "Легенда": every track of the album is on the
+    40-track anthology, which is all a one-way coverage test can see."""
+    album = ["Группа крови", "Закрой за мной дверь", "Война", "Спокойная ночь", "Мама",
+             "Бошетунмай", "В наших глазах", "Попробуй спеть", "Прохожий", "Дальше", "Легенда"]
+    more = [f"Песня {i}" for i in range(30)]
+    cands = [cand("Группа крови", "Кино", "legenda", "Легенда", "album", 0),
+             cand("Группа крови", "Кино", "gk", "Группа крови", "album", 1)]
+    albums = {
+        "legenda": make_album([240] * 41, artist="Кино", album="Легенда", album_id="legenda",
+                              titles=album + more),
+        "gk": make_album([285] * 10, artist="Кино", album="Группа крови", album_id="gk",
+                         titles=album[:10]),          # the catalogue's album lacks one track
+    }
+    r = Resolver(FakeSpotify(cands, albums),
+                 FakeCollection([_release(8, "Кино", "Группа Крови", album)]))
+    out = r.resolve(TrackInfo(title="Группа крови", artist="Кино"))
+    assert out.album_id == "gk" and out.tracklist.album_name == "Группа крови"
+    assert out.reason == "spotify+discogs (91% of pressing)"
+    assert len(out.tracklist.tracks) == 11 and out.tracklist.tracks[10].title == "Легенда"
+
+
+BLOND = ["Nikes", "Ivy", "Pink + White", "Solo", "Nights", "White Ferrari",
+         "Chanel (Bonus Track)", "Biking (Bonus Track)", "Godspeed", "Futura Free"]
+
+
+def _blond(by_title):
+    blonde = make_album([300, 250, 184, 257, 307, 248, 177, 564], artist="Frank Ocean",
+                        album="Blonde", album_id="blonde",
+                        titles=["Nikes", "Ivy", "Pink + White", "Solo", "Nights",
+                                "White Ferrari", "Godspeed", "Futura Free"])
+    single = make_album([210], artist="Frank Ocean", album="Chanel", album_id="chanel",
+                        titles=["Chanel"])
+    rel = _release(9, "Frank Ocean", "Blond", BLOND, sides=("A", "B", "C", "D"))
+    cat = FakeSpotify([], {"blonde": blonde, "chanel": single}, by_title)
+    return Resolver(cat, FakeCollection([rel])), cat
+
+
+def test_a_bonus_track_that_only_came_out_as_a_single_is_still_the_record():
+    """Blond with bonus tracks: a side opened on "Chanel", the only catalogue album with it
+    is the single, the lock went to the single and "Biking" was never scrobbled."""
+    chanel = [cand("Chanel", "Frank Ocean", "chanel", "Chanel", "single", 0)]
+    nikes = [cand("Nikes", "Frank Ocean", "blonde", "Blonde", "album", 0)]
+    r, cat = _blond({"Chanel": chanel, "Nikes": nikes, "Ivy": []})
+    # another track of the record was heard before: its edition is the record's
+    first = r.resolve(TrackInfo(title="Nikes", artist="Frank Ocean"))
+    assert first.album_id == "blonde" and first.reason == "spotify+discogs (80% of pressing)"
+    out = r.resolve(TrackInfo(title="Chanel", artist="Frank Ocean"))
+    assert out.album_id == "blonde" and out.owned and out.tracklist is first.tracklist
+    assert out.tracklist.position_at(6) == "C1" and out.tracklist.is_side_end(5)
+    # ... and the single gave the bonus track its name and its length
+    assert out.track.title == "Chanel" and out.track.duration == 200
+    assert out.tracklist.tracks[6].title == "Chanel"
+    assert out.tracklist.tracks[7].title == "Biking (Bonus Track)"       # not heard yet
+
+
+def test_with_nothing_heard_before_the_catalogue_is_asked_about_the_tracks_next_to_it():
+    chanel = [cand("Chanel", "Frank Ocean", "chanel", "Chanel", "single", 0)]
+    ferrari = [cand("White Ferrari", "Frank Ocean", "blonde", "Blonde", "album", 0)]
+    r, cat = _blond({"Chanel": chanel, "White Ferrari": ferrari})
+    out = r.resolve(TrackInfo(title="Chanel", artist="Frank Ocean"))
+    assert out.album_id == "blonde" and out.reason == "spotify+discogs (80% of pressing)"
+    assert out.art_url == "https://img/blonde"                # the album's cover, not the single's
+    asked = len(cat.asked)
+    r.resolve(TrackInfo(title="Chanel", artist="Frank Ocean"))
+    assert len(cat.asked) <= asked + 3                        # the edition is not asked for again
+
+
+def test_a_pressing_no_edition_contains_is_its_own_album_and_learns_from_the_catalogue():
+    """A pressing that differs wholesale from the streaming album of the same name (15% in
+    common): the old pick locked the streaming list and the record's own tracks were lost."""
+    mine = ["Preacher Man", "Beauty and the Beast", "Last Breath", "Losing Your Mind",
+            "This One Here", "Circles"]
+    streaming = make_album([200] * 7, artist="Kanye West", album="BULLY", album_id="bully",
+                           titles=["Preacher Man", "Other 1", "Other 2", "Other 3", "Other 4",
+                                   "Other 5", "Other 6"])
+    by_title = {"Preacher Man": [cand("PREACHER MAN", "Kanye West", "bully", "BULLY", "album", 0)],
+                "Beauty and the Beast": [cand("BEAUTY AND THE BEAST", "Kanye West", "single2",
+                                              "BEAUTY AND THE BEAST", "single", 0)]}
+    cat = FakeSpotify([], {"bully": streaming}, by_title)
+    rel = _release(10, "Kanye West", "Bully", mine)
+    r = Resolver(cat, FakeCollection([rel]))
+    out = r.resolve(TrackInfo(title="Preacher Man", artist="Kanye West"))
+    assert out.album_id == "dg:10" and out.owned and out.reason == "discogs"
+    assert out.tracklist.source == "discogs" and len(out.tracklist.tracks) == 6
+    assert out.track.title == "PREACHER MAN" and out.track.duration == 200    # the catalogue's
+    assert out.track.album == "Bully"                                         # the record's
+    # the next track's length was asked for ahead of the clock
+    assert out.tracklist.tracks[1].duration == 200
+    assert out.tracklist.tracks[1].title == "Beauty and the Beast"   # named when it is heard
+    again = r.resolve(TrackInfo(title="Beauty and the Beast", artist="Kanye West"))
+    assert again.tracklist is out.tracklist                    # one list: the session sees it
+    assert again.track.title == "BEAUTY AND THE BEAST"
+    for _ in range(3):              # two lengths a hit: the rest of the list is asked about
+        r.resolve(TrackInfo(title="Beauty and the Beast", artist="Kanye West"))
+    asked = len(cat.asked)
+    for _ in range(5):
+        r.resolve(TrackInfo(title="Beauty and the Beast", artist="Kanye West"))
+    # from then on a hit costs its own lookup: the edition and the lengths that were not
+    # found are not asked for again
+    assert cat.asked[asked:] == ["Beauty and the Beast"] * 5
+
+
+def _two_records_one_song():
+    noch = _release(11, "Кино", "Ночь", ["Видели ночь", "Фильмы", "Последний герой", "Игра"])
+    kamchatka = _release(5, "Кино", "Начальник Камчатки",
+                         ["Последний герой", "Каждую ночь", "Транквилизатор", "Троллейбус"])
+    albums = {
+        "noch": make_album([200] * 4, artist="Кино", album="Ночь", album_id="noch",
+                           titles=["Видели ночь", "Фильмы", "Последний герой", "Игра"]),
+        "kam": make_album([210] * 4, artist="Кино", album="Начальник Камчатки", album_id="kam",
+                          titles=["Последний герой", "Каждую ночь", "Транквилизатор",
+                                  "Троллейбус"]),
+    }
+    cands = [cand("Последний герой", "Кино", "noch", "Ночь", "album", 0),
+             cand("Последний герой", "Кино", "kam", "Начальник Камчатки", "album", 1)]
+    return Resolver(FakeSpotify(cands, albums), FakeCollection([kamchatka, noch]))
+
+
+def test_a_song_on_two_owned_records_is_the_one_being_played():
+    hit = TrackInfo(title="Последний герой", artist="Кино")
+    # nothing known: the catalogue's first album for the song
+    assert _two_records_one_song().resolve(hit).tracklist.discogs_release_id == 11
+    # the session is on the other record: that one
+    out = _two_records_one_song().resolve(hit, ResolveContext(locked_release_id=5))
+    assert out.tracklist.discogs_release_id == 5 and out.tracklist.position_at(0) == "A1"
+    # the fingerprint names its album: that one
+    named = TrackInfo(title="Последний герой", artist="Кино", album="Начальник Камчатки")
+    assert _two_records_one_song().resolve(named).tracklist.discogs_release_id == 5
+
+
+def test_a_box_side_whose_own_album_the_search_missed_is_found_by_its_neighbours():
+    """Deezer answers "Is It a Crime" with best-ofs only; the track after it on the side
+    brings the album, and the side gets its own sides of the box as before."""
+    best_of = make_album([240] * 4, artist="Sade", album="The Best of Sade", album_id="best",
+                         titles=["Smooth Operator", "Is It a Crime", "Paradise", "Maureen"])
+    promise = make_album([250] * 11, artist="Sade", album="Promise", album_id="promise",
+                         titles=PROMISE)
+    by_title = {"Is It a Crime": [cand("Is It a Crime", "Sade", "best", "The Best of Sade",
+                                       "album", 0)],
+                "The Sweetest Taboo": [cand("The Sweetest Taboo", "Sade", "promise", "Promise",
+                                            "album", 0)]}
+    r = Resolver(FakeSpotify([], {"best": best_of, "promise": promise}, by_title),
+                 FakeCollection([sade_box()]))
+    out = r.resolve(TrackInfo(title="Is It a Crime", artist="Sade"))
+    assert out.album_id == "promise" and out.tracklist.album_name == "Promise"
+    assert out.reason == "spotify+discogs (100% of sides C-D of the box)"
+    assert out.tracklist.positions[0] == "C1" and out.track.duration == 250
+    # the answer is remembered for the side, and stays good on the next hits (the pressing is
+    # built anew for every hit: a remembered part must not be compared by object)
+    again = r.resolve(TrackInfo(title="Is It a Crime", artist="Sade"))
+    taboo = r.resolve(TrackInfo(title="The Sweetest Taboo", artist="Sade"))
+    assert again.tracklist is out.tracklist and taboo.tracklist is out.tracklist
+    assert taboo.tracklist.position_at(1) == "C2"

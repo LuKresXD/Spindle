@@ -158,7 +158,8 @@ spindle --dry-run -v      # identify without scrobbling
 spindle -v                # the real thing
 ```
 
-Install as a service so it starts on boot and restarts on a crash:
+Install as a service so it starts on boot and restarts on a crash, or on a hang (the unit
+carries a 90 s watchdog; the tick loop sends systemd a keep-alive every 2 s):
 
 ```bash
 sudo cp spindle.service /etc/systemd/system/
@@ -236,7 +237,9 @@ spindle/
 └── config.py       # YAML config
 ```
 
-About 7,000 lines of Python, 650 lines of page, 83 tests. `ruff`, `mypy` and `pytest` run in CI.
+About 8,800 lines of Python, 2,000 lines of page, 200 tests. `ruff`, `mypy` and `pytest` run in CI.
+`tools/shelf_replay.py` plays your own shelf through the resolver and the session, offline after the
+first run: run it before and after a change to the engine.
 
 ## History
 

@@ -12,30 +12,35 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from .fingerprint import TrackInfo
+from .names import fold, words
 
 _FUZZY_MIN = 0.86
 
 
+@lru_cache(maxsize=8192)
 def norm_title(s: str) -> str:
-    """Loose title key: case, punctuation, apostrophes, edition tags, feat. credits."""
-    s = s.lower().replace("'", "").replace("’", "")
+    """Loose title key: case, accents, punctuation, apostrophes, edition tags, feat. credits.
+    Letters of every script are kept (a Greek or Japanese title used to normalise to nothing)."""
+    s = fold(s).replace("'", "").replace("’", "")
     s = re.sub(r"[\(\[](feat\.?|ft\.?|featuring|with)\b[^\)\]]*[\)\]]", " ", s)
     s = re.sub(r"[\(\[](?:\d{4}\s+)?(remaster(?:ed)?|bonus|album version|explicit)[^\)\]]*[\)\]]",
                " ", s)
     # "Bad - 2012 Remaster", "Heroes - Remastered 2017": with the year first the suffix stayed, and
     # a three-letter title then matched nothing but the compilation that carries it bare
     s = re.sub(r"\s[-–—]\s*(?:\d{4}\s+)?(remaster(?:ed)?|bonus track|album version).*$", " ", s)
-    s = re.sub(r"[^a-z0-9Ѐ-ӿ]+", " ", s)
-    return " ".join(s.split())
+    return words(s)
 
 
+@lru_cache(maxsize=32768)
 def titles_match(a: str, b: str) -> bool:
     """Equal after normalisation, or near-equal (one typo / stray punctuation)."""
     na, nb = norm_title(a), norm_title(b)
     if not na or not nb:
-        return False
+        # nothing to compare by ("?", "..."): the same only when written the same
+        return bool(a.strip()) and a.strip().lower() == b.strip().lower()
     if na == nb:
         return True
     if min(len(na), len(nb)) >= 6 and (na in nb or nb in na):
@@ -77,20 +82,30 @@ class AlbumTracklist:
             return self.tracks[index]
         return None
 
-    def find_track_index(self, title: str) -> int | None:
-        """Index by exact title (case-insensitive), else by normalised/fuzzy title."""
-        t = title.lower()
+    def find_track_index(self, title: str, near: int | None = None) -> int | None:
+        """Index by exact title (case-insensitive), else by normalised, else by fuzzy title.
+
+        A title can be on a record twice (the album cut on side B, its remix closing side D).
+        Without `near` the best-matching spelling wins, and the first of equals. With `near`
+        (the index the needle is believed to be at) the copy on that side wins, then the
+        better spelling, then the nearer one: a needle does not change sides mid-session.
+        """
+        exact, want = title.lower(), norm_title(title)
+        found: list[tuple[int, int]] = []                # (kind of match, index)
         for i, tr in enumerate(self.tracks):
-            if tr.title.lower() == t:
-                return i
-        want = norm_title(title)
-        for i, tr in enumerate(self.tracks):
-            if norm_title(tr.title) == want:
-                return i
-        for i, tr in enumerate(self.tracks):
-            if titles_match(tr.title, title):
-                return i
-        return None
+            if tr.title.lower() == exact:
+                found.append((0, i))
+            elif norm_title(tr.title) == want:
+                found.append((1, i))
+            elif titles_match(tr.title, title):
+                found.append((2, i))
+        if not found:
+            return None
+        if near is None or len(found) == 1:
+            return min(found)[1]
+        side = self.side_at(near)
+        return min(found, key=lambda f: (bool(side) and self.side_at(f[1]) != side, f[0],
+                                         abs(f[1] - near), f[1]))[1]
 
     # ── sides ────────────────────────────────────────────────────────────────
 

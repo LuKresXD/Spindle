@@ -9,6 +9,10 @@ def _collection(releases, routes):
     c._lock = threading.RLock()
     c._stop = threading.Event()
     c._releases = releases
+    c._aka = {}
+    c._keys = {}
+    c._track_keys = {}
+    c._names = {}
     c.last_error = None
     c._save_cache = lambda: None
     c.calls = []
@@ -84,3 +88,92 @@ def test_prices_are_asked_once_a_day_and_kept():
     assert len(c.calls) == 2                                           # fresh: not asked again
     back = Release.from_dict(rel.to_dict())
     assert back.typical_usd == 61.0 and back.for_sale == 7 and back.priced_at == rel.priced_at
+
+
+# ── whose record it is: separate names, Discogs' other names, a track's own artist ───────
+
+def _tracks(*rows):
+    return [{"position": p, "title": t, "duration": None, "artist": a} for p, t, a in rows]
+
+
+def test_a_record_answers_to_what_discogs_says_its_artist_is_also_called():
+    """Bully is filed under "Ye (2)" and Shazam says "Kanye West"; the old substring test
+    matched them by accident ("ye" is inside "kanye west") and matched Yeat as well."""
+    bully = Release(1, "Ye (2)", "Bully", 2026, ["Vinyl"], _tracks(("A1", "Preacher Man", "")),
+                    True, artists=["Ye (2)"], artist_ids=[11470286])
+    yeat = Release(2, "Yeat", "2 Alivë", 2022, ["Vinyl"], _tracks(("A1", "Poppin", "")), True,
+                   artists=["Yeat"], artist_ids=[7])
+    kino = Release(3, "Кино", "Ночь", 2017, ["Vinyl"], _tracks(("A1", "Видели ночь", "")), True,
+                   artists=["Кино"], artist_ids=[345278])
+    c = _collection([bully, yeat, kino], {
+        "/artists/11470286": {"namevariations": [], "aliases": [{"name": "Kanye West"},
+                                                                 {"name": "Yeezy"}]},
+        "/artists/7": {"namevariations": ["YEAT"], "aliases": []},
+        "/artists/345278": {"namevariations": ["Kino", "КИНО"], "aliases": []},
+    })
+    assert c.releases_for_artist("Kanye West") == []            # nothing known yet
+    c._prefetch_artists()
+    assert c.calls == ["/artists/11470286", "/artists/7", "/artists/345278"]
+    assert c.releases_for_artist("Kanye West") == [bully]
+    assert c.releases_for_artist("Ye") == [bully]               # and not Yeat
+    assert c.releases_for_artist("Yeat") == [yeat]
+    assert c.releases_for_artist("Kino") == [kino]
+    assert c.releases_with_track("Kanye West", "PREACHER MAN") == [bully]
+    assert c.names_for("Ye") == ["Ye (2)", "Kanye West", "Yeezy"]
+    assert c.names_for("Sade") == []
+    c._prefetch_artists()
+    assert len(c.calls) == 3                                    # each artist is asked once
+
+
+def test_a_compilation_track_is_owned_by_its_own_artist():
+    """A Various Artists soundtrack was never recognised: no hit is by "Various"."""
+    va = Release(4, "Various", "Stranger Things: The WSQK Collection", 2025, ["Vinyl"],
+                 _tracks(("A1", "I Think We're Alone Now", "Tiffany"),
+                         ("A2", "Should I Stay Or Should I Go", "The Clash"),
+                         ("B1", "Upside Down", "Diana Ross")), True,
+                 artists=["Various"], artist_ids=[194])
+    crew = Release(5, "Jackboys", "Jackboys", 2020, ["Vinyl"],
+                   _tracks(("A1", "Highest In The Room (Remix)", "Travis Scott (2)"),
+                           ("A2", "Gang Gang", "Jackboys")), True,
+                   artists=["Jackboys"], artist_ids=[7566128])
+    c = _collection([va, crew], {"/artists/7566128": {}})
+    c._prefetch_artists()
+    assert c.calls == ["/artists/7566128"]                      # "Various" is nobody to ask about
+    assert c.releases_with_track("Tiffany", "I Think We're Alone Now") == [va]
+    assert c.releases_with_track("The Clash", "Should I Stay or Should I Go") == [va]
+    assert c.releases_with_track("Tiffany", "Upside Down") == []     # hers is another track
+    assert c.releases_with_track("Travis Scott", "HIGHEST IN THE ROOM (REMIX)") == [crew]
+    assert c.releases_with_track("Jackboys", "Gang Gang") == [crew]
+    tl = c.tracklist(va)
+    assert tl.artist == "Various Artists" and tl.tracks[1].artist == "The Clash"
+
+
+def test_two_copies_of_an_album_the_one_that_knows_its_sides_first():
+    numbered = Release(10, "Playboi Carti", "Whole Lotta Red", 2021, ["Vinyl"],
+                       _tracks(("1", "Rockstar Made", ""), ("2", "Go2DaMoon", "")), True)
+    sided = Release(20, "Playboi Carti", "Whole Lotta Red", 2022, ["Vinyl"],
+                    _tracks(("A1", "Rockstar Made", ""), ("A2", "Go2DaMoon", "")), True)
+    c = _collection([numbered, sided], {})
+    assert c.releases_with_track("Playboi Carti", "Rockstar Made") == [sided, numbered]
+    assert c.find_release("Playboi Carti", "Whole Lotta Red") is sided
+
+
+def test_the_cache_keeps_names_and_asks_again_when_it_predates_them(tmp_path):
+    rel = Release(1, "Future (4), Metro Boomin", "We Don't Trust You", 2024, ["Vinyl"], [], True,
+                  artists=["Future (4)", "Metro Boomin"], artist_ids=[221673, 3244227])
+    back = Release.from_dict(rel.to_dict())
+    assert back.artists == ["Future (4)", "Metro Boomin"] and back.artist_ids == [221673, 3244227]
+    import json
+    import time
+    cache = tmp_path / "collection-u.json"
+    cache.write_text(json.dumps({"fetched_at": time.time(), "releases": [rel.to_dict()],
+                                 "aka": {"221673": ["Future Hndrxx"]}}))
+    c = DiscogsCollection("t", "u", cache_dir=tmp_path)
+    assert c._aka == {221673: ["Future Hndrxx"]} and c._fetched_at > 0
+    assert c.releases_for_artist("Future Hndrxx") == c.all_releases()
+    old = rel.to_dict()
+    del old["artists"], old["artist_ids"]                       # written before 0.7
+    cache.write_text(json.dumps({"fetched_at": time.time(), "releases": [old]}))
+    c = DiscogsCollection("t", "u", cache_dir=tmp_path)
+    assert c._fetched_at == 0.0                                 # the list is asked again
+    assert c.releases_for_artist("Metro Boomin") == c.all_releases()   # the credit still splits
