@@ -1,0 +1,13 @@
+[Unit]
+Description=Spindle guard: the web port answers on loopback and Tailscale only
+After=network-pre.target
+Before=spindle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/spindle-guard.nft
+ExecStop=/usr/sbin/nft delete table inet spindle_guard
+
+[Install]
+WantedBy=multi-user.target

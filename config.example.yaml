@@ -57,6 +57,7 @@ web:
   #                                         # GET|POST /api/ui/<command>?k=<key> (and /api/debug/*).
   #                                         # Reaching it from a phone needs host 0.0.0.0 or a tailnet
   #                                         # address; keep the port off networks you do not trust
+  #                                         # (spindle-guard.nft + spindle-guard.service do that)
 
 display:
   enabled: false                            # the framebuffer fallback for a plain HDMI panel or the Waveshare

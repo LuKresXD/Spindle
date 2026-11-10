@@ -30,3 +30,5 @@ scrobble_queue.json
 *.log
 *.log.*
 sample.wav
+.remote-key
+config.yaml.bak*

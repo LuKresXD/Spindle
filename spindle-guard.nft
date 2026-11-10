@@ -1,0 +1,20 @@
+#!/usr/sbin/nft -f
+# Spindle guard (optional): the web page and the remote (tcp 8787) answer on loopback and on
+# Tailscale only. For a Pi that sits on a network you do not control (a dorm, an office) with
+# web.host set to 0.0.0.0 so a phone on your tailnet can reach the remote. Its own table, so
+# other firewall rules (Tailscale's included) are untouched.
+#
+#   sudo cp spindle-guard.nft /etc/spindle-guard.nft
+#   sudo cp spindle-guard.service /etc/systemd/system/
+#   sudo systemctl enable --now spindle-guard
+#
+# Change "tailscale0" to the interface your phone reaches the Pi through; add ports as needed.
+table inet spindle_guard
+delete table inet spindle_guard
+table inet spindle_guard {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        iifname { "lo", "tailscale0" } accept
+        tcp dport 8787 drop
+    }
+}
