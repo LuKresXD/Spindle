@@ -199,6 +199,43 @@ def state_payload(st: ScreenState, now: float) -> dict:
     return d
 
 
+# ── caching ──────────────────────────────────────────────────────────────────
+# What a lookup found is kept; what it did not find is asked again later; a lookup that FAILED
+# (the network, a 5xx) is asked again soon. Everything used to be kept for the life of the
+# process: one network blip left a track without lyrics until the next restart, and play counts
+# never moved.
+FOUND_TTL = 30 * 24 * 3600.0     # lyrics, stories: they do not change
+EMPTY_TTL = 6 * 3600.0           # nothing there today
+FAILED_TTL = 120.0               # the lookup itself failed
+COUNTS_TTL = 600.0               # play counts and "last played"
+_CACHE_MAX = 400
+
+
+class TTLCache:
+    def __init__(self, clock: Callable[[], float] | None = None):
+        self._data: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._lock = threading.Lock()
+        self._clock = clock or (lambda: time.time())
+
+    def get(self, key: str) -> tuple[bool, Any]:
+        with self._lock:
+            hit = self._data.get(key)
+            if hit is None or self._clock() >= hit[1]:
+                return False, None
+            return True, hit[0]
+
+    def put(self, key: str, value: Any, ttl: float) -> Any:
+        with self._lock:
+            self._data[key] = (value, self._clock() + ttl)
+            self._data.move_to_end(key)
+            while len(self._data) > _CACHE_MAX:
+                self._data.popitem(last=False)
+        return value
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
 # ── lyrics ───────────────────────────────────────────────────────────────────
 
 _LRC_TAG = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
@@ -224,23 +261,20 @@ class Lyrics:
     def __init__(self, http: requests.Session | None = None):
         self._http = http or requests.Session()
         self._http.headers["User-Agent"] = USER_AGENT
-        self._cache: dict[str, dict] = {}
-        self._lock = threading.Lock()
+        self._cache = TTLCache()
 
     def get(self, artist: str, title: str, album: str = "",
             duration: float | None = None) -> dict:
         key = f"{artist.lower()}|{title.lower()}|{int(duration or 0)}"
-        with self._lock:
-            if key in self._cache:
-                return self._cache[key]
+        hit, cached = self._cache.get(key)
+        if hit:
+            return cached
         try:
             result = self._fetch(artist, title, album, duration)
         except (requests.RequestException, ValueError) as e:
             logger.debug("Lyrics lookup failed: %s", e)
-            result = {"synced": [], "plain": None, "source": ""}
-        with self._lock:
-            self._cache[key] = result
-        return result
+            return self._cache.put(key, {"synced": [], "plain": None, "source": ""}, FAILED_TTL)
+        return self._cache.put(key, result, FOUND_TTL if result.get("synced") else EMPTY_TTL)
 
     def _fetch(self, artist: str, title: str, album: str, duration: float | None) -> dict:
         # the exact catalogue name first (LRCLIB is keyed on it), then the bare song, whose
@@ -292,15 +326,16 @@ class Info:
         self.history = history
         self._http = http or requests.Session()
         self._http.headers["User-Agent"] = USER_AGENT
-        self._cache: dict[str, dict] = {}
+        self._cache = TTLCache()            # album info and track plays: counts move, so short
+        self._stories = TTLCache()          # the Wikipedia text: long
         self._warming: set[str] = set()
         self._lock = threading.Lock()
 
     def get(self, artist: str, album: str) -> dict:
         key = f"{artist.lower()}|{album.lower()}"
-        with self._lock:
-            if key in self._cache:
-                return self._cache[key]
+        hit, cached = self._cache.get(key)
+        if hit:
+            return cached
         # the three sources are independent network calls: run them side by side
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="info") as pool:
             futs = {
@@ -309,16 +344,16 @@ class Info:
                 "plays": pool.submit(self._plays, artist, album),
             }
             result = {k: f.result() for k, f in futs.items()}
-        with self._lock:
-            self._cache[key] = result
-        return result
+        return self._cache.put(key, result, COUNTS_TTL)
 
     def prefetch(self, artist: str, album: str) -> None:
         """Warm the cache off-thread so the sheet opens at once (called when the
         album on screen changes)."""
         key = f"{artist.lower()}|{album.lower()}"
+        if self._cache.get(key)[0]:
+            return
         with self._lock:
-            if key in self._cache or key in self._warming:
+            if key in self._warming:
                 return
             self._warming.add(key)
 
@@ -344,38 +379,51 @@ class Info:
             return None
 
     def _story(self, artist: str, album: str) -> dict | None:
+        """The Wikipedia summary of THIS album. The first search hit used to be taken as it
+        came ("Graduation (Deluxe Edition)" got the article about another Kanye West album):
+        a hit now has to carry the album's name in its title and the artist in its text."""
+        name = clean_album(album)
+        key = f"{artist.lower()}|{name.lower()}"
+        hit, cached = self._stories.get(key)
+        if hit:
+            return cached
         try:
             q: dict[str, str | int] = {"action": "query", "list": "search", "format": "json",
-                                       "srlimit": 3, "srsearch": f"{album} {artist} album"}
+                                       "srlimit": 4, "srsearch": f"{name} {artist} album"}
             r = self._http.get(f"{WIKIPEDIA}/w/api.php", params=q, timeout=HTTP_TIMEOUT)
             r.raise_for_status()
-            hits = r.json().get("query", {}).get("search", [])
-            if not hits:
-                return None
-            title = hits[0]["title"]
-            r = self._http.get(f"{WIKIPEDIA}/api/rest_v1/page/summary/"
-                               + urllib.parse.quote(title.replace(" ", "_")),
-                               timeout=HTTP_TIMEOUT)
-            r.raise_for_status()
-            page = r.json()
-            extract = (page.get("extract") or "").strip()
-            if not extract:
-                return None
-            text = extract if len(extract) <= 1400 else extract[:1397].rsplit(" ", 1)[0] + "…"
-            return {"text": text, "title": page.get("title", title),
-                    "url": page.get("content_urls", {}).get("desktop", {}).get("page", "")}
+            for found in r.json().get("query", {}).get("search", []):
+                title = found["title"]
+                if not _mentions(name, title):
+                    continue
+                r = self._http.get(f"{WIKIPEDIA}/api/rest_v1/page/summary/"
+                                   + urllib.parse.quote(title.replace(" ", "_")),
+                                   timeout=HTTP_TIMEOUT)
+                r.raise_for_status()
+                page = r.json()
+                extract = (page.get("extract") or "").strip()
+                about = f"{page.get('description') or ''} {extract}"
+                if not extract or not _mentions(artist, about):
+                    continue
+                text = extract if len(extract) <= 1400 else extract[:1397].rsplit(" ", 1)[0] + "…"
+                return self._stories.put(key, {
+                    "text": text, "title": page.get("title", title),
+                    "url": page.get("content_urls", {}).get("desktop", {}).get("page", "")},
+                    FOUND_TTL)
+            return self._stories.put(key, None, EMPTY_TTL)
         except (requests.RequestException, ValueError, KeyError) as e:
             logger.debug("Story lookup failed: %s", e)
-            return None
+            return self._stories.put(key, None, FAILED_TTL)
 
     def track_plays(self, artist: str, title: str) -> dict:
         """This user's play count and the world listener count for one track,
         cached per track. The title must be exactly as scrobbled (feat. and all)."""
         key = f"track|{artist.lower()}|{title.lower()}"
-        with self._lock:
-            if key in self._cache:
-                return self._cache[key]
+        hit, cached = self._cache.get(key)
+        if hit:
+            return cached
         out: dict[str, Any] = {"plays": None, "listeners": None}
+        ttl = COUNTS_TTL
         net = getattr(self.scrobbler, "network", None) if self.scrobbler is not None else None
         if net is not None and artist and title:
             try:
@@ -385,9 +433,8 @@ class Info:
                 out["listeners"] = int(tr.get_listener_count())
             except Exception as e:
                 logger.debug("Track plays lookup failed: %s", e)
-        with self._lock:
-            self._cache[key] = out
-        return out
+                ttl = FAILED_TTL
+        return self._cache.put(key, out, ttl)
 
     def plays(self, artist: str, album: str) -> dict:
         """Luka's plays of an album (Last.fm) and the last time it was on (the history)."""
@@ -444,6 +491,15 @@ def _dom_text(node: Any) -> str:
     return inner
 
 
+def _mentions(name: str, text: str) -> bool:
+    """Every word of `name` appears in `text` as a whole word, in order (letters of any script)."""
+    words = re.findall(r"\w+", name.lower())
+    hay = re.findall(r"\w+", text.lower())
+    if not words:
+        return False
+    return any(hay[i:i + len(words)] == words for i in range(len(hay) - len(words) + 1))
+
+
 def _artist_in(name: str, haystack: str) -> bool:
     a = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
     h = re.sub(r"[^a-z0-9]+", " ", haystack.lower())
@@ -457,22 +513,19 @@ class Genius:
     def __init__(self, http: requests.Session | None = None):
         self._http = http or requests.Session()
         self._http.headers["User-Agent"] = GENIUS_UA
-        self._cache: dict[str, dict] = {}
-        self._lock = threading.Lock()
+        self._cache = TTLCache()
 
     def get(self, artist: str, title: str) -> dict:
         key = f"{artist.lower()}|{title.lower()}"
-        with self._lock:
-            if key in self._cache:
-                return self._cache[key]
+        hit, cached = self._cache.get(key)
+        if hit:
+            return cached
         try:
             result = self._fetch(artist, title)
         except (requests.RequestException, ValueError, KeyError, TypeError) as e:
             logger.debug("Genius lookup failed: %s", e)
-            result = {}
-        with self._lock:
-            self._cache[key] = result
-        return result
+            return self._cache.put(key, {}, FAILED_TTL)
+        return self._cache.put(key, result, FOUND_TTL if result else EMPTY_TTL)
 
     def _fetch(self, artist: str, title: str) -> dict:
         search_title = split_title(title).base or title
@@ -529,9 +582,8 @@ class Genius:
 
     def prefetch(self, artist: str, title: str) -> None:
         key = f"{artist.lower()}|{title.lower()}"
-        with self._lock:
-            if key in self._cache:
-                return
+        if self._cache.get(key)[0]:
+            return
         threading.Thread(target=self.get, args=(artist, title), name="genius-prefetch",
                          daemon=True).start()
 
@@ -569,6 +621,7 @@ def derive_cover(data: bytes, variant: str) -> bytes:
     except Exception as e:                    # a broken image: serve what we have
         logger.debug("Cover variant %s failed: %s", variant, e)
         return data
+RECENT_SITTING_SECONDS = 6 * 3600.0   # an album's scrobbles this close to its last: one sitting
 COVER_WARM_GAP = 0.6             # seconds between cover downloads when warming the cache
 COVER_WARM_FIRST_DELAY = 5.0     # let the engine and the collection come up first
 COVER_WARM_EVERY = 600.0         # how often the warm-up looks for missing covers
@@ -752,7 +805,9 @@ class Shelf:
                 continue
             key = f"{entry.artist.lower()}|{album.lower()}"
             if key in by_key:
-                by_key[key]["titles"].add(entry.title.lower())
+                # the same sitting only: side A a month ago plus side B today is not "whole record"
+                if by_key[key]["last_played"] - entry.timestamp <= RECENT_SITTING_SECONDS:
+                    by_key[key]["titles"].add(entry.title.lower())
                 continue
             if len(out) >= limit:
                 continue
@@ -820,6 +875,10 @@ class _Handler(BaseHTTPRequestHandler):
     # routes -----------------------------------------------------------------
 
     def do_HEAD(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/ui" or path.startswith("/api/ui/"):      # a probe must not press buttons
+            self._json({"error": "use GET or POST"}, HTTPStatus.METHOD_NOT_ALLOWED)
+            return
         self.do_GET()
 
     def do_POST(self) -> None:

@@ -443,3 +443,104 @@ def test_remote_is_off_without_a_key():
             raise AssertionError("must be off")
     finally:
         srv.stop()
+
+
+# ── 2026-11-09 review ────────────────────────────────────────────────────────────────────────────
+
+def test_the_story_is_only_taken_from_a_page_about_this_album_by_this_artist():
+    """The first search hit used to be shown as it came: "Graduation (Deluxe Edition)" got the
+    article about another Kanye West album."""
+    http = _Http({
+        "/w/api.php": _Resp(200, {"query": {"search": [
+            {"title": "Bully (album)"}, {"title": "Graduation (band)"},
+            {"title": "Graduation (album)"}]}}),
+        "/page/summary/Graduation_%28band%29": _Resp(200, {
+            "title": "Graduation (band)", "description": "Danish rock band",
+            "extract": "Graduation is a rock band from Aarhus."}),
+        "/page/summary/Graduation_%28album%29": _Resp(200, {
+            "title": "Graduation (album)", "description": "2007 studio album by Kanye West",
+            "extract": "Graduation is the third studio album by the American rapper."}),
+    })
+    info = Info(http=http)
+    out = info._story("Kanye West", "Graduation (Deluxe Edition)")
+    assert out["title"] == "Graduation (album)"
+    asked = [u for u, _ in http.calls if "/page/summary/" in u]
+    assert not any("Bully" in u for u in asked)                    # wrong title: not even fetched
+    assert info._story("Kanye West", "Graduation (Deluxe Edition)") is out      # kept
+
+
+def test_no_story_is_better_than_another_albums_story():
+    http = _Http({
+        "/w/api.php": _Resp(200, {"query": {"search": [{"title": "Bully (album)"}]}}),
+    })
+    assert Info(http=http)._story("Kanye West", "Graduation") is None
+
+
+def test_a_failed_lookup_is_asked_again_and_play_counts_expire(monkeypatch):
+    from spindle import web as web_mod
+    now = {"t": 1000.0}
+    monkeypatch.setattr(web_mod.time, "time", lambda: now["t"])
+
+    class Flaky:
+        headers: dict = {}
+        fail = True
+
+        def get(self, url, params=None, timeout=None):
+            if self.fail:
+                import requests
+                raise requests.ConnectionError("down")
+            if url.endswith("/get"):
+                return _Resp(200, {"syncedLyrics": "[00:01.00]line"})
+            return _Resp(200, [])
+
+    http = Flaky()
+    ly = Lyrics(http=http)
+    assert ly.get("A", "B", "", 200)["synced"] == []               # the network was down
+    http.fail = False
+    assert ly.get("A", "B", "", 200)["synced"] == []               # ...not asked for 2 minutes
+    now["t"] += web_mod.FAILED_TTL + 1
+    assert ly.get("A", "B", "", 200)["synced"] == [[1.0, "line"]]  # then it is
+
+    class Counting:
+        network = None
+        n = 157
+
+        def album_playcount(self, artist, album):
+            self.n += 1
+            return self.n
+
+    nothing = _Http({"/w/api.php": _Resp(200, {"query": {"search": []}})})
+    info = Info(scrobbler=Counting(), http=nothing)
+    assert info.get("Kanye West", "Graduation")["plays"]["user_plays"] == 158
+    assert info.get("Kanye West", "Graduation")["plays"]["user_plays"] == 158   # within ten minutes
+    now["t"] += web_mod.COUNTS_TTL + 1
+    assert info.get("Kanye West", "Graduation")["plays"]["user_plays"] == 159   # the count moved
+
+
+def test_recently_played_describes_the_last_sitting_only(tmp_path):
+    """Side A a month ago plus side B today read as "Whole record"."""
+    from spindle.web import Shelf
+
+    class Rel:
+        id, artist, title, year, released = 1, "X", "Rec", 2000, 2000
+        formats, added, cover = ["Vinyl"], "", ""
+        tracks = [{"position": "A1", "title": "a1"}, {"position": "A2", "title": "a2"},
+                  {"position": "B1", "title": "b1"}, {"position": "B2", "title": "b2"}]
+        typical_usd = price_usd = for_sale = None
+
+    class Col:
+        def find_release(self, artist, album):
+            return Rel()
+
+    class E:
+        def __init__(self, title, ts):
+            self.artist, self.album, self.title, self.timestamp = "X", "Rec", title, ts
+
+    class Hist:
+        def recent(self, count=10, artist=None):
+            now = 2_000_000_000
+            return [E("b2", now), E("b1", now - 200),                       # today: side B
+                    E("a2", now - 30 * 86400), E("a1", now - 30 * 86400 - 200)]   # last month: A
+
+    out = Shelf(collection=Col(), history=Hist(), art_dir=tmp_path).recent_albums()
+    assert out[0]["whole"] is False and out[0]["sides"] == ["B"] and out[0]["tracks"] == 2

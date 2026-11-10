@@ -147,8 +147,8 @@ Fill in `config.yaml`:
 | Service | Key | Needed for |
 |---------|-----|-----------|
 | [Last.fm](https://www.last.fm/api/account/create) | API account | scrobbling |
-| [AcoustID](https://acoustid.org/new-application) | application key | the second fingerprinter |
-| [Spotify](https://developer.spotify.com/dashboard) | app | canonical names and tracklists |
+| [Spotify](https://developer.spotify.com/dashboard) | app | canonical names and tracklists (Deezer's public API steps in without a key when Spotify cannot answer) |
+| [AcoustID](https://acoustid.org/new-application) | application key, optional | a second fingerprinter (`fingerprint.acoustid_fallback`) |
 | [Discogs](https://www.discogs.com/settings/developers) | personal token + username | your collection as the prior, side positions, pressing and price |
 
 Find the audio device with `arecord -l` (`plughw:CARD=Device,DEV=0` for the Plugable), then:

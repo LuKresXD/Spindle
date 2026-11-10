@@ -2,7 +2,8 @@
 # Copy to config.yaml and fill in your API keys
 
 acoustid:
-  api_key: "your-acoustid-api-key"         # https://acoustid.org/new-application
+  api_key: ""                              # optional: only read when fingerprint.acoustid_fallback is on
+                                           # (https://acoustid.org/new-application)
 
 spotify:
   client_id: "your-spotify-client-id"       # https://developer.spotify.com/dashboard
@@ -19,22 +20,28 @@ audio:
   device: "plughw:CARD=Device,DEV=0"        # find yours: arecord -l
   sample_rate: 44100
   channels: 2                               # stereo — important for ShazamIO accuracy
-  chunk_duration: 10                         # seconds per fingerprint chunk
+  chunk_duration: 6                          # seconds of audio in each fingerprint window
   # capture_gain_db: 20                      # ALSA capture gain set at start (amixer); a USB mic
   #                                          # input at full gain clips a line-level turntable
   # mixer_control: "Mic"                     # the simple control that carries that gain
 
 fingerprint:
-  acoustid_timeout: 10
-  shazam_fallback: true                     # ShazamIO catches tracks AcoustID misses
-  min_confidence: 0.5
+  shazam_fallback: true                     # ShazamIO: the recogniser (asked first; the name is historical)
+  acoustid_fallback: false                  # AcoustID as a second try. Chromaprint matches a track from
+                                            # its start, so a window from the middle rarely does
+  acoustid_timeout: 10                      # seconds, when it is on
+  min_confidence: 0.5                       # AcoustID only
+
+catalogue:
+  deezer_fallback: true                     # names, track lengths and album tracklists come from Spotify
+                                            # when it has credentials and answers; Deezer (no key) steps in
+                                            # when Spotify is rate limited, down or has nothing
   # corrections: "corrections.yaml"         # manual fixes, relative to this file (default ~/spindle/corrections.yaml)
 
 scrobble:
   min_play_seconds: 30                      # Last.fm 30-second rule
   min_play_fraction: 0.5                    # or 50% of track length
   now_playing: true
-  dedup_window: 300                         # ignore same track within 5 min
 
 silence:
   threshold_db: -45                         # line-level USB capture: idle floor is ~-50 dB
@@ -46,6 +53,10 @@ web:
   enabled: false                            # the touch display: Spindle serves it at http://127.0.0.1:8787/
   host: "127.0.0.1"                         # and a kiosk browser shows it (see README "The display")
   port: 8787
+  # remote_key: ""                          # a long random string turns the phone remote on:
+  #                                         # GET|POST /api/ui/<command>?k=<key> (and /api/debug/*).
+  #                                         # Reaching it from a phone needs host 0.0.0.0 or a tailnet
+  #                                         # address; keep the port off networks you do not trust
 
 display:
   enabled: false                            # the framebuffer fallback for a plain HDMI panel or the Waveshare
