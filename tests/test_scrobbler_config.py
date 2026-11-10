@@ -173,7 +173,8 @@ def test_the_raw_scrobble_reads_the_verdict(monkeypatch):
             return minidom.parseString(Req.answer)
 
     monkeypatch.setattr(mod.pylast, "_Request", Req)
-    wrap = '<lfm status="ok"><scrobbles accepted="{a}" ignored="{i}"><scrobble>{m}</scrobble></scrobbles></lfm>'
+    wrap = ('<lfm status="ok"><scrobbles accepted="{a}" ignored="{i}">'
+            '<scrobble>{m}</scrobble></scrobbles></lfm>')
     ok = wrap.format(a=1, i=0, m='<ignoredMessage code="0"/>')
     no = wrap.format(a=0, i=1, m='<ignoredMessage code="1">x</ignoredMessage>')
     Req.answer = ok
