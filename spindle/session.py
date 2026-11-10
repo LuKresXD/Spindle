@@ -946,7 +946,10 @@ class ScrobbleSession:
                             "for another before calling it a replay", track_index + 1,
                             al.current_index + 1)
                 return True
+            # (only with a KNOWN length: against the four-minute guess a track that is simply
+            # still playing looks like its own tail, and the screen stayed on the next one)
             if (track_index == al.current_index - 1 and run and run.samples
+                    and track is not None and track.duration
                     and duration - run.samples[-1][1] - self.window_seconds <= TAIL_ECHO):
                 logger.info("Session: track %d's tail is heard inside track %d (shared audio) "
                             "— not a replay", track_index + 1, al.current_index + 1)

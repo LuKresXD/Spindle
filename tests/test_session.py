@@ -745,3 +745,22 @@ def test_a_lock_made_from_discogs_alone_moves_to_the_full_data_for_the_same_pres
     al = s.album_state
     assert al.tracklist.source == "merged" and al.tracklist.tracks[1].duration == 236
     assert al.current_index == 1
+
+
+def test_a_track_of_unknown_length_that_is_still_playing_is_not_its_own_tail(clock):
+    """Side C of Long.Live.A$AP on a Discogs-only lock (no lengths): the clock left 1Train after
+    the four-minute guess while it had two minutes to go, and its hits were read as the tail."""
+    album = make_album([None, None], titles=["1Train", "Fashion Killa"], positions=["C1", "C2"],
+                       owned=True, source="discogs")
+    s = ScrobbleSession(clock=clock, window_seconds=6)
+    t0 = clock.t
+    for k in range(3):
+        identified(s, album, "1Train", t0, at=t0 + 6 + 8 * k, offset=8.0 * k)
+    while s.album_state.current_index == 0:                    # the guess runs out at 4:00
+        clock.advance(2)
+        s.check_advance()
+    base = clock.t + 50
+    for k in range(3):                                         # still 1Train, 5 minutes in
+        clock.t = base + 8 * k
+        identified(s, album, "1Train", t0, at=clock.t, offset=(clock.t - 6) - t0)
+    assert s.album_state.current_index == 0                    # back on the track that is playing
