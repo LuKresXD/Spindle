@@ -472,6 +472,7 @@ def test_lead_out_thumps_end_the_side_and_never_start_one(tmp_path):
     player.tick()
     clock.advance(2)
     assert player.phase == Phase.IDLE and not player.session.is_locked()
+    player.worker.identify = lambda path: None                         # thumps identify as nothing
     for _ in range(6):                                                 # the thumps go on
         st = player.tick()
         clock.advance(2)
@@ -585,3 +586,160 @@ def test_a_stranger_displaced_by_the_lock_is_not_a_play(tmp_path):
         player.tick()
         clock.advance(2)
     assert "Ken Car" not in [s[0] for s in rec.scrobbles]
+
+
+# ── 2026-11-09 review: the regressions it found, each reproduced before it was fixed ─────────────
+
+SIDES = ["A1", "A2", "A3", "B1", "B2", "B3"]
+
+
+def run(player, clock, seconds, step=2):
+    st = None
+    for _ in range(int(seconds / step)):
+        clock.advance(step)
+        st = player.tick()
+    return st
+
+
+def test_an_identification_finishing_after_the_side_ended_is_not_applied_to_the_next(tmp_path):
+    """A job in flight when the side ends finishes later. Applied to the next needle drop it
+    announced side A's last track at the start of side B and scrobbled it a second time."""
+    from conftest import resolved_for
+
+    from spindle.engine import IdentifyResult
+    clock = FakeClock()
+    album = make_album([115, 72, 109, 68, 150, 234], positions=SIDES, owned=True)
+    heard = {"t": "Track 3"}
+    player, cap, rec = make_player(tmp_path, clock, lambda p: TrackInfo(heard["t"], "Madvillain"),
+                                   albums=[album])
+    cap.level = -20
+    run(player, clock, 130)                                   # Track 3, to the end of side A
+    cap.level = -60
+    run(player, clock, 2)                                     # the first quiet tick ends the side
+    assert player.phase == Phase.IDLE and [t for t, _ in rec.scrobbles] == ["Track 3"]
+    late = IdentifyResult(at=clock.t - 3, raw=TrackInfo("Track 3", "Madvillain"),
+                          resolved=resolved_for(album, "Track 3"))
+    player.worker._results.put(late)
+    run(player, clock, 400)                                   # a slow flip
+    heard["t"] = "Track 4"
+    cap.level = -20
+    st = run(player, clock, 20)                               # side B
+    assert [t for t, _ in rec.scrobbles] == ["Track 3"]       # no second scrobble
+    assert "Track 3" not in rec.now_playing[1:] or rec.now_playing[-1] == "Track 4"
+    assert st.title == "Track 4"
+
+
+def test_run_out_crackle_after_a_side_is_no_new_session_and_the_end_card_stays(tmp_path):
+    """The side ends on its first quiet tick with the needle still in the run-out; the crackle
+    there clears the start gate and "moves" more than music. It started a phantom session
+    seconds later and the end-of-side card went with it (four times on 2026-11-08)."""
+    from spindle.web import StateHub
+    clock = FakeClock()
+    album = make_album([115, 72, 109, 68, 150, 234], positions=SIDES, owned=True)
+    player, cap, rec = make_player(tmp_path, clock, lambda p: TrackInfo("Track 3", "Madvillain"),
+                                   albums=[album])
+    hub = StateHub(clock=clock)
+    player.side_listeners.append(hub.side_ended)
+    cap.level = -20
+    for _ in range(65):
+        clock.advance(2)
+        hub.publish(player.tick())
+    cap.level = -60
+    clock.advance(2)
+    hub.publish(player.tick())
+    assert "ended" in hub.snapshot()[1]
+    player.worker.identify = lambda p: None
+    cap.level, cap.motion_value = -33, 0.98                   # crackle: loud enough, lively enough
+    for _ in range(15):                                       # half a minute of it
+        clock.advance(2)
+        st = player.tick()
+        hub.publish(st)
+        assert st.phase == Phase.IDLE and "ended" in hub.snapshot()[1]
+    # the needle comes up (the floor, not just under the gate), then side B goes on
+    cap.level, cap.motion_value = -66, 0.4
+    run(player, clock, 6)
+    player.worker.identify = lambda p: TrackInfo("Track 4", "Madvillain")
+    cap.level = -20
+    st = run(player, clock, 8)
+    assert st.phase == Phase.PLAYING and st.title == "Track 4"
+
+
+def test_music_that_goes_on_after_a_side_end_is_found_without_the_needle_coming_up(tmp_path):
+    """The clock ended the side early (a hidden track, a slow deck): the sound that follows is
+    identified within seconds even though the needle never left the groove."""
+    clock = FakeClock()
+    album = make_album([115, 72, 109, 68, 150, 234], positions=SIDES, owned=True)
+    player, cap, rec = make_player(tmp_path, clock, lambda p: TrackInfo("Track 3", "Madvillain"),
+                                   albums=[album])
+    cap.level = -20
+    run(player, clock, 130)
+    cap.level = -60
+    run(player, clock, 2)
+    assert player.phase == Phase.IDLE
+    cap.level = -20                                           # it was only a pause
+    st = run(player, clock, 16)
+    assert st.phase == Phase.PLAYING and st.title == "Track 3"
+    assert [t for t, _ in rec.scrobbles] == ["Track 3"]       # and not counted twice
+
+
+def test_a_sparse_intro_reading_as_a_lead_out_does_not_end_an_unidentified_session(tmp_path):
+    """Runaway's opening notes come about a revolution apart: three such ticks ended the
+    session twice, 36 s into the side, while nothing had been identified yet."""
+    clock = FakeClock()
+    player, cap, rec = make_player(tmp_path, clock, lambda p: None)
+    cap.level = -24
+    run(player, clock, 4)
+    assert player.phase == Phase.LISTENING
+    cap.runout_value = (0.7, 0.06)
+    st = run(player, clock, 30)
+    assert st.phase == Phase.LISTENING and not st.steady_noise
+
+
+def test_a_wrong_lock_on_one_of_his_records_yields_to_the_one_that_keeps_being_heard(tmp_path):
+    """Locked on a record he owns by a confusion at the needle drop, every hit from the record
+    really playing (also his) was ignored for the whole side and the clock scrobbled the wrong
+    record's tracks."""
+    clock = FakeClock()
+    wrong = make_album([200, 200, 200], artist="Kino", album="Nachalnik Kamchatki", album_id="w",
+                       positions=["A1", "A2", "A3"], owned=True,
+                       titles=["Posledniy Geroy", "Kazhduyu Noch", "Tranquilizer"])
+    real = make_album([200, 200, 200], artist="Kino", album="Noch", album_id="r",
+                      positions=["B1", "B2", "B3"], owned=True,
+                      titles=["Posledniy Geroy", "Zhizn V Steklah", "Mama Anarhiya"])
+    heard = {"t": "Posledniy Geroy"}
+    player, cap, rec = make_player(tmp_path, clock, lambda p: TrackInfo(heard["t"], "Kino"),
+                                   albums=[wrong, real])
+    cap.level = -20
+    run(player, clock, 196)                                   # the song both records carry
+    assert player.session.album_state.tracklist.album_name == "Nachalnik Kamchatki"
+    heard["t"] = "Zhizn V Steklah"                            # only on the record that is playing
+    run(player, clock, 60)
+    assert player.session.album_state.tracklist.album_name == "Noch"
+    run(player, clock, 400)
+    titles = [t for t, _ in rec.scrobbles]
+    assert "Kazhduyu Noch" not in titles and "Tranquilizer" not in titles
+    assert titles[:2] == ["Posledniy Geroy", "Zhizn V Steklah"]
+
+
+def test_the_end_card_counts_what_was_sent_not_the_sessions_bookkeeping(tmp_path):
+    """A backwards anchor takes tracks out of the session's scrobbled set so they can count
+    again; the end-of-side card then said "1 track scrobbled" after three had gone out."""
+    clock = FakeClock()
+    album = make_album([60, 60, 60], positions=["A1", "A2", "A3"], owned=True)
+    heard = {"t": "Track 1"}
+    player, cap, rec = make_player(tmp_path, clock, lambda p: TrackInfo(heard["t"], "Madvillain"),
+                                   albums=[album])
+    ended = []
+    player.side_listeners.append(ended.append)
+    cap.level = -20
+    run(player, clock, 58)
+    heard["t"] = "Track 2"
+    run(player, clock, 60)
+    heard["t"] = "Track 3"
+    run(player, clock, 70)
+    assert [t for t, _ in rec.scrobbles] == ["Track 1", "Track 2", "Track 3"]
+    player.session.album_state.scrobbled.discard(1)           # what a replay branch does
+    player.session.album_state.scrobbled.discard(2)
+    cap.level = -70
+    run(player, clock, 12)
+    assert ended and ended[-1]["scrobbled"] == 3

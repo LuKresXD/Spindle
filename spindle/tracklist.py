@@ -22,8 +22,11 @@ def norm_title(s: str) -> str:
     """Loose title key: case, punctuation, apostrophes, edition tags, feat. credits."""
     s = s.lower().replace("'", "").replace("’", "")
     s = re.sub(r"[\(\[](feat\.?|ft\.?|featuring|with)\b[^\)\]]*[\)\]]", " ", s)
-    s = re.sub(r"[\(\[](remaster(?:ed)?|bonus|album version|explicit)[^\)\]]*[\)\]]", " ", s)
-    s = re.sub(r"\s[-–—]\s*(remaster(?:ed)?|bonus track|album version).*$", " ", s)
+    s = re.sub(r"[\(\[](?:\d{4}\s+)?(remaster(?:ed)?|bonus|album version|explicit)[^\)\]]*[\)\]]",
+               " ", s)
+    # "Bad - 2012 Remaster", "Heroes - Remastered 2017": with the year first the suffix stayed, and
+    # a three-letter title then matched nothing but the compilation that carries it bare
+    s = re.sub(r"\s[-–—]\s*(?:\d{4}\s+)?(remaster(?:ed)?|bonus track|album version).*$", " ", s)
     s = re.sub(r"[^a-z0-9Ѐ-ӿ]+", " ", s)
     return " ".join(s.split())
 
@@ -41,9 +44,14 @@ def titles_match(a: str, b: str) -> bool:
 
 
 def side_of(position: str) -> str:
-    """Side letter of a vinyl position: "A3" -> "A", "2A" -> "A", "B" -> "B";
-    CD-style "1-4" / "12" / "" -> ""."""
-    m = re.match(r"\s*(?:\d+\s*[.-]?\s*)?([A-Za-z]{1,2})\s*[.-]?\s*\d*\s*$", position or "")
+    """Side letter of a vinyl position: "A3" -> "A", "2A" -> "A", "B" -> "B", and the
+    sub-track forms Discogs uses, "B2.1" / "A3a" / "LP1-A1" -> their side (Take Care's
+    "B2.1" read as no side at all, which made B1 look like the end of side B).
+    CD-style "1-4" / "12" / "CD1" / "" -> ""."""
+    pos = (position or "").strip()
+    if re.match(r"(?i)(cd|dvd|bd|vhs|mp3|video|digital|file)\b|(cd|dvd|bd)\d", pos):
+        return ""
+    m = re.match(r"(?i)(?:lp\s*\d+\s*[-.:]?\s*)?(?:\d+\s*[-.:]?\s*)?([a-z]{1,2})(?![a-z])", pos)
     return m.group(1).upper() if m else ""
 
 

@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_QUEUE_PATH = Path.home() / ".local" / "share" / "spindle" / "scrobble_queue.json"
 
 QUEUE_FLUSH_INTERVAL = 60      # seconds between flush attempts triggered by a success
+SAME_PLAY_SECONDS = 30         # the same track starting again this close is one play sent twice
+AUTH_NOTICE_EVERY = 3600       # seconds between "Last.fm refuses the credentials" notices
 NOW_PLAYING_COOLDOWN = 30      # seconds between now-playing updates for the same track
 CANON_CACHE_MAX = 200
 
@@ -43,14 +45,24 @@ _RETRYABLE_STATUS = {
 }
 
 
+# Last.fm status codes that mean "the credentials are wrong", not "this play is wrong": the
+# play is kept for when the configuration is fixed (4 auth failed, 9 invalid session key,
+# 10 invalid API key, 13 invalid signature, 14 unauthorised token, 26 suspended key).
+_AUTH_STATUS = {"4", "9", "10", "13", "14", "26"}
+
+
 class Rejected(Exception):
     """Last.fm refused the scrobble for good; do not retry."""
 
 
 def _classify(e: Exception) -> str:
-    """'retry' for connectivity / temporary trouble, 'reject' for final refusals."""
+    """'retry' for connectivity / temporary trouble, 'auth' when Last.fm refuses the
+    credentials (the play is kept), 'reject' for final refusals of the play itself."""
     if isinstance(e, pylast.WSError):
-        return "retry" if str(getattr(e, "status", "")) in _RETRYABLE_STATUS else "reject"
+        status = str(getattr(e, "status", ""))
+        if status in _AUTH_STATUS:
+            return "auth"
+        return "retry" if status in _RETRYABLE_STATUS else "reject"
     if isinstance(e, (pylast.NetworkError, pylast.MalformedResponseError,
                       requests.RequestException, OSError, TimeoutError)):
         return "retry"
@@ -125,19 +137,19 @@ class ScrobbleQueue:
             n = len(self._queue)
         logger.info("Queued offline: %s — %s (queue size: %d)", artist, title, n)
 
-    def pop_all(self) -> list[dict]:
+    def snapshot(self) -> list[dict]:
+        """The queued entries, oldest first. They stay on disk until each is removed: a
+        power cut in the middle of a flush must not cost the ones not sent yet."""
         with self._lock:
-            if not self._queue:
-                return []
-            entries = list(self._queue)
-            self._queue.clear()
-            self._save()
-            return entries
+            return list(self._queue)
 
-    def put_back(self, entries: list[dict]) -> None:
+    def remove(self, entry: dict) -> None:
         with self._lock:
-            self._queue = entries + self._queue
-            self._save()
+            for i, e in enumerate(self._queue):
+                if e is entry or e == entry:
+                    del self._queue[i]
+                    self._save()
+                    return
 
     def __len__(self) -> int:
         return len(self._queue)
@@ -158,7 +170,8 @@ class Scrobbler:
         self.on_recovered = on_recovered      # (count): the offline queue got through
         self._queue = ScrobbleQueue(queue_path)
         self._last_scrobble: str | None = None
-        self._last_scrobble_time: float = 0
+        self._last_scrobble_ts: int = 0
+        self._last_auth_notice: float = 0
         self._last_flush_attempt: float = 0
         self._last_np_key: str | None = None
         self._last_np_time: float = 0
@@ -212,13 +225,18 @@ class Scrobbler:
             logger.error("Not connected to Last.fm")
             return False
         track_key = f"{track.artist} - {track.title}"
-        now = time.time()
-        if (self._last_scrobble == track_key
-                and now - self._last_scrobble_time < self.scrobble_cfg.dedup_window):
-            logger.debug("Skipping duplicate: %s", track_key)
+        ts = int(timestamp or time.time())
+        # The same track starting again INSIDE its previous play is that play, sent twice (a
+        # session that broke on a pause and resumed); Last.fm ignores those too. A start a full
+        # track later is another play: the needle went back. (The old rule compared send times
+        # within 300 s and dropped an immediate replay of anything under five minutes.)
+        same_play = max(SAME_PLAY_SECONDS, int(track.duration or 0))
+        if self._last_scrobble == track_key and 0 <= ts - self._last_scrobble_ts < same_play:
+            logger.info("Not sending %s again: the same play (started %ds after the last one)",
+                        track_key, ts - self._last_scrobble_ts)
             return False
-        self._last_scrobble, self._last_scrobble_time = track_key, now
-        self._enqueue(("scrobble", track, timestamp or int(now)))
+        self._last_scrobble, self._last_scrobble_ts = track_key, ts
+        self._enqueue(("scrobble", track, ts))
         return True
 
     def album_playcount(self, artist: str, album: str) -> int | None:
@@ -244,7 +262,7 @@ class Scrobbler:
             return track
         # Spotify- and Discogs-sourced names are authoritative; Last.fm's correction
         # database is often stale ("Travis Scott" → "Travi$ Scott").
-        if track.source.startswith("spotify") or track.source == "discogs":
+        if track.source.startswith(("spotify", "deezer")) or track.source == "discogs":
             return track
         key = (track.artist.lower(), track.title.lower())
         if key in self._canon:
@@ -307,15 +325,26 @@ class Scrobbler:
             logger.info("Scrobbled: %s", track_key)
             self._maybe_flush()
         except Exception as e:
-            if _classify(e) == "retry":
+            kind = _classify(e)
+            if kind in ("retry", "auth"):
                 logger.warning("Scrobble failed (queued for retry): %s", e)
                 self._queue.add(track.artist, track.title, track.album or "",
                                 track.duration or 0, ts)
+                if kind == "auth":
+                    self._auth_notice(e)
             else:
                 self.failed += 1
                 logger.error("Scrobble REJECTED by Last.fm, dropped: %s — %s", track_key, e)
                 if self.on_error:
                     self.on_error("Last.fm rejected a scrobble", f"{track_key} · {e}")
+
+    def _auth_notice(self, e: Exception) -> None:
+        """Tell the log channel, at most once an hour, that Last.fm refuses the credentials."""
+        now = time.time()
+        if self.on_error and now - self._last_auth_notice >= AUTH_NOTICE_EVERY:
+            self._last_auth_notice = now
+            self.on_error("Last.fm refuses the credentials",
+                          f"plays are being queued until this is fixed · {e}")
 
     def _maybe_flush(self) -> None:
         if len(self._queue) and time.time() - self._last_flush_attempt >= QUEUE_FLUSH_INTERVAL:
@@ -326,25 +355,33 @@ class Scrobbler:
         (the network is down: no point hammering the rest); drops rejected ones."""
         assert self.network is not None
         self._last_flush_attempt = time.time()
-        entries = self._queue.pop_all()
+        entries = self._queue.snapshot()
         if not entries:
             return 0
         logger.info("Flushing %d queued scrobbles...", len(entries))
         sent = 0
         for i, entry in enumerate(entries):
+            if not all(k in entry for k in ("artist", "title", "timestamp")):
+                logger.error("  ✗ malformed queue entry dropped: %r", entry)
+                self._queue.remove(entry)
+                continue
             try:
                 self.network.scrobble(artist=entry["artist"], title=entry["title"],
                                       timestamp=entry["timestamp"], album=entry.get("album", ""),
                                       duration=entry.get("duration", 0))
+                self._queue.remove(entry)              # off the disk only once Last.fm has it
                 sent += 1
                 self.sent += 1
                 logger.info("  ✓ %s — %s", entry["artist"], entry["title"])
             except Exception as e:
-                if _classify(e) == "retry":
-                    logger.warning("  ✗ %s — %s: %s (network; %d left for later)",
+                kind = _classify(e)
+                if kind in ("retry", "auth"):
+                    logger.warning("  ✗ %s — %s: %s (%d left for later)",
                                    entry["artist"], entry["title"], e, len(entries) - i)
-                    self._queue.put_back(entries[i:])
+                    if kind == "auth":
+                        self._auth_notice(e)
                     break
+                self._queue.remove(entry)
                 self.failed += 1
                 logger.error("  ✗ %s — %s REJECTED, dropped: %s", entry["artist"],
                              entry["title"], e)

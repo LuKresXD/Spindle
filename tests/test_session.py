@@ -1,3 +1,4 @@
+import pytest
 from conftest import make_album, resolved_for
 
 from spindle.fingerprint import TrackInfo
@@ -311,12 +312,13 @@ def test_restarting_the_side_scrobbles_it_again(clock, album):
     music_start = clock.t
     clock.advance(4)
     confirmed(s, album, "Track 1", music_start)
-    for dur in (115, 72, 109):
-        clock.advance(dur + 10)
+    while s.get_current_track().title != "Track 4":    # the engine's 2 s ticks through three tracks
+        clock.advance(2)
         s.check_advance()
     assert s.album_state.scrobbled == {0, 1, 2}
-    assert s.get_current_track().title == "Track 4"
-    clock.advance(20)                              # 20 s into Track 4, then the needle goes back
+    # each track began when the one before it ended, not when the tick noticed
+    assert s.album_state.current_track_start == music_start + 115 + 72 + 109
+    clock.advance(16)                              # about 20 s into Track 4; the needle goes back
     replay_start = clock.t - 6                     # heard = the identifying window's start
     assert s.on_identified(resolved_for(album, "Track 1"), music_start) == []  # one ID: a new run
     assert s.get_current_track().title == "Track 4"                            # not acted on yet
@@ -461,9 +463,37 @@ def test_offsets_tolerate_turntable_speed_drift(clock, album):
         at += 10
         off += 10.3
         identified(s, album, "Track 6", music_start, at=at, offset=off)
-    assert s._run_start(album.tracks[5]) is not None             # still trusted
-    identified(s, album, "Track 6", music_start, at=at + 10, offset=off + 48)   # a real jump
-    assert s._run_start(album.tracks[5]) is None
+    trusted = s._run_start(album.tracks[5])
+    assert trusted is not None                                   # still trusted
+    identified(s, album, "Track 6", music_start, at=at + 10, offset=off + 48)   # one odd answer
+    assert s._run_start(album.tracks[5]) == trusted              # outvoted: a repeated section
+
+
+def test_one_odd_first_offset_does_not_poison_the_track(clock):
+    """Runaway, 2026-11-08: the first answer sat 16 s off (its intro repeats), and as the only
+    reference it had 52 agreeing answers thrown away for the whole 9 minutes."""
+    album = make_album([549, 300], titles=["Runaway", "Hell Of A Life"], positions=["E1", "E2"],
+                       owned=True)
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    t0 = clock.t
+    identified(s, album, "Runaway", t0, at=t0 + 6, offset=16.0)          # the odd one, first
+    for k in range(1, 4):
+        identified(s, album, "Runaway", t0, at=t0 + 6 + 8 * k, offset=8.0 * k)
+    assert s.album_state.start_exact
+    assert s.album_state.current_track_start == pytest.approx(t0, abs=0.5)
+
+
+def test_the_needle_moved_inside_a_track_is_followed_once_the_new_place_wins(clock):
+    album = make_album([600], titles=["Long One"])
+    s = ScrobbleSession(min_play_seconds=30, chunk_duration=2, clock=clock, window_seconds=6)
+    t0 = clock.t
+    for k in range(6):                                                   # 0:00 .. 0:40 as it plays
+        identified(s, album, "Long One", t0, at=t0 + 6 + 8 * k, offset=8.0 * k)
+    assert s._run_start(album.tracks[0]) == pytest.approx(t0, abs=0.5)
+    base = t0 + 6 + 8 * 6
+    for k in range(7):                                       # the needle went 3 minutes ahead
+        identified(s, album, "Long One", t0, at=base + 8 * k, offset=48 + 180 + 8.0 * k)
+    assert s._run_start(album.tracks[0]) == pytest.approx(t0 - 180, abs=0.5)
 
 
 def test_deck_speed_is_measured_from_offsets_and_drives_the_advance(clock, album):
@@ -571,3 +601,106 @@ def test_needle_drop_near_the_end_counts_only_what_was_heard(clock, album):
     clock.t = music_start + 20
     assert s.check_advance() == []
     assert 2 not in s.album_state.scrobbled
+
+
+# ── 2026-11-09 review ────────────────────────────────────────────────────────────────────────────
+
+def test_the_next_track_starts_when_the_last_one_ended_not_when_the_tick_noticed(clock):
+    album = make_album([200, 200, 200], positions=["A1", "A2", "A3"], owned=True)
+    s = ScrobbleSession(clock=clock)
+    t0 = clock.t
+    for off in (10.0, 18.0):                                  # two agreeing offsets pin Track 1
+        clock.t = t0 + off + 6
+        identified(s, album, "Track 1", t0, at=clock.t, offset=off)
+    assert s.album_state.start_exact
+    clock.t = t0 + 24
+    while s.album_state.current_index == 0:
+        clock.advance(2)
+        s.check_advance()
+    assert clock.t > t0 + 200                                 # the tick noticed a moment later
+    assert s.album_state.current_track_start == pytest.approx(t0 + 200)
+    assert s.album_state.start_exact                          # a known end is a known start
+
+
+def test_his_record_displacing_a_strangers_lock_backfills_what_played_meanwhile(clock):
+    stranger = make_album([400], artist="TreyWayG", album="Ken Car", album_id="s",
+                          titles=["Ken Car"])
+    his = make_album([120, 120, 120], artist="Ken Carson", album="X", album_id="x",
+                     positions=["B1", "B2", "B3"], owned=True,
+                     titles=["Going Schitz", "Same Thing", "Freestyle 1"])
+    s = ScrobbleSession(clock=clock)
+    t0 = clock.t
+    out = []
+    for _ in range(30):                                       # four minutes of the stranger
+        clock.advance(8)
+        out += s.on_identified(resolved_for(stranger, "Ken Car"), t0, at=clock.t)
+        out += s.check_advance()
+    assert s.album_state.tracklist.album_name == "Ken Car" and not out
+    for _ in range(3):                                        # then B3 of his record is heard
+        clock.advance(8)
+        out += s.on_identified(resolved_for(his, "Freestyle 1"), t0, at=clock.t)
+    assert s.album_state.tracklist.album_name == "X"
+    assert [t.title for t, _ in out] == ["Going Schitz", "Same Thing"]
+
+
+def test_another_artists_track_with_a_title_from_the_locked_album_is_not_an_anchor(clock):
+    album = make_album([60, 200, 200, 200], titles=["Intro", "Song A", "Song B", "Song C"])
+    other = make_album([90], artist="Somebody Else", album="Other", album_id="o", titles=["Intro"])
+    s = ScrobbleSession(clock=clock)
+    t0 = clock.t
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(album, "Song B"), t0, at=clock.t)
+    assert s.album_state.current_index == 2
+    clock.advance(60)
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(other, "Intro"), t0, at=clock.t)
+    assert s.album_state.current_index == 2                   # the needle did not go to track 1
+
+
+def test_one_late_hit_on_the_track_before_is_not_the_needle_going_back(clock):
+    """MBDTF side F, 2026-11-09: Who Will Survive In America is built on the end of Lost In The
+    World; one hit naming the earlier track, a minute and a half after it ended, counted as
+    confirmed (its run was still alive), sent the screen back and took both out of the count."""
+    album = make_album([469, 256, 98], positions=["F1", "F2", "F3"], owned=True,
+                       titles=["Blame Game", "Lost In The World", "Who Will Survive"])
+    s = ScrobbleSession(clock=clock)
+    t0 = clock.t
+    out = []
+    for k in range(3):                                        # heard while it really plays
+        clock.t = t0 + 200 + 8 * k
+        out += s.on_identified(resolved_for(album, "Lost In The World"), t0 - 469, at=clock.t)
+    assert s.album_state.current_index == 1
+    start = s.album_state.current_track_start
+    while s.album_state.current_index == 1:                   # the clock runs it out
+        clock.advance(2)
+        out += s.check_advance()
+    assert s.album_state.current_index == 2 and start + 256 <= clock.t
+    clock.advance(90)                                         # 90 s into the last track
+    out += s.on_identified(resolved_for(album, "Lost In The World"), t0 - 469, at=clock.t)
+    assert s.album_state.current_index == 2                   # still the last track
+    assert s.album_state.scrobbled == {0, 1}                  # nothing taken out of the count
+    # the needle really back on it: heard twice more
+    for _ in range(2):
+        clock.advance(8)
+        out += s.on_identified(resolved_for(album, "Lost In The World"), t0 - 469, at=clock.t)
+    assert s.album_state.current_index == 1
+
+
+def test_the_tail_of_the_track_before_inside_the_next_one_is_not_a_replay(clock):
+    """The same pair with offsets: every hit sits in the last seconds of the earlier track."""
+    album = make_album([256, 98], titles=["Lost In The World", "Who Will Survive"],
+                       positions=["F2", "F3"], owned=True)
+    s = ScrobbleSession(clock=clock, window_seconds=6)
+    t0 = clock.t
+    for k in range(3):
+        identified(s, album, "Lost In The World", t0, at=t0 + 6 + 8 * k, offset=8.0 * k)
+    while s.album_state.current_index == 0:
+        clock.advance(2)
+        s.check_advance()
+    base = clock.t + 60                                       # a minute into the last track
+    for k in range(4):                                        # it keeps answering with the outro
+        clock.t = base + 8 * k
+        identified(s, album, "Lost In The World", t0, at=clock.t, offset=225.0 + 8 * k)
+    assert s.album_state.current_index == 1 and s.album_state.scrobbled == {0}

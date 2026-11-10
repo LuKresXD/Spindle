@@ -1057,10 +1057,11 @@
   function tap(start) {
     const target = start.target;
     if (state && state.ended && state.ended.at !== endedDismissed) {
-      // "Flip for Side B" / "That's the record" tapped: he is not playing the rest, go dark
+      // "Flip for Side B" / "That's the record" tapped: the card goes and the screen is black, still
+      // on the Spindle page. Only a swipe changes the page (Luka, 2026-11-09: "it never should go
+      // to off unless I'm swiping").
       endedDismissed = state.ended.at;
       apply(state);
-      if (pageIndex !== OFF) showPage(OFF, -1);
       return;
     }
     if (pageIndex !== SPINDLE) { showDots(1800); if (pageIndex === OFF) flashOff(); return; }

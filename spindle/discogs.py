@@ -52,7 +52,9 @@ def clean_artist(name: str) -> str:
 
 
 def _norm(s: str) -> str:
-    s = s.lower().replace("'", "").replace("’", "")
+    # "$" reads as "s": Discogs files A$AP Rocky under "ASAP Rocky", and without this none of his
+    # A$AP records was recognised as his (2026-11-09)
+    s = s.lower().replace("$", "s").replace("'", "").replace("’", "")
     s = re.sub(r"\s*\(\d+\)$", "", s)                       # Discogs "Artist (2)" disambiguation
     s = re.sub(r"[\(\[].*?[\)\]]", " ", s)
     s = re.sub(r"\b(deluxe|edition|remaster(?:ed)?|expanded|anniversary|version|lp|ep)\b", " ", s)

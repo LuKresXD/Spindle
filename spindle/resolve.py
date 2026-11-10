@@ -132,7 +132,8 @@ class Resolver:
     def _from_spotify(self, cand: SpotifyCandidate, track: TrackInfo) -> Resolved:
         canonical = cand.to_track()
         tl = self.spotify.get_album_tracklist(cand.album_id) if self.spotify else None
-        reason = f"spotify {cand.album_type or 'album'}"
+        src = cand.provider
+        reason = f"{src} {cand.album_type or 'album'}"
         owned = False
         if tl is not None and self.collection is not None:
             rel = (self.collection.find_release(cand.artist, cand.album_name)
@@ -157,14 +158,14 @@ class Resolver:
                         tl = merge(tl, pressing)
                         if part is not None:
                             sides = f"{side_of(part.positions[0])}-{side_of(part.positions[-1])}"
-                            reason = f"spotify+discogs ({cov:.0%} of sides {sides} of the box)"
+                            reason = f"{src}+discogs ({cov:.0%} of sides {sides} of the box)"
                         else:
-                            reason = f"spotify+discogs ({cov:.0%} of pressing)"
+                            reason = f"{src}+discogs ({cov:.0%} of pressing)"
                     else:
-                        reason = f"spotify (owned pressing differs, {cov:.0%} overlap)"
+                        reason = f"{src} (owned pressing differs, {cov:.0%} overlap)"
                 else:
                     tl.owned = True
-                    reason = "spotify (owned, pressing not loaded yet)"
+                    reason = f"{src} (owned, pressing not loaded yet)"
         logger.info("Resolved: %s — %s [%s] via %s", canonical.artist, canonical.title,
                     cand.album_name, reason)
         return Resolved(canonical, cand.album_id, tl, cand.art_url, owned, reason)

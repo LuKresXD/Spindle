@@ -72,10 +72,12 @@ ADVANCE_BUFFER_EXACT = 0.5   # ... once the start is pinned AND the deck speed i
 ADVANCE_BUFFER_MAX   = 15    # max seconds past duration before auto-advance
 FALLBACK_TRACK_DURATION = 240  # assumed duration (s) when nobody knows (4 min)
 REPLAY_SLACK         = 45    # s past a track's end: a backwards anchor is a replay, not lag
+TAIL_ECHO            = 60    # s: a hit placed this close to the PREVIOUS track's end is its tail
 BOUNDARY_ECHO_SLACK  = 2     # s: a window that began this close to a track's end still heard it
 OFFSET_TOLERANCE     = 5     # s: two offsets of one run must advance with the clock this closely
 START_SNAP           = 1.0   # s: adopt the offset start when it differs from the clock by more
 START_SAMPLES        = 5     # the start is the median of the newest this many offset estimates
+OFFSET_SAMPLES       = 12    # offsets of a run kept for the vote (newest)
 SPEED_MIN_INTERVAL   = 20    # s between two offsets before their ratio counts as a speed sample
 SPEED_SAMPLES_MIN    = 3     # samples before the measured deck speed replaces the assumed 1.0
 SPEED_SAMPLES_MAX    = 60    # keep the newest this many (the deck's speed drifts slowly)
@@ -86,6 +88,8 @@ MISMATCH_THRESHOLD = 3      # different-artist IDs (spread over MISMATCH_MIN_SEC
 MISMATCH_MIN_SECONDS = 60   # a fingerprint confusion lasts a few windows; a mix lasts minutes
 CONFIRM_THRESHOLD  = 2      # times a track must be identified before acting on it
 CONFIRM_RUN_GAP    = 120    # s without hearing a track: its next ID starts a new run
+RIVAL_THRESHOLD    = 3      # confirmed hits on ANOTHER record he owns, none on the locked one...
+RIVAL_MIN_SECONDS  = 30     # ...spread over this long: that record is the one playing
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -154,10 +158,10 @@ class _Run:
     hits:       int = 0
     first_seen: float = 0.0          # window-end time of the run's first identification
     last_seen:  float = 0.0
-    ref:        tuple[float, float] | None = None   # (at, offset) of the last consistent ID
-    start:      float | None = None  # median of `starts`, once a second offset confirms the first
-    starts:     list = field(default_factory=list)  # at - offset - window per consistent ID
-    speed_ref:  tuple[float, float] | None = None   # (at, offset) the deck speed is measured from
+    samples:    list = field(default_factory=list)  # (at, offset) of this run's IDs, newest last
+    times:      list = field(default_factory=list)  # when this run's IDs were heard, newest last
+    start:      float | None = None  # where the agreeing offsets put the track's start, or None
+    odd_logged: bool = False         # the run's first odd offset has been logged
 
 
 @dataclass
@@ -175,6 +179,7 @@ class AlbumState:
     start_exact:         bool  = False   # current_track_start came from agreeing offsets
     exhausted:           bool  = False   # advanced past the last track
     side_done:           bool  = False   # timing reached the end of the current side
+    resume_floor:        float = 0.0     # a lagging ID was heard this late: the next starts here
 
 
 # ── Main class ────────────────────────────────────────────────────────────────
@@ -214,6 +219,8 @@ class ScrobbleSession:
         self._mismatch_count: int = 0
         self._mismatch_since: float | None = None
         self._abandoned: AlbumState | None = None     # the album a compilation switch left
+        # (album id, hits, since): another record he owns keeps being heard instead of the lock
+        self._rival: tuple[str, int, float] | None = None
         self._comp_count: int = 0
         self._comp_current: TrackInfo | None = None
         self._comp_start: float = 0.0
@@ -327,7 +334,14 @@ class ScrobbleSession:
         next_idx = al.current_index + 1
         next_track = al.tracklist.get_track_at(next_idx)
         if next_track:
-            self._set_current(next_idx, self._clock())
+            # The next track began when this one ended by the clock, not when this tick noticed:
+            # "now" is the end plus the buffer plus up to a tick, so every start was 2-17 s late
+            # and the offsets had to pull it back (25 such corrections in three days of journal,
+            # 2026-11-09). A lagging ID heard later than the predicted end moves the floor up.
+            began = max(al.resume_floor, min(self._clock(), al.current_track_start + expected))
+            exact = al.start_exact and not al.resume_floor
+            al.resume_floor = 0.0
+            self._set_current(next_idx, began, exact=exact)
             logger.info("Session: ⏭  track %d — %s — %s",
                         next_idx + 1, next_track.artist, next_track.title)
         else:
@@ -419,6 +433,7 @@ class ScrobbleSession:
         self._mismatch_count = 0
         self._mismatch_since = None
         self._abandoned = None
+        self._rival = None
         self._comp_count = 0
         self._comp_current = None
         self._comp_start = 0.0
@@ -443,38 +458,64 @@ class ScrobbleSession:
             self._confirm[key] = run
         run.hits += 1
         run.last_seen = now
+        run.times.append(now)
+        del run.times[:-OFFSET_SAMPLES]
         if offset is not None:
-            if run.ref is None:
-                run.ref = (now, offset)
-            elif now > run.ref[0]:
-                # the offsets must advance with the clock, allowing for the turntable's
-                # speed error over the interval (a 3 % fast deck gains 6 s in 200 s)
-                ref_at, ref_offset = run.ref
-                drift = (offset - ref_offset) - (now - ref_at)
-                if abs(drift) <= OFFSET_TOLERANCE + VINYL_DRIFT * (now - ref_at):
-                    run.starts.append(now - offset - self.window_seconds)
-                    del run.starts[:-START_SAMPLES]
-                    run.start = sorted(run.starts)[len(run.starts) // 2]
-                    run.ref = (now, offset)          # consistent: measure the next one from here
-                    if run.speed_ref is None:
-                        run.speed_ref = (ref_at, ref_offset)
-                    span = now - run.speed_ref[0]
-                    if span >= SPEED_MIN_INTERVAL:
-                        ratio = (offset - run.speed_ref[1]) / span
-                        if SPEED_RANGE[0] <= ratio <= SPEED_RANGE[1]:
-                            self._speed_samples.append(ratio)
-                            del self._speed_samples[:-SPEED_SAMPLES_MAX]
-                else:
-                    run.start = None
-                    run.starts.clear()
-                    logger.info("Session: offsets of '%s' disagree with the clock by %.0fs "
-                                "(a repeated section?) — position not trusted",
-                                track.title, drift)
+            self._note_offset(run, track, now, offset)
         if run.hits < CONFIRM_THRESHOLD:
             logger.debug("Session: confirm %d/%d — '%s — %s'", run.hits, CONFIRM_THRESHOLD,
                          track.artist, track.title)
             return False
         return True
+
+    def _note_offset(self, run: _Run, track: TrackInfo, now: float, offset: float) -> None:
+        """Add a fingerprint offset to the run and vote on where the track began.
+
+        Each (time, offset) says "the track began at time - offset - window". Offsets of the
+        same passage advance with the clock (within OFFSET_TOLERANCE plus the deck's speed
+        error over the interval); a repeated section answers with the wrong occurrence. The
+        largest set of mutually agreeing samples wins, so one odd answer, first or later,
+        cannot outvote the rest. (A single rolling reference did: when the reference was the
+        odd one, 52 agreeing answers were thrown away over the 9 minutes of one track and the
+        start was pinned from two odd ones, 2026-11-08.)
+        """
+        run.samples.append((now, offset))
+        del run.samples[:-OFFSET_SAMPLES]
+
+        def agree(a: tuple[float, float], b: tuple[float, float]) -> bool:
+            span = abs(a[0] - b[0])
+            return abs((a[1] - b[1]) - (a[0] - b[0])) <= OFFSET_TOLERANCE + VINYL_DRIFT * span
+
+        best: list[tuple[float, float]] = []
+        for anchor in reversed(run.samples):                # newest first: it wins a tie
+            group = [x for x in run.samples if agree(x, anchor)]
+            if len(group) > len(best):
+                best = group
+        if len(best) < 2:
+            if len(run.samples) >= 2 and not run.odd_logged:
+                run.odd_logged = True
+                first, last = run.samples[0], run.samples[-1]
+                logger.info("Session: offsets of '%s' disagree with the clock by %.0fs "
+                            "(a repeated section?) — position not trusted yet", track.title,
+                            (last[1] - first[1]) - (last[0] - first[0]))
+            run.start = None
+            return
+        if (now, offset) not in best and not run.odd_logged:
+            run.odd_logged = True
+            logger.info("Session: an offset of '%s' is off the others (a repeated section?) "
+                        "— ignored", track.title)
+        # the oldest agreeing sample is the reference the others confirm; the start is read
+        # from the ones that confirmed it (the newest few: the deck's speed error moves it slowly)
+        starts = sorted(at - off - self.window_seconds for at, off in best[1:][-START_SAMPLES:])
+        run.start = starts[len(starts) // 2]
+        if (now, offset) in best:
+            ref_at, ref_offset = best[0]                    # the oldest agreeing sample
+            span = now - ref_at
+            if span >= SPEED_MIN_INTERVAL:
+                ratio = (offset - ref_offset) / span
+                if SPEED_RANGE[0] <= ratio <= SPEED_RANGE[1]:
+                    self._speed_samples.append(ratio)
+                    del self._speed_samples[:-SPEED_SAMPLES_MAX]
 
     def _first_seen(self, track: TrackInfo, default: float) -> float:
         key = (track.artist.lower(), track.title.lower())
@@ -590,14 +631,43 @@ class ScrobbleSession:
         # A better home for this session? (the owned pressing once the collection has
         # loaded, the album when we locked onto a single, the edition that has this track)
         new_tl = resolved.tracklist if resolved.has_album else None
-        if new_tl is not None and new_tl is not al.tracklist and self._is_upgrade(new_tl):
-            return self._relock(resolved, new_tl, now)
+        if new_tl is not None and new_tl is not al.tracklist:
+            # One of his records, confirmed, while the lock is a stranger's streaming record
+            # that has scrobbled nothing: the stranger was a confusion at the needle drop and
+            # his record is the session, from the moment the music started.
+            if (new_tl.owned and not al.tracklist.owned and not al.scrobbled
+                    and not same_artist(new_tl.artist, al.tracklist.artist)):
+                return self._restart_on(resolved, new_tl, now, "a stranger's record gives way")
+            if self._is_upgrade(new_tl):
+                return self._relock(resolved, new_tl, now)
 
         track_index = self._find_in_current_album(resolved)
         if track_index is not None:
             self._mismatch_count = 0
             self._mismatch_since = None
+            self._rival = None
             return self._apply_anchor(track_index, now, resolved.track)
+
+        # Not on the locked record, but on ANOTHER record he owns. Once is a confusion (a
+        # sample heard as its source, a song that sits on two of his albums). Again and again,
+        # with nothing from the locked record in between, means the lock itself was the
+        # confusion: without this an owned lock could never be left before the side ended.
+        same_pressing = (new_tl is not None and new_tl.discogs_release_id is not None
+                         and new_tl.discogs_release_id == al.tracklist.discogs_release_id)
+        if (new_tl is not None and new_tl.owned and al.tracklist.owned
+                and new_tl.album_id != al.album_id and not same_pressing
+                and new_tl.find_track_index(resolved.track.title) is not None):
+            if self._rival is None or self._rival[0] != new_tl.album_id:
+                self._rival = (new_tl.album_id, 1, now)
+            else:
+                self._rival = (new_tl.album_id, self._rival[1] + 1, self._rival[2])
+            _, hits, since = self._rival
+            logger.info("Session: '%s — %s' is on his '%s', not the locked '%s' (%d/%d over %.0fs)",
+                        resolved.track.artist, resolved.track.title, new_tl.album_name,
+                        al.tracklist.album_name, hits, RIVAL_THRESHOLD, now - since)
+            if hits >= RIVAL_THRESHOLD and now - since >= RIVAL_MIN_SECONDS:
+                return self._restart_on(resolved, new_tl, now, "another of his records took over")
+            return []
 
         # Not on the locked album. Same artist, or a title that names the locked
         # artist (their remix of someone else's track): catalogue confusion, ignore.
@@ -644,7 +714,21 @@ class ScrobbleSession:
         """
         if not self._album:
             return None
-        return self._album.tracklist.find_track_index(resolved.track.title)
+        tl = self._album.tracklist
+        idx = tl.find_track_index(resolved.track.title)
+        if idx is None or resolved.album_id == self._album.album_id:
+            return idx
+        # another album's hit: the title alone would let a stranger's "Intro" or "Interlude"
+        # move the needle. It counts when its artist is this record's, or this track's.
+        mine = tl.tracks[idx]
+        names = [n for n in (tl.artist, mine.artist, *mine.artists) if n]
+        hit = [n for n in (resolved.track.artist, *resolved.track.artists) if n]
+        if any(same_artist(h, n) for h in hit for n in names):
+            return idx
+        logger.info("Session: '%s — %s' shares a title with track %d of '%s' but is another "
+                    "artist's — not an anchor", resolved.track.artist, resolved.track.title,
+                    idx + 1, tl.album_name)
+        return None
 
     def _is_upgrade(self, new_tl: AlbumTracklist) -> bool:
         """Is `new_tl` a better home for this session than the locked album?
@@ -660,12 +744,6 @@ class ScrobbleSession:
         old = self._album.tracklist
         if old.owned and not new_tl.owned:
             return False
-        # One of his records, confirmed, while the lock is a stranger's streaming record that
-        # has not scrobbled a thing yet: the stranger was a confusion at the needle drop and
-        # his record is the session (the relock drops the stranger's track; 2026-11-08).
-        if (new_tl.owned and not old.owned and not self._album.scrobbled
-                and not same_artist(new_tl.artist, old.artist)):
-            return True
         if not same_artist(new_tl.artist, old.artist):
             return False
         cur = old.get_track_at(self._album.current_index)
@@ -736,6 +814,31 @@ class ScrobbleSession:
                     idx + 1)
         return result
 
+    def _restart_on(self, resolved: Resolved, new_tl: AlbumTracklist, now: float,
+                    why: str) -> list[tuple[TrackInfo, float]]:
+        """The lock was a confusion: start the album session again on `new_tl`.
+
+        The old record's current track is dropped (it was never playing). While the old
+        lock has scrobbled nothing the music since the needle drop was this record's, so
+        the usual needle-drop backfill applies; once it has scrobbled, nobody knows how
+        long this record has really been on, and the session starts at the track heard.
+        """
+        assert self._album is not None
+        old = self._album
+        if new_tl.find_track_index(resolved.track.title) is None:
+            return []
+        if old.scrobbled:
+            music_start = min(now, self._first_seen(resolved.track, now) - self.window_seconds)
+        else:
+            music_start = old.music_start
+        logger.info("Session: 🔁 %s: %s / %s → %s / %s", why, old.tracklist.artist,
+                    old.tracklist.album_name, new_tl.artist, new_tl.album_name)
+        self._album = None
+        self.mode = None
+        self._rival = None
+        self._mismatch_since = None
+        return self._start_album_session(resolved, new_tl, music_start, now)
+
     def _apply_anchor(self, track_index: int, now: float,
                       heard_track: TrackInfo) -> list[tuple[TrackInfo, float]]:
         """A confirmed identification of `track_index` whose audio ended at `now`.
@@ -789,9 +892,48 @@ class ScrobbleSession:
             logger.info("Session: anchor → track %d (filled %d gap tracks)",
                         track_index + 1, len(gap))
         else:
+            if self._stale_backwards_hit(track_index, heard_track, now):
+                return result
             start = self._offset_start(track, now, floor=al.current_track_start)
             result.extend(self._anchor_backwards(track_index, now, heard, start))
         return result
+
+    def _stale_backwards_hit(self, track_index: int, heard_track: TrackInfo, now: float) -> bool:
+        """A hit on a track the clock has left, which is NOT the needle going back.
+
+        The confirmation gate keeps a run alive for CONFIRM_RUN_GAP, so one late hit on a
+        track that played two minutes ago arrives "confirmed" by the hits from when it really
+        played. A needle that went back is heard again and again: the move needs
+        CONFIRM_THRESHOLD hits since the clock left that track. And when the next track is
+        built on the end of this one (Lost In The World into Who Will Survive In America,
+        2026-11-09: one such hit sent the screen back a track and reset the count on the end
+        card), the fingerprint places the hit in this track's last TAIL_ECHO seconds: its
+        tail, not a replay.
+        """
+        assert self._album is not None
+        al = self._album
+        run = self._confirm.get((heard_track.artist.lower(), heard_track.title.lower()))
+        left_at = al.current_track_start if track_index == al.current_index - 1 else None
+        prev_start = al.starts.get(track_index)
+        track = al.tracklist.get_track_at(track_index)
+        duration = track.duration if track and track.duration else FALLBACK_TRACK_DURATION
+        if prev_start is not None and track_index in al.completed:
+            ended = prev_start + duration
+            if now - ended <= REPLAY_SLACK:
+                return False                      # the lag branch judges these
+            left_at = ended if left_at is None else left_at
+            fresh = sum(1 for t in (run.times if run else []) if t > left_at)
+            if fresh < CONFIRM_THRESHOLD:
+                logger.info("Session: one late hit on track %d (the clock is on %d) — waiting "
+                            "for another before calling it a replay", track_index + 1,
+                            al.current_index + 1)
+                return True
+            if (track_index == al.current_index - 1 and run and run.samples
+                    and duration - run.samples[-1][1] - self.window_seconds <= TAIL_ECHO):
+                logger.info("Session: track %d's tail is heard inside track %d (shared audio) "
+                            "— not a replay", track_index + 1, al.current_index + 1)
+                return True
+        return False
 
     def _anchor_backwards(self, track_index: int, now: float, heard: float,
                           start: float | None) -> list[tuple[TrackInfo, float]]:
@@ -830,6 +972,8 @@ class ScrobbleSession:
                 logger.info("Session: lagging ID of track %d (clock is on %d), re-syncing",
                             track_index + 1, al.current_index + 1)
                 self._set_current(track_index, prev_start)
+                # it filled the window that just ended: the next track starts no earlier than now
+                al.resume_floor = now
         else:
             result.extend(self._finalize_album_current(now))
             replayed = sorted(i for i in al.scrobbled if i >= track_index)

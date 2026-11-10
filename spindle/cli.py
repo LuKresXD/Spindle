@@ -14,6 +14,7 @@ from . import __version__
 from .art import ArtProvider
 from .capture import DEFAULT_STEP, ContinuousCapture
 from .config import SpindleConfig, load_config
+from .deezer import Catalogue, DeezerClient
 from .display import Display
 from .engine import Extras, IdentifyWorker, Player
 from .fingerprint import Corrections, Identifier
@@ -71,8 +72,12 @@ def main() -> None:
     _setup_logging(cfg, args.verbose)
     logger.info("Spindle v%s starting", __version__)
 
-    if not cfg.acoustid.api_key:
-        logger.error("AcoustID API key not set: check config.yaml")
+    if cfg.fingerprint.acoustid_fallback and not cfg.acoustid.api_key:
+        logger.warning("fingerprint.acoustid_fallback is on but acoustid.api_key is empty: "
+                       "AcoustID will not be asked")
+    if not cfg.fingerprint.shazam_fallback and not (cfg.fingerprint.acoustid_fallback
+                                                    and cfg.acoustid.api_key):
+        logger.error("No recogniser enabled: check the fingerprint section of config.yaml")
         sys.exit(1)
 
     notifier = Notifier(cfg.telegram)
@@ -97,6 +102,10 @@ def main() -> None:
         logger.info("Spotify lookup enabled")
     else:
         logger.info("Spotify lookup disabled (no credentials)")
+    deezer = DeezerClient() if cfg.catalogue.deezer_fallback else None
+    if deezer is not None:
+        logger.info("Deezer is the second catalogue (asked when Spotify cannot answer)")
+    catalogue = Catalogue(spotify, deezer) if (spotify or deezer) else None
 
     collection = None
     if cfg.discogs.token and cfg.discogs.username:
@@ -110,14 +119,15 @@ def main() -> None:
 
     # Album lock needs a tracklist source: Spotify or the collection
     session = None
-    if spotify or collection:
+    if catalogue or collection:
         session = ScrobbleSession(
             min_play_seconds=cfg.scrobble.min_play_seconds,
             chunk_duration=DEFAULT_STEP,
             min_play_fraction=cfg.scrobble.min_play_fraction,
             window_seconds=cfg.audio.chunk_duration,
         )
-        sources = [n for n, on in (("spotify", spotify), ("discogs", collection)) if on]
+        sources = [n for n, on in (("spotify", spotify), ("deezer", deezer),
+                                   ("discogs", collection)) if on]
         logger.info("Album-lock session enabled (%s)", " + ".join(sources))
     else:
         logger.info("No tracklist source: simple mode only")
@@ -128,7 +138,7 @@ def main() -> None:
     corrections = Corrections(Path(cfg.fingerprint.corrections)) if cfg.fingerprint.corrections \
         else Corrections()
     identifier = Identifier(cfg.acoustid, cfg.fingerprint, corrections)
-    worker = IdentifyWorker(identifier.identify, Resolver(spotify, collection), art)
+    worker = IdentifyWorker(identifier.identify, Resolver(catalogue, collection), art)
 
     extras = Extras()
     if collection is not None:

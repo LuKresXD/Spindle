@@ -46,7 +46,8 @@ def test_classification():
     assert _classify(pylast.WSError(net, "16", "x")) == "retry"
     assert _classify(pylast.WSError(net, "29", "x")) == "retry"
     assert _classify(pylast.WSError(net, "6", "x")) == "reject"
-    assert _classify(pylast.WSError(net, "4", "auth")) == "reject"
+    assert _classify(pylast.WSError(net, "4", "auth")) == "auth"      # the credentials, not a play
+    assert _classify(pylast.WSError(net, "9", "bad session")) == "auth"
     assert _classify(TimeoutError()) == "retry"
 
 
@@ -76,13 +77,50 @@ def test_flush_stops_at_first_network_error_keeps_order(tmp_path):
     assert s.network.sent == ["A", "C"] and s.queue_size() == 0 and s.failed == 1
 
 
-def test_dedup_window_and_now_playing_cooldown(tmp_path):
+def test_the_same_play_is_sent_once_and_now_playing_cools_down(tmp_path):
     s = make(tmp_path, [])
     t = TrackInfo(title="A", artist="X", source="spotify_album")
     assert s.scrobble(t, 1) and not s.scrobble(t, 2)
     s.update_now_playing(t)
     s.update_now_playing(t)
     assert s.network.sent == ["A", "np:A"]
+
+
+def test_a_replay_is_another_play_but_a_start_inside_the_last_play_is_not(tmp_path):
+    """The needle went back: the same track, a full track later, is a second scrobble (the old
+    300 s rule dropped it). The same track starting again inside its own length is one play
+    reported twice (Last.fm ignores those as well)."""
+    s = make(tmp_path, [])
+    t = TrackInfo(title="Stronger", artist="Kanye West", duration=200, source="spotify_album")
+    assert s.scrobble(t, 1_700_000_000)
+    assert s.scrobble(t, 1_700_000_210)                 # replayed from the top
+    assert not s.scrobble(t, 1_700_000_300)             # 90 s into that play: the same play
+    assert s.network.sent == ["Stronger", "Stronger"]
+
+
+def test_a_flush_keeps_on_disk_what_it_has_not_sent(tmp_path):
+    """The queue used to be written empty before its entries were sent."""
+    import json
+    s = make(tmp_path, ["down", "down", "ok", "down"])
+    for i, name in enumerate(["A", "B"]):
+        s.scrobble(TrackInfo(title=name, artist="X", source="spotify_album"), 100 + i * 1000)
+    assert s.queue_size() == 2
+    s._do_flush()                                       # A goes through, B meets the network down
+    on_disk = json.loads((tmp_path / "q.json").read_text())
+    assert [e["title"] for e in on_disk] == ["B"] and s.network.sent == ["A"]
+
+
+def test_an_auth_refusal_keeps_the_play(tmp_path):
+    errors.clear()
+    s = make(tmp_path, [])
+    s.network.script = None
+
+    def refuse(**kw):
+        raise pylast.WSError(s.network, "9", "Invalid session key")
+    s.network.scrobble = refuse
+    s.scrobble(TrackInfo(title="A", artist="X", source="spotify_album"), 1)
+    assert s.queue_size() == 1 and s.failed == 0
+    assert errors and "credentials" in errors[0]
 
 
 def test_config_ignores_unknown_keys_and_reads_session_key(caplog):

@@ -37,6 +37,7 @@ SILENCE_FLOOR_DB = -120.0   # reported level when there is no audio at all
 _READ_SECONDS = 0.25        # reader granularity
 _RESTART_DELAY = 2.0        # seconds to wait before relaunching a dead arecord
 _RESTART_MAX_DELAY = 30.0   # ... growing to this while it keeps failing
+_STALL_SECONDS = 6.0        # arecord alive but silent on its pipe this long = stalled
 
 # Spectral motion: 1/3-octave bands from 100 Hz to ~10 kHz. Music moves between
 # bands from second to second; the noise of an empty turntable (motor, preamp,
@@ -248,6 +249,9 @@ class ContinuousCapture:
         self._proc: subprocess.Popen | None = None
         self.restarts = 0
         self.last_error: str | None = None
+        self._last_chunk = time.monotonic()      # when audio last arrived
+        self._stall_killed: subprocess.Popen | None = None
+        self._stderr_tail: list[str] = []
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -280,7 +284,26 @@ class ContinuousCapture:
         proc = self._proc
         if proc is None:
             return self.restarts == 0 and self.last_error is None   # still launching
-        return proc.poll() is None
+        return proc.poll() is None and not self.stalled
+
+    @property
+    def stalled(self) -> bool:
+        """arecord is alive but nothing has come down its pipe for _STALL_SECONDS: a USB
+        device that stopped delivering without the process exiting. The ring buffer would
+        otherwise keep answering with the same last seconds for ever."""
+        proc = self._proc
+        return (self._running and proc is not None and proc.poll() is None
+                and time.monotonic() - self._last_chunk > _STALL_SECONDS)
+
+    def health_check(self) -> None:
+        """Called every tick: a stalled arecord is killed so the reader relaunches it."""
+        proc = self._proc
+        if self.stalled and proc is not None and proc is not self._stall_killed:
+            self._stall_killed = proc
+            logger.warning("Capture: arecord has delivered nothing for %.0fs; restarting it",
+                           time.monotonic() - self._last_chunk)
+            with contextlib.suppress(OSError):
+                proc.kill()
 
     # ── reads ────────────────────────────────────────────────────────────────
 
@@ -354,11 +377,18 @@ class ContinuousCapture:
                 continue
             proc = self._proc
             assert proc.stdout is not None
+            self._last_chunk = time.monotonic()
+            # arecord reports every overrun on stderr; nobody reading that pipe would, after
+            # some thousand of them, block arecord itself. Drain it, keep the last lines.
+            self._stderr_tail = []
+            threading.Thread(target=self._drain_stderr, args=(proc,), name="capture-err",
+                             daemon=True).start()
             got_audio = False
             while self._running:
                 chunk = proc.stdout.read(read_size)
                 if not chunk:
                     break
+                self._last_chunk = time.monotonic()
                 if not got_audio:
                     got_audio = True
                     if self.restarts:
@@ -368,18 +398,24 @@ class ContinuousCapture:
                     self._buf.extend(chunk)
                     if len(self._buf) > self._capacity:
                         del self._buf[: len(self._buf) - self._capacity]
-            # arecord ended (device gone, or we are stopping)
-            err = b""
-            if proc.stderr is not None:
-                with contextlib.suppress(OSError):
-                    err = proc.stderr.read()
+            # arecord ended (device gone, stalled and killed, or we are stopping)
             if proc.poll() is None:
                 proc.terminate()
             if self._running:
                 self.restarts += 1
-                self.last_error = err.decode(errors="replace").strip() or "arecord exited"
+                self.last_error = " | ".join(self._stderr_tail[-3:]) or "arecord exited"
                 delay = min(_RESTART_DELAY * 2 ** min(self.restarts - 1, 4), _RESTART_MAX_DELAY)
                 logger.warning("Capture: arecord stopped (%s); restarting in %.0fs",
                                self.last_error, delay)
                 self.clear()
                 time.sleep(delay)
+
+    def _drain_stderr(self, proc: subprocess.Popen) -> None:
+        if proc.stderr is None:
+            return
+        with contextlib.suppress(OSError, ValueError):
+            for raw in proc.stderr:
+                line = raw.decode(errors="replace").strip()
+                if line:
+                    self._stderr_tail.append(line)
+                    del self._stderr_tail[:-20]

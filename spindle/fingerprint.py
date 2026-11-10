@@ -1,4 +1,4 @@
-"""Audio fingerprinting: AcoustID (Chromaprint) first, ShazamIO as the fallback.
+"""Audio fingerprinting: ShazamIO, with AcoustID (Chromaprint) as an optional second try.
 
 `Identifier` is the long-lived object the engine's worker thread uses: it
 keeps one asyncio loop and one Shazam client instead of building both for
@@ -134,7 +134,8 @@ def identify_acoustid(wav_path: Path, acoustid_cfg: AcoustIDConfig,
                       fp_cfg: FingerprintConfig) -> TrackInfo | None:
     """Identify a track with AcoustID/Chromaprint; None when nothing matches."""
     try:
-        results = acoustid.match(acoustid_cfg.api_key, str(wav_path), parse=False)
+        results = acoustid.match(acoustid_cfg.api_key, str(wav_path), parse=False,
+                                 timeout=fp_cfg.acoustid_timeout or 10)
         if results.get("status") != "ok":
             logger.warning("AcoustID API error: %s", results)
             return None
@@ -223,8 +224,8 @@ async def identify_shazam(wav_path: Path, shazam=None) -> TrackInfo | None:
 # ── Identifier ───────────────────────────────────────────────────────────────
 
 class Identifier:
-    """AcoustID then Shazam, with one event loop and one Shazam client for the
-    life of the process. Call from a single thread (the engine's worker)."""
+    """Shazam, then (if enabled) AcoustID, with one event loop and one Shazam client
+    for the life of the process. Call from a single thread (the engine's worker)."""
 
     def __init__(self, acoustid_cfg: AcoustIDConfig, fp_cfg: FingerprintConfig,
                  corrections: Corrections | None = None):
@@ -247,12 +248,6 @@ class Identifier:
         return self._shazam
 
     def identify(self, wav_path: Path) -> TrackInfo | None:
-        track = identify_acoustid(wav_path, self.acoustid_cfg, self.fp_cfg)
-        if track:
-            logger.info("Identified via AcoustID: %s - %s (%.0f%%)",
-                        track.artist, track.title, track.confidence * 100)
-            return self.corrections.apply(track)
-
         if self.fp_cfg.shazam_fallback:
             shazam = self._ensure_shazam()
             if shazam is not None and self._loop is not None:
@@ -260,6 +255,13 @@ class Identifier:
                 if track:
                     logger.info("Identified via ShazamIO: %s - %s", track.artist, track.title)
                     return self.corrections.apply(track)
+
+        if self.fp_cfg.acoustid_fallback and self.acoustid_cfg.api_key:
+            track = identify_acoustid(wav_path, self.acoustid_cfg, self.fp_cfg)
+            if track:
+                logger.info("Identified via AcoustID: %s - %s (%.0f%%)",
+                            track.artist, track.title, track.confidence * 100)
+                return self.corrections.apply(track)
 
         logger.info("Could not identify track")
         return None

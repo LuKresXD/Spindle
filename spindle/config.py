@@ -50,8 +50,12 @@ class AudioConfig:
 
 @dataclass
 class FingerprintConfig:
-    acoustid_timeout: int = 10
-    shazam_fallback: bool = True
+    acoustid_timeout: int = 10      # seconds; only used when acoustid_fallback is on
+    shazam_fallback: bool = True    # Shazam: the recogniser (the name is historical; it runs first)
+    # AcoustID as a second try when Shazam has nothing. Off by default: Chromaprint matches a
+    # track from its start, and a 6 s window from the middle never did (0 hits in 3,054 lookups
+    # on the real deck, 2026-11-06 to 11-09).
+    acoustid_fallback: bool = False
     min_confidence: float = 0.5
     corrections: str = ""     # path to corrections.yaml (default: ~/spindle/corrections.yaml)
 
@@ -61,7 +65,7 @@ class ScrobbleConfig:
     min_play_seconds: int = 30
     min_play_fraction: float = 0.5
     now_playing: bool = True
-    dedup_window: int = 300
+    dedup_window: int = 300      # no longer read (the scrobbler compares the plays' start times)
 
 
 @dataclass
@@ -82,6 +86,13 @@ class DisplayConfig:
 class SpotifyConfig:
     client_id: str = ""
     client_secret: str = ""
+
+
+@dataclass
+class CatalogueConfig:
+    """Where canonical names, track lengths and album tracklists come from. Spotify is asked
+    first when it has credentials; Deezer (no key) answers when Spotify cannot or has nothing."""
+    deezer_fallback: bool = True
 
 
 @dataclass
@@ -134,6 +145,7 @@ class SpindleConfig:
     silence: SilenceConfig = field(default_factory=SilenceConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
     discogs: DiscogsConfig = field(default_factory=DiscogsConfig)
+    catalogue: CatalogueConfig = field(default_factory=CatalogueConfig)
     web: WebConfig = field(default_factory=WebConfig)
     art: ArtConfig = field(default_factory=ArtConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)

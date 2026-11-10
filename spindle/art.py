@@ -46,7 +46,9 @@ def _norm(s: str) -> str:
     s = s.lower().replace("'", "").replace("\u2019", "")   # let's == lets
     s = re.sub(r"[\(\[].*?[\)\]]", " ", s)                    # (deluxe), [remastered]
     s = re.sub(r"\b(deluxe|edition|remaster(?:ed)?|expanded|bonus|version)\b", " ", s)
-    s = re.sub(r"[^a-z0-9]+", " ", s)
+    # Cyrillic stays: stripped, every all-Cyrillic artist and album came out empty, so the
+    # matchers never matched and all of them shared one cache key (one cover for every Кино record)
+    s = re.sub(r"[^a-z0-9Ѐ-ӿ]+", " ", s)
     return " ".join(s.split())
 
 

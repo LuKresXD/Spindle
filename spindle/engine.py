@@ -63,6 +63,13 @@ RUNOUT_TICKS = 3              # consecutive ticks of once-a-revolution thumps th
 RUNOUT_WINDOW_S = 45.0        # a lead-out is believed only this close to the last track's end
 UNOWNED_HOLD_S = 45.0         # a session's first hit that is not his record waits this long to show
 HOT_INPUT_DB = -6.0          # RMS this high means the capture is clipping
+# After a side: the needle rides the run-out until it is lifted. That crackle clears the start
+# gate (and "moves" more than music does), so it used to start a phantom session seconds after the
+# side ended and wipe the end-of-side card. Until the needle is up, loud input is the run-out.
+NEEDLE_UP_MARGIN_DB = 10.0   # this far under the silence threshold = nothing in the groove
+NEEDLE_UP_SECONDS = 4.0      # ... for this long: the needle has been lifted
+POST_SIDE_IDENTIFY_FIRST = 8.0   # first lookup into post-side sound (real music is found quickly)
+UNLOCKED_RUNOUT_MIN_S = 60.0     # no lock: a lead-out is believed only this far into the session
 
 # Loud is not enough to be music: an empty turntable (motor, preamp, mains) can
 # sit above the threshold for as long as it spins, with a spectrum that never
@@ -251,6 +258,11 @@ class Player:
         self._noise_identify_at = 0.0
         self._noise_identify_interval = NOISE_IDENTIFY_FIRST
         self._id_disagreed = False                 # last ID named a track the clock is not on
+        self._last_disagreed = False               # ... and so did the one before (no second hurry)
+        self._post_side = False                    # a side just ended and the needle is not up yet
+        self._needle_up_since: float | None = None
+        self._results_floor = 0.0                  # identifications of audio up to here are stale
+        self._session_sent = 0                     # scrobbles this session handed to Last.fm
         self._held: tuple[str, float] | None = None   # (key, first seen) of a hit nobody knows
         self._runout_ticks = 0                     # consecutive ticks that sounded like a lead-out
         self._first_hit: tuple[str, float] | None = None   # a session's first hit, unconfirmed
@@ -279,6 +291,9 @@ class Player:
 
     def tick(self) -> ScreenState:
         now = self.clock()
+        check = getattr(self.capture, "health_check", None)
+        if check is not None:
+            check()                                # a capture that stopped delivering is restarted
         if not getattr(self.capture, "running", True):
             # no audio is arriving: hold everything rather than hearing "silence"
             if not self._capture_down_logged:
@@ -302,6 +317,12 @@ class Player:
                 self._loud_ticks = 0
             if self._loud_ticks < max(1, sil.start_ticks):
                 self._quiet_tick(now)
+                return self._publish(now)
+            if self._post_side:
+                # the side that just ended is still under the needle: its run-out, not a start.
+                # A lookup still runs, so music that really follows is found within seconds.
+                self._noise_tick(now, reason="the run-out of the side that just ended",
+                                 first=POST_SIDE_IDENTIFY_FIRST)
                 return self._publish(now)
             # loud enough for long enough: music, or a turntable running empty, or the
             # needle thumping round the lead-out after a side?
@@ -346,6 +367,7 @@ class Player:
             if self.noise_since is not None:
                 logger.info("Steady noise stopped after %.0fs", now - self.noise_since)
                 self._end_noise_run()
+            self._needle_up_tick(now)
             return
         # a pause, not the end: unless the clock already ran the side's last track out, in
         # which case the first quiet tick is the end (Luka, 2026-11-08: "it knows the track
@@ -354,6 +376,34 @@ class Player:
                 and not self._side_over_by_clock():
             return
         self._end_session(now)
+
+    def _needle_up_tick(self, now: float) -> None:
+        """Idle and not loud: is the groove empty (the needle lifted, the platter stopped)?
+        Run-out grooves sit between the noise floor and the start gate; only the floor,
+        held for NEEDLE_UP_SECONDS, ends the post-side state."""
+        floor = self.cfg.silence.threshold_db - NEEDLE_UP_MARGIN_DB
+        if self.level_db >= floor:
+            self._needle_up_since = None
+            return
+        if self._needle_up_since is None:
+            self._needle_up_since = now
+        self._runout_ticks = 0                     # a lead-out streak does not outlive real quiet
+        if self._post_side and now - self._needle_up_since >= NEEDLE_UP_SECONDS:
+            self._post_side = False
+            logger.debug("Needle up: the next loud input is a new start")
+
+    def _fresh_results(self) -> list[IdentifyResult]:
+        """Finished identifications of audio from the current session only. A job in flight
+        when a session ends finishes afterwards; applied to the next needle drop it showed
+        (and could scrobble again) the last track of the side before."""
+        out = []
+        for res in self.worker.results():
+            if res.at <= self._results_floor:
+                logger.debug("Dropping a stale identification (%s)",
+                             res.raw.title if res.raw else "no match")
+                continue
+            out.append(res)
+        return out
 
     def _in_runout(self, now: float) -> bool:
         """RUNOUT_TICKS consecutive ticks whose loudness repeats once per revolution and is
@@ -388,7 +438,11 @@ class Player:
         s = self.session
         al = s.album_state if s and s.mode == SessionMode.ALBUM else None
         if al is None:
-            return True
+            # Nothing locked: a side can only end once something has been identified and has
+            # played for a while. A sparse intro, one note a revolution apart, read as a lead-out
+            # and ended two fresh sessions while the song played (Runaway, 2026-11-08).
+            return (self.playing.track is not None and self.music_since is not None
+                    and self.clock() - self.music_since >= UNLOCKED_RUNOUT_MIN_S)
         if al.side_done or al.exhausted:
             return True
         tl = al.tracklist
@@ -408,7 +462,8 @@ class Player:
         self.motion = self.capture.motion()
         return self.motion is None or self.motion >= MUSIC_MOTION_MIN
 
-    def _noise_tick(self, now: float, reason: str = "") -> None:
+    def _noise_tick(self, now: float, reason: str = "",
+                    first: float = NOISE_IDENTIFY_FIRST) -> None:
         """Loud, but the spectrum stands still: the turntable is running with
         nothing on it (or something equally steady). The screen stays black and
         no session starts; a slow lookup keeps running in case it is a record
@@ -418,7 +473,7 @@ class Player:
         if self.noise_since is None:
             self.noise_since = now - self.step * max(1, self._loud_ticks)
             self._noise_identify_interval = NOISE_IDENTIFY_FIRST
-            self._noise_identify_at = self.noise_since + NOISE_IDENTIFY_FIRST
+            self._noise_identify_at = self.noise_since + first
             if reason:
                 logger.info("Input is %s (%.1f dB RMS): not music, staying idle",
                             reason, self.level_db)
@@ -426,11 +481,12 @@ class Player:
                 logger.info("Input is steady noise (%.1f dB RMS, motion %.2f < %.2f): "
                             "not music, staying idle", self.level_db, self.motion or 0.0,
                             MUSIC_MOTION_MIN)
-        for res in self.worker.results():
+        for res in self._fresh_results():
             if res.resolved is not None:
                 logger.info("Steady input identified as %s — %s: music after all",
                             res.resolved.track.artist, res.resolved.track.title)
                 self.music_since = self.noise_since
+                self._post_side = False
                 self._end_noise_run()
                 self.phase = Phase.LISTENING
                 self._apply_result(res)
@@ -453,20 +509,25 @@ class Player:
         for res in self.worker.results():
             logger.debug("Dropping identification that arrived after silence (%s)",
                          res.raw.title if res.raw else "no match")
+        self._results_floor = now
+        # something was playing: until the needle is up, what follows is this side's run-out
+        self._post_side = self.playing.track is not None or bool(
+            self.session and self.session.album_state is not None)
+        self._needle_up_since = None
         if self.session:
             al = self.session.album_state
-            al_scrobbled = len(al.scrobbled) if al else 0
             for t, ts in self.session.on_silence():
                 self._scrobble(t, ts)
-            if al is not None:
-                al_scrobbled = len(al.scrobbled)
-            if al is not None and al_scrobbled:
-                self._announce_side_end(al, al_scrobbled)
+            # what went to Last.fm, not len(al.scrobbled): a backwards anchor takes tracks out of
+            # that set to let them count again, and the card then said "1 track" after three
+            if al is not None and self._session_sent:
+                self._announce_side_end(al, self._session_sent)
             if self.session.deck_speed_samples >= 3:
                 logger.info("Deck speed: %+.1f%% (%d offset pairs)",
                             (self.session.deck_speed() - 1) * 100,
                             self.session.deck_speed_samples)
         self._finalize_simple(now)
+        self._session_sent = 0
 
         self.phase = Phase.IDLE
         self._loud_ticks = 0
@@ -476,6 +537,7 @@ class Player:
         self.playing = _Playing()
         self.last_submit_at = 0.0
         self._id_disagreed = False
+        self._last_disagreed = False
         self._held = None
         self._first_hit = None
         # _runout_ticks is kept: the thumps that ended the side go on, and the idle gate
@@ -501,10 +563,10 @@ class Player:
                            "lower the preamp or adapter gain", self.level_db)
 
         self._timing_advance()
-        for res in self.worker.results():
+        for res in self._fresh_results():
             self._apply_result(res)
         self._maybe_submit(now)
-        for res in self.worker.results():          # a synchronous worker answers at once
+        for res in self._fresh_results():          # a synchronous worker answers at once
             self._apply_result(res)
 
         if self.playing.track is not None:
@@ -640,7 +702,11 @@ class Player:
                 # a hit off the clock's track, or off the record entirely (a stranger's lock
                 # giving way to his record), hurries the next identification
                 idx = al.tracklist.find_track_index(track.title)
-                self._id_disagreed = idx is None or idx != al.current_index
+                disagreed = idx is None or idx != al.current_index
+                # the first disagreement hurries one lookup; a streak of them (a stranger's
+                # answer repeating over his locked record) does not turn 8 s into 2 s for good
+                self._id_disagreed = disagreed and not self._last_disagreed
+                self._last_disagreed = disagreed
             if s.is_locked() and not was_locked:
                 self._simple_gave_way(at, al.tracklist.artist if al else "")
             for t, ts in out:
@@ -739,13 +805,14 @@ class Player:
         played = now - start
         if played < self.cfg.scrobble.min_play_seconds:
             return False
-        if t.duration:
-            return played >= min(t.duration * self.cfg.scrobble.min_play_fraction, 240)
-        return True
+        duration = t.duration or FALLBACK_TRACK_DURATION      # nobody knows: assume 4 minutes
+        return played >= min(duration * self.cfg.scrobble.min_play_fraction, 240)
 
     def _scrobble(self, t: TrackInfo, timestamp: float, backfill: bool = False) -> None:
         if self.scrobbler and not self.dry_run:
-            self.scrobbler.scrobble(t, timestamp=int(timestamp))
+            if self.scrobbler.scrobble(t, timestamp=int(timestamp)) is False:
+                return                             # not sent (the same play twice): no history
+            self._session_sent += 1
             self.history.log(t, timestamp, source="backfill" if backfill else "live")
             self._playcount_cache.pop((t.artist.lower(), (t.album or "").lower()), None)
 
@@ -828,7 +895,7 @@ class Player:
             st.scrobbled = st.tracklist[al.current_index].scrobbled if st.tracklist else False
             if s.deck_speed_samples >= 3:
                 st.deck_speed = s.deck_speed()
-            st.session_scrobbles = len(al.scrobbled)
+            st.session_scrobbles = self._session_sent
             st.position = tl.position_at(al.current_index)
             st.side = tl.side_at(al.current_index)
             st.owned = tl.owned

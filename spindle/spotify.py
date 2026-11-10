@@ -58,6 +58,7 @@ class SpotifyCandidate:
     duration: int | None = None                   # seconds
     art_url: str = ""
     rank: int = 0                                 # Spotify's own order (0 = top)
+    provider: str = "spotify"                     # which catalogue answered ("spotify" | "deezer")
 
     @property
     def artist(self) -> str:
@@ -66,7 +67,7 @@ class SpotifyCandidate:
     def to_track(self) -> TrackInfo:
         return TrackInfo(title=self.name, artist=self.artist, album=self.album_name,
                          artists=list(self.artists),
-                         duration=self.duration, source="spotify_lookup", confidence=1.0)
+                         duration=self.duration, source=f"{self.provider}_lookup", confidence=1.0)
 
 
 @dataclass
@@ -90,6 +91,12 @@ class SpotifyClient:
         self._album_cache: dict[str, AlbumTracklist] = {}
         self._search_cache: dict[str, list[SpotifyCandidate]] = {}
         self._backoff_until: float = 0
+
+    @property
+    def available(self) -> bool:
+        """False while a rate limit's Retry-After runs (it can be a day): the catalogue then
+        asks its second source instead of getting nothing."""
+        return time.time() >= self._backoff_until
 
     # ── auth ─────────────────────────────────────────────────────────────────
 

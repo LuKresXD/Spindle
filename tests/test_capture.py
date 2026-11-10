@@ -159,3 +159,29 @@ def test_revolution_pulse_hears_the_lead_out_and_not_music():
     # too little audio: no verdict
     assert revolution_pulse(_pcm(runout[: int(0.1 * sr)]), sr, 2) == (0.0, 0.0)
     assert revolution_pulse(b"", sr, 2) == (0.0, 0.0)
+
+
+def test_a_capture_that_stops_delivering_is_seen_and_restarted(monkeypatch):
+    """arecord alive, nothing on its pipe: the ring buffer kept answering with the same last
+    seconds and nothing noticed."""
+    import time as _time
+
+    from spindle import capture as cap_mod
+    from spindle.config import AudioConfig
+
+    class Proc:
+        killed = False
+        def poll(self):
+            return -9 if self.killed else None
+        def kill(self):
+            self.killed = True
+
+    cap = cap_mod.ContinuousCapture(AudioConfig())
+    cap._running = True
+    cap._proc = Proc()
+    cap._last_chunk = _time.monotonic()
+    assert cap.running and not cap.stalled
+    cap._last_chunk = _time.monotonic() - 10            # ten seconds of nothing
+    assert cap.stalled and not cap.running
+    cap.health_check()
+    assert cap._proc.killed
