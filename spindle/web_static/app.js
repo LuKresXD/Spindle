@@ -30,7 +30,6 @@
   };
   const dims = el.pages.map((p) => p.querySelector(".page-dim"));
 
-  const BULK_IMPORT_DAY = "2025-04-17";   // the day the first 46 records were entered at once
   const OFF = 0, SPINDLE = 1, CLAW = 2;
   const PAGE_NAMES = ["off", "spindle", "claw"];
   let state = null;
@@ -131,9 +130,11 @@
     const m = FEAT_RE.exec(title || "");
     return m ? { main: (title || "").slice(0, m.index).trim() || title, feat: m[1].trim() } : { main: title || "", feat: "" };
   }
-  const fmtDate = (iso) => {
+  // `bulk`: the server's word that this day is when a whole shelf was entered at once, so the
+  // day says nothing about the record; the year is all that is true
+  const fmtDate = (iso, bulk) => {
     if (!iso) return "";
-    if (iso.slice(0, 10) === BULK_IMPORT_DAY) return iso.slice(0, 4);
+    if (bulk) return iso.slice(0, 4);
     const d = new Date(iso.slice(0, 10) + "T12:00:00");
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   };
@@ -426,6 +427,12 @@
     requestAnimationFrame(frame);
   }
   function frameBody() {
+    // The engine speaks every two seconds. Half a minute of nothing means it is gone (stopped,
+    // crashed, the Pi's network down): a frozen "now playing" must not sit lit on the panel.
+    if (!stale && serverState && serverState.phase !== "idle" && performance.now() - lastEventAt > STALE_MS) {
+      stale = true;
+      apply({ ...serverState, phase: "idle", ended: null, server_time: Date.now() / 1000 - clockOffset });
+    }
     if (state && state.phase === "playing") {
       const p = position();
       const now = performance.now();
@@ -725,8 +732,9 @@
     if (collection) return collection;
     if (!collectionLoad) {
       collectionLoad = fetch("/api/collection").then((r) => r.json())
-        .then((d) => { collection = d.releases || []; return collection; })
-        .catch(() => { collection = []; return collection; })
+        // an empty or failed answer is not kept: the shelf may simply not be loaded yet
+        .then((d) => { const rows = d.releases || []; collection = rows.length ? rows : null; return rows; })
+        .catch(() => [])
         .finally(() => { collectionLoad = null; });
     }
     return collectionLoad;
@@ -815,7 +823,7 @@
     const pr = card.pressing || {};
     const year = card.released || pr.year || card.year;
     const fmt = (pr.formats && pr.formats.length) ? fmtShort(pr.formats) : (card.formats || []).join(", ");
-    const meta = [year ? String(year) : "", fmt, card.added ? `on the shelf since ${fmtDate(card.added)}` : ""].filter(Boolean).join(" · ");
+    const meta = [year ? String(year) : "", fmt, card.added ? `on the shelf since ${fmtDate(card.added, card.added_bulk)}` : ""].filter(Boolean).join(" · ");
     const pl = card.plays || {};
     const plays = pl.user_plays != null ? `${pl.user_plays} ${pl.user_plays === 1 ? "play" : "plays"} on Last.fm` : "";
     const last = pl.last_played ? `last on ${fmtDay(pl.last_played)}` : "";
@@ -1179,12 +1187,15 @@
   // After the engine restarts, its caches are fresh and ours are stale: drop the
   // sheet data on reconnect and reload it if the sheet is open.
   let reconnected = false;
+  const STALE_MS = 30000;
+  let lastEventAt = performance.now(), stale = false;
   function connect() {
     const es = new EventSource("/events");
     es.addEventListener("ui", (e) => { try { runUi(JSON.parse(e.data).command); } catch (err) { console.error("ui", err); } });
     es.onmessage = (e) => {
       try {
         if (reconnected) { reconnected = false; infoFor = ""; trackFor = ""; info = null; trackInfo = null; collection = null; }
+        lastEventAt = performance.now(); stale = false;
         apply(JSON.parse(e.data));
         if (sheetOpen && !info) loadInfo();
         if (!collection && !collectionLoad) preloadCovers();
@@ -1194,4 +1205,16 @@
   }
   connect();
   requestAnimationFrame(frame);
+
+  // ── panel wear ───────────────────────────────────────────────────────────
+  // An OLED remembers what stays lit in one place. Everything that does (the home for a whole
+  // side, the Listening mark, a page word) moves a pixel or two every few minutes, on a path
+  // that takes hours to repeat and never leaves a 12 x 8 px box. Nobody sees it move.
+  let shiftStep = 0;
+  setInterval(() => {
+    shiftStep += 1;
+    const root = document.documentElement.style;
+    root.setProperty("--shift-x", Math.round(6 * Math.sin(2 * Math.PI * shiftStep / 29)) + "px");
+    root.setProperty("--shift-y", Math.round(4 * Math.sin(2 * Math.PI * shiftStep / 17)) + "px");
+  }, 150000);
 })();

@@ -544,3 +544,19 @@ def test_recently_played_describes_the_last_sitting_only(tmp_path):
 
     out = Shelf(collection=Col(), history=Hist(), art_dir=tmp_path).recent_albums()
     assert out[0]["whole"] is False and out[0]["sides"] == ["B"] and out[0]["tracks"] == 2
+
+
+def test_a_day_a_whole_shelf_was_entered_on_is_marked_as_an_import(tmp_path):
+    """The page once knew one such day by heart (2025-04-17, the author's own); now any shelf's
+    import day is found from the data, and a day with a few new records keeps its date."""
+    from spindle.web import BULK_DAY, Shelf
+    stock = _Shelf()
+    stock.rels = ([_Rel(100 + i, "Artist", f"Album {i}", "2025-04-17") for i in range(BULK_DAY)]
+                  + [_Rel(1, "Massive Attack", "Mezzanine", "2026-02-26"),
+                     _Rel(2, "Kanye West", "Graduation", "2026-02-26"),
+                     _Rel(3, "Кино", "45", "")])
+    info = Info(collection=_Collection(), scrobbler=_Scrobbler(), history=None, http=_Http({}))
+    shelf = Shelf(stock, _History(), info, http=_Http({}), art_dir=tmp_path)
+    rows = {r["id"]: r for r in shelf.releases()["releases"]}
+    assert all(rows[100 + i]["added_bulk"] for i in range(BULK_DAY))
+    assert not rows[1]["added_bulk"] and not rows[2]["added_bulk"] and not rows[3]["added_bulk"]

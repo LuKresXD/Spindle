@@ -306,3 +306,12 @@ body.ended-open #home { opacity: 0; }
 .rrow .rw { font-size: 24px; color: rgba(255,255,255,.5); text-align: right; white-space: nowrap; }
 .rrow.off { opacity: .45; }
 .empty { font-size: 30px; font-weight: 500; color: var(--text-dim); padding: 40px 0; }
+
+/* ── panel wear ─────────────────────────────────────────────────────────── */
+/* app.js walks these two a pixel or two every few minutes; the layers that stay lit follow. */
+:root { --shift-x: 0px; --shift-y: 0px; }
+.stage, .listening, .idle, .centre {
+  top: var(--shift-y); right: calc(0px - var(--shift-x)); bottom: calc(0px - var(--shift-y)); left: var(--shift-x); }
+/* a record nothing identifies leaves the Listening mark lit for a whole side: after two minutes it settles to a dim one */
+.listening .listenstack { animation: settle 4s ease 120s forwards; }
+@keyframes settle { to { opacity: .4; } }

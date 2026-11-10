@@ -47,7 +47,7 @@ import threading
 import time
 import urllib.parse
 import wave
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -622,6 +622,7 @@ def derive_cover(data: bytes, variant: str) -> bytes:
         logger.debug("Cover variant %s failed: %s", variant, e)
         return data
 RECENT_SITTING_SECONDS = 6 * 3600.0   # an album's scrobbles this close to its last: one sitting
+BULK_DAY = 10                         # records added on one day: an import, not a purchase
 COVER_WARM_GAP = 0.6             # seconds between cover downloads when warming the cache
 COVER_WARM_FIRST_DELAY = 5.0     # let the engine and the collection come up first
 COVER_WARM_EVERY = 600.0         # how often the warm-up looks for missing covers
@@ -654,6 +655,14 @@ class Shelf:
         rows = [self._row(r) for r in self.collection.all_releases()]
         return {"count": len(rows), "releases": rows}
 
+    def _bulk_days(self) -> set[str]:
+        """Days on which a whole shelf was entered at once (BULK_DAY records or more): the
+        date says when the collection was typed in, not when a record came home."""
+        if self.collection is None:
+            return set()
+        days = Counter(getattr(r, "added", "") for r in self.collection.all_releases())
+        return {day for day, n in days.items() if day and n >= BULK_DAY}
+
     def _row(self, rel: Any) -> dict:
         typical, lowest = getattr(rel, "typical_usd", None), getattr(rel, "price_usd", None)
         price = typical if typical is not None else lowest
@@ -661,6 +670,7 @@ class Shelf:
         return {"id": rel.id, "artist": clean_artist(rel.artist), "title": rel.title,
                 "year": rel.year or None, "released": rel.released or None,
                 "formats": list(rel.formats or []), "added": rel.added,
+                "added_bulk": bool(rel.added) and rel.added in self._bulk_days(),
                 "cover": f"/art/collection/{rel.id}.jpg" if rel.cover else None,
                 "price": price,
                 "price_kind": kind,
