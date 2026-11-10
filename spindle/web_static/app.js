@@ -70,7 +70,33 @@
     if (i < 0 || i + 1 >= rows.length) return null;
     return sideOf(rows[i].position) === sideOf(rows[i + 1].position) ? rows[i + 1] : null;   // never across a side
   };
+  // The end of a side works the same way: when the side's last track is up by the clock the card
+  // shows at once (Luka, 2026-11-09: "0 s left" stood for seconds while the engine waited to be
+  // sure). The engine's own end arrives a moment later and replaces it; if the music goes on
+  // instead (the clock was early), the page is back on the track after 8 s and does not guess
+  // again for it.
+  let sideEnd = null, sideEndHold = "";   // sideEnd = { at, key, card }
+  let sentBase = { key: "", n: 0 };       // session_scrobbles when the current track came up
+  const trackSpot = (st) => `${flipKey(st)}|${st.current_index}`;
+  function sideEndCard(st) {
+    const rows = st.tracklist || [], cur = st.current_index;
+    const side = sideOf(rows[cur].position);
+    const nxt = side ? rows.slice(cur + 1).find((r) => sideOf(r.position) && sideOf(r.position) !== side) : null;
+    const sent = st.session_scrobbles || 0;
+    const thisOneSent = sentBase.key === trackSpot(st) && sent > sentBase.n;   // the engine got there first
+    return { artist: st.artist, album: st.album, side, scrobbled: sent + (thisOneSent ? 0 : 1),
+             next_side: nxt ? sideOf(nxt.position) : "", next_title: nxt ? (nxt.base || nxt.title) : "" };
+  }
   function viewOf(st) {
+    if (sideEnd) {
+      const same = st.phase === "playing" && sideEnd.key === trackSpot(st);
+      if (same && serverNow() - sideEnd.at <= 8) return { ...st, phase: "idle", ended: sideEnd.card };
+      if (same) sideEndHold = sideEnd.key;                               // the music goes on
+      // a card he tapped away stays away when the engine's own copy of it arrives
+      if (st.ended && endedDismissed === sideEnd.card.at) endedDismissed = st.ended.at;
+      sideEnd = null;
+    }
+    if (st.phase === "playing" && sentBase.key !== trackSpot(st)) sentBase = { key: trackSpot(st), n: st.session_scrobbles || 0 };
     if (!flip) return st;
     const nxt = (st.tracklist || [])[flip.index];
     const confirmed = st.current_index >= flip.index;
@@ -427,6 +453,17 @@
         const margin = state.start_exact ? 0.2 : 1.0;
         if (raw != null && raw >= state.track_duration + margin && nextRowOf(state)) {
           flip = { index: state.current_index + 1, at: serverNow(), key: flipKey(state) };
+          apply(serverState);
+        }
+      }
+      // ... and to the end-of-side card when there is no next track on this side
+      if (!flip && !sideEnd && state.track_duration && serverState && !nextRowOf(state)
+          && (state.tracklist || [])[state.current_index] && sideEndHold !== trackSpot(state)) {
+        const raw = rawPosition();
+        const margin = state.start_exact ? 0.2 : 1.0;
+        if (raw != null && raw >= state.track_duration + margin) {
+          const at = serverNow();
+          sideEnd = { at, key: trackSpot(state), card: { ...sideEndCard(state), at } };
           apply(serverState);
         }
       }

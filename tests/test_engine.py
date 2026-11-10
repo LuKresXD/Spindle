@@ -743,3 +743,34 @@ def test_the_end_card_counts_what_was_sent_not_the_sessions_bookkeeping(tmp_path
     cap.level = -70
     run(player, clock, 12)
     assert ended and ended[-1]["scrobbled"] == 3
+
+
+def test_the_side_ends_when_the_level_falls_far_below_its_music_not_only_on_silence(tmp_path):
+    """A run-out groove at -44 dB is a dB over the silence threshold: the screen sat on "0 s left"
+    for 12 s until the thump detector agreed (2026-11-09). The music had plainly stopped."""
+    clock = FakeClock()
+    album = make_album([115, 72, 109, 68, 150, 234], positions=SIDES, owned=True)
+    player, cap, rec = make_player(tmp_path, clock, lambda p: TrackInfo("Track 3", "Madvillain"),
+                                   albums=[album])
+    ended = []
+    player.side_listeners.append(ended.append)
+    cap.level = -18
+    st = run(player, clock, 104)                              # into the last seconds of side A
+    assert st.phase == Phase.PLAYING and not ended
+    player.worker.identify = lambda p: None
+    cap.level = -44                                           # the groove: not "quiet", not music
+    st = run(player, clock, 2)
+    assert st.phase == Phase.IDLE and ended                   # over on the first such tick
+    assert [t for t, _ in rec.scrobbles] == ["Track 3"]
+
+
+def test_a_quiet_passage_in_the_middle_of_the_last_track_does_not_end_the_side(tmp_path):
+    clock = FakeClock()
+    album = make_album([115, 72, 109, 68, 150, 234], positions=SIDES, owned=True)
+    player, cap, rec = make_player(tmp_path, clock, lambda p: TrackInfo("Track 3", "Madvillain"),
+                                   albums=[album])
+    cap.level = -18
+    run(player, clock, 50)
+    cap.level = -40                                           # a breakdown a minute before the end
+    st = run(player, clock, 6)
+    assert st.phase == Phase.PLAYING

@@ -486,11 +486,22 @@ class ScrobbleSession:
             span = abs(a[0] - b[0])
             return abs((a[1] - b[1]) - (a[0] - b[0])) <= OFFSET_TOLERANCE + VINYL_DRIFT * span
 
+        def implied(group: list[tuple[float, float]]) -> float:
+            xs = sorted(at - off - self.window_seconds for at, off in group)
+            return xs[len(xs) // 2]
+
+        # The largest agreeing set wins. A tie goes to the set that already holds the start,
+        # then to the older one: two answers from a repeated hook agree with each other as
+        # well as two right ones do, and "the newer pair wins" pinned a track 11 s late
+        # (F**kin' Problems, 2026-11-09).
         best: list[tuple[float, float]] = []
-        for anchor in reversed(run.samples):                # newest first: it wins a tie
+        best_rank = (0, 0)
+        for anchor in run.samples:                          # oldest first
             group = [x for x in run.samples if agree(x, anchor)]
-            if len(group) > len(best):
-                best = group
+            holds = int(run.start is not None
+                        and abs(implied(group) - run.start) <= OFFSET_TOLERANCE)
+            if (len(group), holds) > best_rank:
+                best, best_rank = group, (len(group), holds)
         if len(best) < 2:
             if len(run.samples) >= 2 and not run.odd_logged:
                 run.odd_logged = True
@@ -757,6 +768,13 @@ class ScrobbleSession:
             return True
         if new_tl.album_id == old.album_id:
             return False
+        # the same pressing with more on it: a lock made from Discogs alone (no catalogue had
+        # the first track: no lengths, no canonical names) moves to the merged tracklist as
+        # soon as a later track brings one
+        if (old.source == "discogs" and new_tl.source == "merged"
+                and new_tl.discogs_release_id is not None
+                and new_tl.discogs_release_id == old.discogs_release_id):
+            return True
         return len(new_tl.tracks) > len(old.tracks)
 
     def _relock(self, resolved: Resolved, new_tl: AlbumTracklist,

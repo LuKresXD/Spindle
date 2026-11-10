@@ -34,6 +34,21 @@ _ALBUMS_PER_SEARCH = 5        # distinct albums whose type and size are looked u
 _CACHE_MAX = 500
 _QUOTA_BACKOFF = 6.0          # Deezer's quota window is 5 s
 _RECORD_TYPES = {"album": "album", "single": "single", "ep": "single", "compile": "compilation"}
+_VARIOUS = ("various artists", "various", "multi-artistes", "multi interpretes")
+
+
+def _primary(album_artist: str, track_artist: str, title: str) -> str:
+    """Whose track this is. Deezer sometimes files a track under one of its guests (1Train on
+    LONG.LIVE.A$AP is "Yelawolf"): a track artist the title itself lists as a feature, on a
+    single artist's album, is a guest; the track is the album artist's."""
+    if not album_artist or album_artist.lower() in _VARIOUS:
+        return track_artist or album_artist
+    if not track_artist or track_artist.lower() == album_artist.lower():
+        return album_artist
+    m = _FEAT_RE.search(title or "")
+    if m and track_artist.lower() in m.group(0).lower():
+        return album_artist
+    return track_artist
 
 
 class DeezerClient:
@@ -85,16 +100,22 @@ class DeezerClient:
         for i, t in enumerate(data.get("data", []) or []):
             name = t.get("title", "") or ""
             who = (t.get("artist") or {}).get("name", "") or ""
-            if not titles_match(name, title) or not artist_matches([who], artist):
-                continue
             album = t.get("album") or {}
             aid = str(album.get("id") or "")
-            if not aid:
+            if not aid or not titles_match(name, title):
                 continue
             meta: dict[str, Any] = self._albums.get(aid) or {}
             if not meta and albums_asked < _ALBUMS_PER_SEARCH:
                 albums_asked += 1
                 meta = self._album(aid) or {}
+            album_artist = ((meta.get("artist") or {}).get("name", "") or "") if meta else ""
+            # the track is his when its artist is, or when it sits on his album (a guest's name
+            # in the artist field must not hide it)
+            if not artist_matches([who], artist) and not (
+                    album_artist and album_artist.lower() not in _VARIOUS
+                    and artist_matches([album_artist], artist)):
+                continue
+            who = _primary(album_artist, who, name)
             cands.append(SpotifyCandidate(
                 name=name, artists=[who], album_id=PREFIX + aid,
                 album_name=meta.get("title") or album.get("title", "") or "",
@@ -140,7 +161,8 @@ class DeezerClient:
         album_artist = (album.get("artist") or {}).get("name", "") or ""
         tracks = []
         for item in items:
-            who = (item.get("artist") or {}).get("name", "") or album_artist
+            who = _primary(album_artist, (item.get("artist") or {}).get("name", "") or "",
+                           item.get("title", "") or "")
             tracks.append(TrackInfo(
                 title=item.get("title", "") or "", artist=who, album=album_name,
                 duration=int(item.get("duration") or 0) or None, source="deezer_album",

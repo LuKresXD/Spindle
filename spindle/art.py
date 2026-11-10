@@ -43,7 +43,8 @@ class Art:
 
 
 def _norm(s: str) -> str:
-    s = s.lower().replace("'", "").replace("\u2019", "")   # let's == lets
+    # a$ap == asap, let's == lets
+    s = s.lower().replace("$", "s").replace("'", "").replace("\u2019", "")
     s = re.sub(r"[\(\[].*?[\)\]]", " ", s)                    # (deluxe), [remastered]
     s = re.sub(r"\b(deluxe|edition|remaster(?:ed)?|expanded|bonus|version)\b", " ", s)
     # Cyrillic stays: stripped, every all-Cyrillic artist and album came out empty, so the

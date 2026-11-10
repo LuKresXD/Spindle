@@ -112,3 +112,32 @@ def test_spotify_reports_unavailable_while_its_retry_after_runs():
     assert sp.available
     sp._backoff_until = time.time() + 80000
     assert not sp.available
+
+
+def test_a_track_filed_under_a_guest_is_still_the_album_artists():
+    """1Train on LONG.LIVE.A$AP comes back from Deezer with artist "Yelawolf"."""
+    title = "1Train (feat. Kendrick Lamar, Joey Bada$$, Yelawolf, Danny Brown)"
+    album = {"id": 6, "title": "LONG.LIVE.A$AP (Deluxe Version)", "record_type": "album",
+             "nb_tracks": 2, "release_date": "2013-01-15", "artist": {"name": "A$AP Rocky"},
+             "tracks": {"data": [
+                 {"title": title, "duration": 372, "artist": {"name": "Yelawolf"}},
+                 {"title": "Fashion Killa", "duration": 236, "artist": {"name": "A$AP Rocky"}}]}}
+    search = {"data": [
+        {"title": title, "duration": 372, "artist": {"name": "Yelawolf"},
+         "album": {"id": 6, "title": "LONG.LIVE.A$AP (Deluxe Version)"}},
+        {"title": "1 Train (Karaoke)", "duration": 372, "artist": {"name": "Singer's Edge"},
+         "album": {"id": 7, "title": "Karaoke"}}]}
+    karaoke = {"id": 7, "title": "Karaoke", "record_type": "album", "nb_tracks": 1,
+               "artist": {"name": "Singer's Edge"}, "tracks": {"data": []}}
+    dz = DeezerClient(session=Http({"/search": search, "/album/6": album, "/album/7": karaoke}))
+    cands = dz.search_tracks("A$AP Rocky", "1 Train (feat. Kendrick Lamar, Joey Bada$$, Yelawolf)")
+    assert [(c.name, c.artist) for c in cands] == [(title, "A$AP Rocky")]
+    tl = dz.get_album_tracklist("dz:6")
+    assert [t.artist for t in tl.tracks] == ["A$AP Rocky", "A$AP Rocky"]
+
+
+def test_a_compilation_keeps_each_tracks_own_artist():
+    from spindle.deezer import _primary
+    assert _primary("Various Artists", "Tiffany", "I Think We're Alone Now") == "Tiffany"
+    assert _primary("Kanye West", "Kanye West", "Runaway (feat. Pusha T)") == "Kanye West"
+    assert _primary("Drake", "21 Savage", "3AM on Glenwood") == "21 Savage"       # his own track

@@ -704,3 +704,44 @@ def test_the_tail_of_the_track_before_inside_the_next_one_is_not_a_replay(clock)
         clock.t = base + 8 * k
         identified(s, album, "Lost In The World", t0, at=clock.t, offset=225.0 + 8 * k)
     assert s.album_state.current_index == 1 and s.album_state.scrobbled == {0}
+
+
+def test_two_answers_from_a_repeated_hook_do_not_outvote_the_two_that_hold_the_start(clock):
+    """F**kin' Problems, 2026-11-09: two right answers, then two from another occurrence of the
+    hook that agree with each other. A tie went to the newer pair and the track ran 11 s off."""
+    album = make_album([234], titles=["Problems"])
+    s = ScrobbleSession(clock=clock, window_seconds=6)
+    t0 = clock.t
+    identified(s, album, "Problems", t0, at=t0 + 14, offset=8.0)
+    identified(s, album, "Problems", t0, at=t0 + 22, offset=16.0)
+    assert s._run_start(album.tracks[0]) == pytest.approx(t0, abs=0.5)
+    identified(s, album, "Problems", t0, at=t0 + 30, offset=12.6)          # the hook, elsewhere
+    identified(s, album, "Problems", t0, at=t0 + 38, offset=20.6)
+    assert s._run_start(album.tracks[0]) == pytest.approx(t0, abs=0.5)     # still the first pair
+    identified(s, album, "Problems", t0, at=t0 + 46, offset=40.0)          # back in step
+    assert s._run_start(album.tracks[0]) == pytest.approx(t0, abs=0.5)
+
+
+def test_a_lock_made_from_discogs_alone_moves_to_the_full_data_for_the_same_pressing(clock):
+    """Side C of Long.Live.A$AP opened on a track no catalogue returned: the lock was the bare
+    Discogs list (no lengths) and stayed that for the whole side though every later track
+    resolved fully."""
+    bare = make_album([None, None, None], titles=["1Train", "Fashion Killa", "Phoenix"],
+                      positions=["C1", "C2", "C3"], owned=True, source="discogs", album_id="dg:9")
+    bare.discogs_release_id = 9
+    full = make_album([372, 236, 234], titles=["1Train", "Fashion Killa", "Phoenix"],
+                      positions=["C1", "C2", "C3"], owned=True, source="merged", album_id="dz:6")
+    full.discogs_release_id = 9
+    s = ScrobbleSession(clock=clock)
+    t0 = clock.t
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(bare, "1Train"), t0, at=clock.t)
+    assert s.album_state.tracklist.source == "discogs"
+    clock.advance(360)
+    for _ in range(2):
+        clock.advance(8)
+        s.on_identified(resolved_for(full, "Fashion Killa"), t0, at=clock.t)
+    al = s.album_state
+    assert al.tracklist.source == "merged" and al.tracklist.tracks[1].duration == 236
+    assert al.current_index == 1

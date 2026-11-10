@@ -70,6 +70,13 @@ NEEDLE_UP_MARGIN_DB = 10.0   # this far under the silence threshold = nothing in
 NEEDLE_UP_SECONDS = 4.0      # ... for this long: the needle has been lifted
 POST_SIDE_IDENTIFY_FIRST = 8.0   # first lookup into post-side sound (real music is found quickly)
 UNLOCKED_RUNOUT_MIN_S = 60.0     # no lock: a lead-out is believed only this far into the session
+# The end of a side by level: a run-out groove is rarely silent (-44 dB on one record, a dB over
+# the threshold, kept "0 s left" on the screen for 12 s until the thump detector agreed), but it is
+# far under the music that was just playing.
+SIDE_END_DROP_DB = 15.0          # this far under the side's own level = the music has stopped
+SIDE_END_EARLY_S = 8.0           # ... believed from this close to the last track's end by the clock
+SIDE_LEVEL_TICKS = 90            # the side's level = the median of this many recent music ticks
+SIDE_LEVEL_MIN_TICKS = 10
 
 # Loud is not enough to be music: an empty turntable (motor, preamp, mains) can
 # sit above the threshold for as long as it spins, with a spectrum that never
@@ -263,6 +270,7 @@ class Player:
         self._needle_up_since: float | None = None
         self._results_floor = 0.0                  # identifications of audio up to here are stale
         self._session_sent = 0                     # scrobbles this session handed to Last.fm
+        self._music_levels: list[float] = []       # level per tick while a track plays
         self._held: tuple[str, float] | None = None   # (key, first seen) of a hit nobody knows
         self._runout_ticks = 0                     # consecutive ticks that sounded like a lead-out
         self._first_hit: tuple[str, float] | None = None   # a session's first hit, unconfirmed
@@ -343,7 +351,38 @@ class Player:
             self._noise_tick(now, reason="the lead-out")
         else:
             self._music_tick(now)
+            if self.phase != Phase.IDLE and self._music_stopped_at_side_end():
+                logger.info("Side over: the level fell to %.1f dB, %.0f dB under this side's",
+                            self.level_db, self._side_level() - self.level_db)
+                self._end_session(now)
         return self._publish(now)
+
+    def _side_level(self) -> float:
+        xs = sorted(self._music_levels)
+        return xs[len(xs) // 2] if xs else self.level_db
+
+    def _music_stopped_at_side_end(self) -> bool:
+        """The clock is at (or within SIDE_END_EARLY_S of) the end of the side's last track and
+        the last STEP seconds are SIDE_END_DROP_DB under the side's own level: the music has
+        stopped, whatever the run-out groove sounds like."""
+        if len(self._music_levels) < SIDE_LEVEL_MIN_TICKS:
+            return False
+        if self.level_db > self._side_level() - SIDE_END_DROP_DB:
+            return False
+        if self._side_over_by_clock():
+            return True
+        s = self.session
+        al = s.album_state if s and s.mode == SessionMode.ALBUM else None
+        if al is None:
+            return False
+        tl = al.tracklist
+        last = (tl.is_side_end(al.current_index) if tl.has_sides
+                else al.current_index >= len(tl.tracks) - 1)
+        cur = tl.get_track_at(al.current_index)
+        if not last or cur is None or not cur.duration:
+            return False
+        left = cur.duration / s.deck_speed() - (self.clock() - al.current_track_start)
+        return left <= SIDE_END_EARLY_S
 
     def _publish(self, now: float) -> ScreenState:
         self.state = self._build_state(now)
@@ -528,6 +567,7 @@ class Player:
                             self.session.deck_speed_samples)
         self._finalize_simple(now)
         self._session_sent = 0
+        self._music_levels = []
 
         self.phase = Phase.IDLE
         self._loud_ticks = 0
@@ -571,6 +611,8 @@ class Player:
 
         if self.playing.track is not None:
             self.phase = Phase.PLAYING
+            self._music_levels.append(self.level_db)
+            del self._music_levels[:-SIDE_LEVEL_TICKS]
 
     # ── album-lock timing ────────────────────────────────────────────────────
 

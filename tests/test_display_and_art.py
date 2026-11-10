@@ -77,3 +77,10 @@ def test_state_identity_and_elapsed():
     assert st.identity() != a
     st.updated_at = time.time() - 10
     assert 39 < st.elapsed_now() < 61
+
+
+def test_art_keys_read_dollar_as_s_and_keep_cyrillic():
+    from spindle.art import ArtProvider, _artist_ok
+    assert _artist_ok("A$AP Rocky", "ASAP Rocky")
+    key = ArtProvider._key
+    assert key("Кино", "Ночь") != key("Кино", "Группа крови")
