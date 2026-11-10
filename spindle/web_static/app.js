@@ -57,11 +57,14 @@
   let endedDismissed = null;              // `at` of an end-of-side card Luka tapped away
   let endedShown = false;
   let lastPhase = "";
+  let wantHome = false;                   // a record came on: the Spindle page is owed
   // The engine confirms a track change a few seconds after it happens (a tick, then a
   // fingerprint). When the start is pinned and the deck speed measured, the clock knows
   // the end to a second: flip the page to the next track on the clock and let the engine
   // catch up. If it disagrees for 10 s, fall back to what it says.
-  let serverState = null, flip = null;    // flip = { index, at (server seconds) }
+  let serverState = null, flip = null;    // flip = { index, at (server seconds), key }
+  let flipHold = "";                      // the track a flip gave up on: no second flip for it
+  const flipKey = (st) => `${st.artist}|${st.album}|${(st.tracklist || []).length}`;
   const nextRowOf = (st) => {
     const rows = st.tracklist || [], i = st.current_index;
     if (i < 0 || i + 1 >= rows.length) return null;
@@ -69,8 +72,16 @@
   };
   function viewOf(st) {
     if (!flip) return st;
-    if (st.current_index >= flip.index || serverNow() - flip.at > 10) { flip = null; return st; }
-    const nxt = st.tracklist[flip.index];
+    const nxt = (st.tracklist || [])[flip.index];
+    const confirmed = st.current_index >= flip.index;
+    // given up: the engine did not follow within 10 s, or the tracklist under the flip changed (a
+    // re-lock, a new session). Falling back and flipping again on the next frame rendered the old
+    // title and the new one 16 ms apart, every 10 s, for as long as the engine held out.
+    if (confirmed || serverNow() - flip.at > 10 || !nxt || flip.key !== flipKey(st)) {
+      if (!confirmed) flipHold = `${flipKey(st)}|${st.current_index}`;
+      flip = null;
+      return st;
+    }
     // the whole identity of the next track, not just its title: the home renders the parsed
     // `base`, so a flip that left the old base behind showed the previous track's name
     return { ...st, title: nxt.title, base: nxt.base || "", featured: nxt.featured || [], version: nxt.version || "",
@@ -111,7 +122,10 @@
   };
   const W = () => window.innerWidth;
   const sample = (arr, n) => { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a.slice(0, n); };
-  const show = (node) => { node.classList.remove("hidden"); M.gsap.set(node, { clearProps: "opacity,visibility" }); };
+  // A closing fade may still be running on the node (closeOverlays() right before an open; a fast
+  // second tap): left alone it ends at opacity 0 on the overlay that was just opened, which is then
+  // open, invisible and eating every tap. The fades are plain tweens, so a scoped kill reaches them.
+  const show = (node) => { M.gsap.killTweensOf(node, "opacity,visibility,autoAlpha"); node.classList.remove("hidden"); M.gsap.set(node, { clearProps: "opacity,visibility" }); };
   const hide = (node) => node.classList.add("hidden");
 
   function rawPosition() {
@@ -189,10 +203,10 @@
     // a tapped-away end card stays away; a record coming on brings the Spindle page
     const ended = st.ended && st.ended.at !== endedDismissed ? st.ended : null;
     const playing = st.phase === "playing";
-    if (playing && lastPhase !== "playing") {
-      closeOverlays();
-      if (pageIndex !== SPINDLE) showPage(SPINDLE, pageIndex === OFF ? 1 : -1);
-    }
+    if (playing && lastPhase !== "playing") { closeOverlays(); wantHome = true; }
+    if (!playing) wantHome = false;
+    // showPage() declines while another page move is in flight; keep asking until it lands
+    if (wantHome && !moving) { wantHome = false; if (pageIndex !== SPINDLE) showPage(SPINDLE, pageIndex === OFF ? 1 : -1); }
     lastPhase = st.phase;
     if (st.phase !== "idle") unprepareShelf();
     el.body.className = `phase-${st.phase}` + (sheetOpen ? " sheet-open" : "") + (ended ? " ended-open" : "");
@@ -381,6 +395,11 @@
   }
   let lastSide = 0, lastBar = 0, lastSec = -1;
   function frame() {
+    // one bad frame must not end the loop: the bar, the clock and the lyrics all hang off it
+    try { frameBody(); } catch (err) { console.error("frame", err); }
+    requestAnimationFrame(frame);
+  }
+  function frameBody() {
     if (state && state.phase === "playing") {
       const p = position();
       const now = performance.now();
@@ -403,16 +422,15 @@
       // the page flips to the next track on the clock, before the engine confirms it: at the
       // end once the start is pinned (deck speed measured or assumed 1.0), a second past it
       // otherwise. Vinyl has no gap; "-0:00" for three seconds read as a lag (Luka, 2026-11-08)
-      if (!flip && state.track_duration && serverState) {
+      if (!flip && state.track_duration && serverState && flipHold !== `${flipKey(state)}|${state.current_index}`) {
         const raw = rawPosition();
         const margin = state.start_exact ? 0.2 : 1.0;
         if (raw != null && raw >= state.track_duration + margin && nextRowOf(state)) {
-          flip = { index: state.current_index + 1, at: serverNow() };
+          flip = { index: state.current_index + 1, at: serverNow(), key: flipKey(state) };
           apply(serverState);
         }
       }
     }
-    requestAnimationFrame(frame);
   }
 
   // ── lyrics ───────────────────────────────────────────────────────────────
@@ -607,7 +625,7 @@
     else if (pr && pr.price_usd != null) { priceN = `$${Math.round(pr.price_usd)}`; priceS = `lowest · ${pr.for_sale || 0} for sale`; }
     const priceHtml = priceN ? `<div class="mprice"><div class="n">${priceN}</div><div class="s">${priceS}</div></div>` : "";
     const mast = `<div class="mast">${art ? `<img class="mcover" src="${art}">` : ""}` +
-      `<div><div class="mkick">${kick}</div><h1>${esc((state && state.album) || "")}</h1><div class="msub">${press}</div></div>${priceHtml}</div>`;
+      `<div><div class="mkick">${kick}</div><h1>${esc((state && (state.album_display || state.album)) || "")}</h1><div class="msub">${press}</div></div>${priceHtml}</div>`;
 
     const isTrans = g.url && /[çc]eviri|traduc|translation|перевод/i.test(g.url);
     const story = (g.story && !isTrans) ? esc(g.story).replace(/\n\n/g, "<br><br>")
@@ -810,6 +828,7 @@
   }
 
   function closePick() {
+    if (!pickOpen) return;
     pickSerial++;
     if (wheelTl) { wheelTl.kill(); wheelTl = null; }
     pickOpen = false; pickCard = null;
@@ -936,6 +955,7 @@
   }
   // Closed, the shelf fades to nothing and stays laid out while the platter is idle; see prepareShelf.
   function closeShelf() {
+    if (!shelfOpen) return;
     shelfOpen = false;
     el.shelf.classList.add("prepared");
     M.fade(el.shelf, WARM, { duration: 0.3, keep: true }).then(() => { if (!shelfOpen && (!state || state.phase !== "idle")) unprepareShelf(); });
@@ -974,7 +994,7 @@
     }).join("");
     M.arrive(el.recentlist.children, { x: -26, y: 0, stagger: 0.06, duration: 0.8 });
   }
-  function closeRecent() { recentOpen = false; M.leave(el.recent, { duration: 0.3, onComplete: () => { if (!recentOpen) hide(el.recent); } }); }
+  function closeRecent() { if (!recentOpen) return; recentOpen = false; M.leave(el.recent, { duration: 0.3, onComplete: () => { if (!recentOpen) hide(el.recent); } }); }
 
   function closeOverlays() { hideIdle(); closePick(); closeShelf(); closeRecent(); }
 

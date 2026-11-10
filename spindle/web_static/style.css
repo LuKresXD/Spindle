@@ -225,7 +225,9 @@ body.ended-open #home { opacity: 0; }
 .kicker { text-transform: uppercase; letter-spacing: .16em; font-weight: 700; font-size: 22px; color: rgba(255,255,255,.45); }
 .pill svg { width: 30px; height: 30px; flex: none; }
 .pill.big svg { width: 34px; height: 34px; }
-.row { display: flex; gap: 14px; }
+/* the pick card's buttons. Its own class: as a second `.row` rule this one overrode the tracklist's
+   grid further up and the durations lost their column (2026-11-08 to 11-09) */
+.btnrow { display: flex; gap: 14px; }
 .imuted { color: rgba(255,255,255,.45); font-weight: 500; }
 
 /* nothing on the platter: the controls a tap reveals -------------------------- */
@@ -258,7 +260,7 @@ body.ended-open #home { opacity: 0; }
 /* the two fact lines keep their slot while the slower facts arrive, so nothing below moves */
 .pickmeta { font-size: 26px; margin-top: 22px; min-height: 34px; line-height: 34px; }
 .pickmeta + .pickmeta { margin-top: 6px; }
-.landed .row { margin-top: 56px; }
+.landed .btnrow { margin-top: 56px; }
 .hint { font-size: 24px; font-weight: 500; color: rgba(255,255,255,.5); margin-top: 44px; }
 
 /* the shelf and the recent list ------------------------------------------------ */

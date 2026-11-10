@@ -40,18 +40,33 @@ window.Motion = (() => {
 
   // ── reveals ───────────────────────────────────────────────────────────────
   // Text arrives through a mask: each line slides up out of an overflow-hidden wrapper.
-  function revealLines(el, { delay = 0, stagger = 0.075, duration = 1 } = {}) {
-    if (!el || !el.textContent.trim()) return null;
-    const split = SplitText.create(el, { type: "lines", mask: "lines", linesClass: "sl" });
-    return gsap.from(split.lines, { yPercent: 110, duration: D(duration), ease: SETTLE, stagger, delay,
-      onComplete: () => split.revert() });
+  // SplitText keeps the element's ORIGINAL content and puts it back when the element is split again
+  // or reverted. A second reveal while the first is still running (the caller has already written
+  // the new text) therefore brought the OLD text back for good: the previous track's title stayed
+  // on screen. So a running reveal is finished off first: its split is undone, then the text the
+  // caller wrote is written again, and only then is the element split anew.
+  const revealing = new WeakMap();        // element -> { split, tween } of the reveal still running
+  function settleReveal(el) {
+    const live = revealing.get(el);
+    if (!live) return;
+    revealing.delete(el);
+    const text = el.textContent;          // what the caller wants shown now
+    live.tween.kill();
+    live.split.revert();                  // puts the previous text back...
+    el.textContent = text;                // ...so write the new one again
   }
-  function revealWords(el, { delay = 0, stagger = 0.06, duration = 1 } = {}) {
-    if (!el || !el.textContent.trim()) return null;
-    const split = SplitText.create(el, { type: "words", mask: "words", wordsClass: "sw" });
-    return gsap.from(split.words, { yPercent: 110, duration: D(duration), ease: SETTLE, stagger, delay,
-      onComplete: () => split.revert() });
+  function reveal(el, type, cls, { delay = 0, stagger = 0.075, duration = 1 } = {}) {
+    if (!el) return null;
+    settleReveal(el);
+    if (!el.textContent.trim()) return null;
+    const split = SplitText.create(el, { type, mask: type, [type + "Class"]: cls });
+    const tween = gsap.from(split[type], { yPercent: 110, duration: D(duration), ease: SETTLE, stagger, delay,
+      onComplete: () => { if (revealing.get(el) && revealing.get(el).split === split) revealing.delete(el); split.revert(); } });
+    revealing.set(el, { split, tween });
+    return tween;
   }
+  function revealLines(el, opts = {}) { return reveal(el, "lines", "sl", opts); }
+  function revealWords(el, { delay = 0, stagger = 0.06, duration = 1 } = {}) { return reveal(el, "words", "sw", { delay, stagger, duration }); }
   // A set of elements arrives: a short rise and a fade, a beat apart.
   // GSAP 3.15 on the kiosk: a tween with `stagger` (even for ONE target) is a wrapper around a
   // timeline, and gsap.killTweensOf() does not reach it (full or property-scoped), so a running
