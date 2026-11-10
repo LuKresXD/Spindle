@@ -138,3 +138,49 @@ def test_config_ignores_unknown_keys_and_reads_session_key(caplog):
     assert cfg.fingerprint.corrections == "corrections.yaml"
     msgs = " ".join(r.message for r in caplog.records)
     assert "typo_key" in msgs and "bogus_section" in msgs
+
+
+def test_a_scrobble_last_fm_ignores_is_reported_not_logged_as_sent(tmp_path, caplog):
+    from spindle import scrobbler as mod
+    errors.clear()
+    s = make(tmp_path, [])
+
+    def ignore(**kw):
+        raise mod.Ignored("1")
+    s.network.scrobble = ignore
+    with caplog.at_level(logging.INFO):
+        s.scrobble(TrackInfo(title="1Train", artist="ASAP Rocky", source="discogs"), 1)
+    assert s.sent == 0 and s.failed == 1 and s.queue_size() == 0
+    assert errors and "did not count" in errors[0] and "artist ignored" in errors[0]
+    assert not any("Scrobbled:" in r.message for r in caplog.records)
+
+
+def test_the_raw_scrobble_reads_the_verdict(monkeypatch):
+    from xml.dom import minidom
+
+    from spindle import scrobbler as mod
+
+    class Req:
+        answer = ""
+
+        def __init__(self, network, method, params):
+            self.params = params
+
+        def sign_it(self):
+            pass
+
+        def execute(self, cacheable):
+            return minidom.parseString(Req.answer)
+
+    monkeypatch.setattr(mod.pylast, "_Request", Req)
+    wrap = '<lfm status="ok"><scrobbles accepted="{a}" ignored="{i}"><scrobble>{m}</scrobble></scrobbles></lfm>'
+    ok = wrap.format(a=1, i=0, m='<ignoredMessage code="0"/>')
+    no = wrap.format(a=0, i=1, m='<ignoredMessage code="1">x</ignoredMessage>')
+    Req.answer = ok
+    mod._raw_scrobble(None, "A", "B", 1, "", 0)
+    Req.answer = no
+    try:
+        mod._raw_scrobble(None, "A", "B", 1, "", 0)
+        raise AssertionError("an ignored play must raise")
+    except mod.Ignored as e:
+        assert e.code == "1"

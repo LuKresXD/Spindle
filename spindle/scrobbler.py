@@ -55,6 +55,41 @@ class Rejected(Exception):
     """Last.fm refused the scrobble for good; do not retry."""
 
 
+_IGNORED_WHY = {"1": "artist ignored", "2": "track ignored", "3": "timestamp too old",
+                "4": "timestamp too new", "5": "daily scrobble limit"}
+
+
+class Ignored(Exception):
+    """Last.fm answered 200 and did not count the play. pylast's scrobble() cannot tell: two
+    plays sent under Discogs' spelling of an artist were logged as scrobbled and never
+    appeared (2026-11-09)."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(f"ignored by Last.fm ({_IGNORED_WHY.get(code, 'code ' + code)})")
+
+
+def _raw_scrobble(network: pylast.LastFMNetwork, artist: str, title: str, ts: int, album: str,
+                  duration: int) -> None:
+    """track.scrobble through pylast's signed request, reading the accepted / ignored verdict."""
+    params = {"artist[0]": artist, "track[0]": title, "timestamp[0]": str(int(ts))}
+    if album:
+        params["album[0]"] = album
+    if duration:
+        params["duration[0]"] = str(int(duration))
+    req = pylast._Request(network, "track.scrobble", params)
+    req.sign_it()
+    doc = req.execute(False)
+    try:
+        ignored = int(doc.getElementsByTagName("scrobbles")[0].getAttribute("ignored") or 0)
+        msgs = doc.getElementsByTagName("ignoredMessage")
+        code = msgs[0].getAttribute("code") if msgs else ""
+    except (IndexError, ValueError, AttributeError):
+        return                                   # an answer without a verdict: taken as sent
+    if ignored:
+        raise Ignored(code or "?")
+
+
 def _classify(e: Exception) -> str:
     """'retry' for connectivity / temporary trouble, 'auth' when Last.fm refuses the
     credentials (the play is kept), 'reject' for final refusals of the play itself."""
@@ -319,11 +354,15 @@ class Scrobbler:
         track = self.canonicalize(track)
         track_key = f"{track.artist} - {track.title}"
         try:
-            self.network.scrobble(artist=track.artist, title=track.title, timestamp=ts,
-                                  album=track.album or "", duration=track.duration or 0)
+            self._send(track.artist, track.title, ts, track.album or "", track.duration or 0)
             self.sent += 1
             logger.info("Scrobbled: %s", track_key)
             self._maybe_flush()
+        except Ignored as e:
+            self.failed += 1
+            logger.warning("Scrobble NOT counted, %s: %s", e, track_key)
+            if self.on_error:
+                self.on_error("Last.fm did not count a scrobble", f"{track_key} · {e}")
         except Exception as e:
             kind = _classify(e)
             if kind in ("retry", "auth"):
@@ -337,6 +376,15 @@ class Scrobbler:
                 logger.error("Scrobble REJECTED by Last.fm, dropped: %s — %s", track_key, e)
                 if self.on_error:
                     self.on_error("Last.fm rejected a scrobble", f"{track_key} · {e}")
+
+    def _send(self, artist: str, title: str, ts: int, album: str, duration: int) -> None:
+        """One scrobble to Last.fm. Raises Ignored when it answered but did not count it."""
+        assert self.network is not None
+        if isinstance(self.network, pylast.LastFMNetwork):
+            _raw_scrobble(self.network, artist, title, int(ts), album, int(duration or 0))
+        else:                                    # a stand-in network (tests)
+            self.network.scrobble(artist=artist, title=title, timestamp=ts, album=album,
+                                  duration=duration)
 
     def _auth_notice(self, e: Exception) -> None:
         """Tell the log channel, at most once an hour, that Last.fm refuses the credentials."""
@@ -366,9 +414,8 @@ class Scrobbler:
                 self._queue.remove(entry)
                 continue
             try:
-                self.network.scrobble(artist=entry["artist"], title=entry["title"],
-                                      timestamp=entry["timestamp"], album=entry.get("album", ""),
-                                      duration=entry.get("duration", 0))
+                self._send(entry["artist"], entry["title"], entry["timestamp"],
+                           entry.get("album", ""), entry.get("duration", 0))
                 self._queue.remove(entry)              # off the disk only once Last.fm has it
                 sent += 1
                 self.sent += 1
